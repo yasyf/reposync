@@ -1,0 +1,49 @@
+package cli
+
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"github.com/yasyf/reposync/internal/reconcile"
+	"github.com/yasyf/reposync/internal/state"
+)
+
+func newReconcileCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reconcile",
+		Short: "Clone every missing repo and idle-sync every present one.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			results, err := reconcile.Reconcile(cmd.Context(), st)
+			if err != nil {
+				return err
+			}
+			if err := printReconcile(results); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+func printReconcile(results []reconcile.Result) error {
+	failed := 0
+	for _, r := range results {
+		if r.Err != nil {
+			fmt.Printf("✗ %s %s: %v\n", r.Action, r.Relpath, r.Err)
+			failed++
+			continue
+		}
+		fmt.Printf("%s %s\n", r.Action, r.Relpath)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d repo(s) failed to reconcile", failed)
+	}
+	return nil
+}

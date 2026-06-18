@@ -8,10 +8,14 @@ Keep git repos in sync across your remote hosts.
 reposync/
 ├── main.go              # Entrypoint; injects the release version into the CLI
 ├── internal/
-│   ├── cli/             # Cobra commands: sync, install, uninstall, config
-│   ├── config/          # YAML config loading, defaults, and validation
-│   ├── sync/            # Per-repo git fetch / fast-forward / push logic
-│   └── service/         # launchd agent plist generation, install, uninstall
+│   ├── state/           # JSON state at ~/.config/reposync: hosts, repos, settings; atomic save + flock
+│   ├── vcs/             # Verified jj+git layer: detect, in-use, trunk, safe-advance, clone
+│   ├── sync/            # Idle-safe per-repo fetch + fast-forward; never pushes, never clobbers
+│   ├── reconcile/       # Clone-if-missing (temp→rename) + idle-sync; per-host flock
+│   ├── host/            # Cross-host registration: SSH bootstrap, self-identity, state propagation
+│   ├── watch/           # fsnotify daemon: debounce, dedupe-by-hash, peer-notify on trunk change
+│   ├── service/         # launchd plist generation for the reconcile tick + watch daemon
+│   └── cli/             # Cobra wiring: root, repo, host, sync, reconcile, watch, install/uninstall
 ├── .goreleaser.yaml     # Cross-platform build + Homebrew cask release
 ├── .github/workflows/   # ci.yml (vet/test/build) and release.yml (goreleaser)
 ├── docs/assets/         # Mascot logo, README banner, social-preview card

@@ -2,48 +2,62 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/internal/config"
 	"github.com/yasyf/reposync/internal/service"
+	"github.com/yasyf/reposync/internal/state"
 )
 
 func newInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var tickOnly bool
+	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install reposync as a launchd agent that syncs on the configured interval",
+		Short: "Install the launchd reconcile tick and watch daemon LaunchAgents.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(configPath)
-			if err != nil {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := service.Install(cmd.Context(), service.NewLauncher(), tickOnly); err != nil {
 				return err
 			}
-
-			plist, err := service.Install(configPath, cfg.Interval.AsDuration())
-			if err != nil {
-				return err
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "installed launchd agent at %s (every %s)\n", plist, cfg.Interval.AsDuration())
-			return nil
+			return printInstalled(tickOnly)
 		},
 	}
+	cmd.Flags().BoolVar(&tickOnly, "tick-only", false, "install only the reconcile tick, not the watch daemon")
+	return cmd
 }
 
 func newUninstallCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Remove the reposync launchd agent",
+		Short: "Unload and remove the reposync LaunchAgents.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			plist, err := service.Uninstall()
-			if err != nil {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := service.Uninstall(cmd.Context(), service.NewLauncher()); err != nil {
 				return err
 			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "removed launchd agent at %s\n", plist)
+			fmt.Println("uninstalled reposync LaunchAgents")
 			return nil
 		},
 	}
+	return cmd
+}
+
+func printInstalled(tickOnly bool) error {
+	st, err := state.Load()
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	agents := filepath.Join(home, "Library", "LaunchAgents")
+	fmt.Printf("installed tick %s (every %s)\n", filepath.Join(agents, service.TickLabel+".plist"), time.Duration(st.Settings.Interval))
+	if !tickOnly {
+		fmt.Printf("installed watch %s\n", filepath.Join(agents, service.WatchLabel+".plist"))
+	}
+	return nil
 }

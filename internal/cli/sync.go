@@ -5,36 +5,48 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/internal/config"
+	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/sync"
 )
 
 func newSyncCmd() *cobra.Command {
-	return &cobra.Command{
+	var repoFilter, origin string
+	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Sync every configured repo with its remote once",
+		Short: "Idle-safe fetch and fast-forward of every registered repo (never pushes).",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(configPath)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := state.Load()
 			if err != nil {
 				return err
 			}
-
-			results := sync.All(cmd.Context(), cfg)
+			results, err := sync.Sync(cmd.Context(), st, repoFilter, origin)
+			if err != nil {
+				return err
+			}
 			failed := 0
 			for _, r := range results {
 				if r.Err != nil {
+					fmt.Printf("✗ %s: %v\n", r.Relpath, r.Err)
 					failed++
-					fmt.Fprintf(cmd.ErrOrStderr(), "✗ %s: %v\n", r.Repo.Path, r.Err)
 					continue
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "✓ %s: %s\n", r.Repo.Path, r.State)
+				fmt.Printf("✓ %s: %s\n", r.Relpath, outcomeLabel(r))
 			}
-
 			if failed > 0 {
-				return fmt.Errorf("%d of %d repos failed to sync", failed, len(results))
+				return fmt.Errorf("%d repo(s) failed to sync", failed)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&repoFilter, "repo", "", "sync only this repo (path or relpath)")
+	cmd.Flags().StringVar(&origin, "origin", "", "anti-echo provenance tag from the notifying peer")
+	return cmd
+}
+
+func outcomeLabel(r sync.Result) string {
+	if r.Reason != "" {
+		return fmt.Sprintf("%s (%s)", r.Outcome, r.Reason)
+	}
+	return string(r.Outcome)
 }
