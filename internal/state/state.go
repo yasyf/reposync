@@ -18,6 +18,7 @@ const (
 	configSubdir = "reposync"
 	stateFile    = "state.json"
 	lockFile     = "reconcile.lock"
+	sockFile     = "rpc.sock"
 
 	defaultLocation      = "~/Code"
 	defaultInterval      = 15 * time.Minute
@@ -209,6 +210,15 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, stateFile), nil
+}
+
+// SockPath returns the absolute path to the daemon's RPC unix socket.
+func SockPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, sockFile), nil
 }
 
 // Load reads the state file, returning defaults when it does not yet exist.

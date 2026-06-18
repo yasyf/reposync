@@ -60,7 +60,7 @@ repo was active within the idle threshold. A dirty or busy repo is skipped, not
 overwritten.
 
 Two triggers drive the timer. A launchd tick reconciles every 15 minutes, so an
-offline peer self-heals when it comes back. Between ticks, an fsnotify watch
+offline peer self-heals when it comes back. Between ticks, a watchman-backed watch
 daemon notices a trunk change within seconds and notifies peers to pull that one
 repo.
 

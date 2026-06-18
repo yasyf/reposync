@@ -142,11 +142,12 @@ func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Re
 	})
 }
 
-// RemoteReconcile triggers reconcile on every registered peer; a down host is
-// logged into the returned error and does not abort the others.
+// RemoteReconcile triggers a reconcile on every registered peer's resident daemon
+// over its RPC socket; a down host is logged into the returned error and does not
+// abort the others.
 func RemoteReconcile(ctx context.Context, st *state.State, r Runner) error {
 	return eachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
-		_, err := r.SSH(ctx, target, "reposync reconcile")
+		_, err := r.SSH(ctx, target, "reposync rpc reconcile")
 		return err
 	})
 }
@@ -203,7 +204,7 @@ func eachHost(ctx context.Context, hosts []string, fn func(ctx context.Context, 
 func addRemoteCmd(repo state.Repo) string {
 	return fmt.Sprintf(
 		"reposync repo add-remote --origin %s --relpath %s --trunk %s",
-		shellQuote(repo.Origin), shellQuote(repo.Relpath), shellQuote(repo.Trunk),
+		ShellQuote(repo.Origin), ShellQuote(repo.Relpath), ShellQuote(repo.Trunk),
 	)
 }
 
@@ -220,6 +221,8 @@ func isNoSuchCask(msg string) bool {
 		strings.Contains(m, "no formulae")
 }
 
-func shellQuote(s string) string {
+// ShellQuote single-quotes s so it survives intact as one argument to a remote
+// shell, escaping any embedded single quotes.
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

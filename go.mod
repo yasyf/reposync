@@ -3,7 +3,6 @@ module github.com/yasyf/reposync
 go 1.26.4
 
 require (
-	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gofrs/flock v0.13.0
 	github.com/spf13/cobra v1.10.2
 )

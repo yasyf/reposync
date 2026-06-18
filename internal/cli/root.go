@@ -37,6 +37,7 @@ func newRoot(version string) *cobra.Command {
 		newHostCmd(),
 		newSyncCmd(),
 		newReconcileCmd(),
+		newRPCCmd(),
 		newWatchCmd(),
 		newInstallCmd(),
 		newUninstallCmd(),

@@ -13,9 +13,10 @@ reposync/
 │   ├── sync/            # Idle-safe per-repo fetch + fast-forward; never pushes, never clobbers
 │   ├── reconcile/       # Clone-if-missing (temp→rename) + idle-sync; per-host flock
 │   ├── host/            # Cross-host registration: SSH bootstrap, self-identity, state propagation
-│   ├── watch/           # fsnotify daemon: debounce, dedupe-by-hash, peer-notify on trunk change
+│   ├── rpc/             # Daemon RPC over a unix socket: peers trigger local sync/reconcile, not SSH-per-command
+│   ├── watch/           # watchman daemon: debounce, dedupe-by-hash, peer-notify; also serves the RPC socket
 │   ├── service/         # launchd plist generation for the reconcile tick + watch daemon
-│   └── cli/             # Cobra wiring: root, repo, host, sync, reconcile, watch, install/uninstall
+│   └── cli/             # Cobra wiring: root, repo, host, sync, reconcile, rpc, watch, install/uninstall
 ├── .goreleaser.yaml     # Cross-platform build + Homebrew cask release
 ├── .github/workflows/   # ci.yml (vet/test/build) and release.yml (goreleaser)
 ├── docs/assets/         # Mascot logo, README banner, social-preview card

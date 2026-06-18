@@ -326,7 +326,7 @@ func TestRemoteReconcileDownHostContinues(t *testing.T) {
 	st.Hosts = []string{"up@host", "down@host"}
 
 	r := newFakeRunner().
-		onSSH("reposync reconcile", "", nil)
+		onSSH("reposync rpc reconcile", "", nil)
 	// scripted by substring match above returns nil for both; override down host
 	// by routing through a wrapper that fails one target.
 	wrapped := &targetFailingRunner{Runner: r, failTarget: "down@host"}

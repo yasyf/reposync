@@ -41,6 +41,9 @@ homebrew_casks:
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/yasyf/reposync
     description: Keep git repos in sync across your remote hosts.
+    # The watch daemon shells out to watchman for filesystem subscriptions.
+    dependencies:
+      - formula: watchman
     # Strip the quarantine attribute so the unsigned binary runs on first launch.
     hooks:
       post:

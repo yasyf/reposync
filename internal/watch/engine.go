@@ -43,7 +43,7 @@ func realNewTimer(d time.Duration, fn func()) timer {
 	return realTimer{t: time.AfterFunc(d, fn)}
 }
 
-// engine is the pure debounce + dedupe + notify core, free of any fsnotify or
+// engine is the pure debounce + dedupe + notify core, free of any watchman or
 // ssh wiring. onEvent coalesces a burst of events per repo into a single
 // evaluate; evaluate resolves trunk truth, dedupes by hash, and fans out to
 // every peer. The boundaries (Resolver, Notifier, newTimer) are injected so the

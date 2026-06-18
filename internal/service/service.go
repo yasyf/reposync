@@ -185,6 +185,9 @@ func Install(ctx context.Context, l Loader, tickOnly bool) error {
 	if tickOnly {
 		return nil
 	}
+	if _, err := exec.LookPath("watchman"); err != nil {
+		return fmt.Errorf("watchman is required by the watch daemon but was not found (install it or pass --tick-only): %w", err)
+	}
 	return writeAndLoad(ctx, l, agentsDir, WatchLabel, func() (string, error) { return watchPlist(exe) })
 }
 
