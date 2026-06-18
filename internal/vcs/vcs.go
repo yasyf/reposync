@@ -21,6 +21,9 @@ const defaultTrunk = "main"
 // ErrNoOrigin is returned by Origin when the repo has no origin remote.
 var ErrNoOrigin = errors.New("no origin remote")
 
+// ErrNotARepo is returned by Open when path is neither a colocated jj nor a git repo.
+var ErrNotARepo = errors.New("not a repo")
+
 // Outcome reports what Advance did to the working copy.
 type Outcome string
 
@@ -69,7 +72,7 @@ func Open(path, trunk string) (Repo, error) {
 	if isDir(filepath.Join(abs, ".git")) {
 		return &gitRepo{path: abs, trunk: trunk}, nil
 	}
-	return nil, fmt.Errorf("not a repo: %s", abs)
+	return nil, fmt.Errorf("%w: %s", ErrNotARepo, abs)
 }
 
 // Clone clones origin into dest as a colocated jj repo (.git + .jj), regardless

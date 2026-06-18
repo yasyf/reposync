@@ -367,6 +367,132 @@ func TestRemoveHost(t *testing.T) {
 	}
 }
 
+func TestVerify(t *testing.T) {
+	cases := []struct {
+		name             string
+		runner           *fakeRunner
+		wantReachable    bool
+		wantBootstrapped bool
+		wantVersion      string
+		wantErr          bool
+	}{
+		{
+			name: "bootstrapped",
+			runner: newFakeRunner().
+				onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+				onSSH("reposync --version", "reposync 1.2.3\n", nil),
+			wantReachable:    true,
+			wantBootstrapped: true,
+			wantVersion:      "reposync 1.2.3",
+		},
+		{
+			name: "reachable but not installed",
+			runner: newFakeRunner().
+				onSSH("command -v reposync", "", errors.New("exit status 1")).
+				onSSH("true", "", nil),
+			wantReachable:    true,
+			wantBootstrapped: false,
+		},
+		{
+			name: "unreachable",
+			runner: newFakeRunner().
+				onSSH("command -v reposync", "", errors.New("exit status 1")).
+				onSSH("true", "", errors.New("connection refused")),
+			wantReachable:    false,
+			wantBootstrapped: false,
+			wantErr:          true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := Verify(context.Background(), tc.runner, "yasyf@host")
+			if res.Target != "yasyf@host" {
+				t.Fatalf("Target = %q, want %q", res.Target, "yasyf@host")
+			}
+			if res.Reachable != tc.wantReachable {
+				t.Fatalf("Reachable = %v, want %v", res.Reachable, tc.wantReachable)
+			}
+			if res.Bootstrapped != tc.wantBootstrapped {
+				t.Fatalf("Bootstrapped = %v, want %v", res.Bootstrapped, tc.wantBootstrapped)
+			}
+			if res.Version != tc.wantVersion {
+				t.Fatalf("Version = %q, want %q", res.Version, tc.wantVersion)
+			}
+			if tc.wantErr && res.Err == nil {
+				t.Fatal("expected Err to be set")
+			}
+			if !tc.wantErr && res.Err != nil {
+				t.Fatalf("unexpected Err: %v", res.Err)
+			}
+		})
+	}
+}
+
+func TestVerifyVersionProbeError(t *testing.T) {
+	r := newFakeRunner().
+		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		onSSH("reposync --version", "", errors.New("exit status 2"))
+
+	res := Verify(context.Background(), r, "yasyf@host")
+	if !res.Reachable || !res.Bootstrapped {
+		t.Fatalf("install succeeded, want reachable+bootstrapped, got %+v", res)
+	}
+	if res.Version != "" {
+		t.Fatalf("Version = %q, want empty on probe error", res.Version)
+	}
+	if res.Err != nil {
+		t.Fatalf("version probe error must not surface: %v", res.Err)
+	}
+}
+
+func TestVerifyAll(t *testing.T) {
+	hosts := []string{"up@one", "down@two", "up@three"}
+
+	r := newFakeRunner().
+		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		onSSH("reposync --version", "reposync 1.0.0\n", nil)
+	wrapped := &targetFailingRunner{Runner: r, failTarget: "down@two"}
+
+	got := VerifyAll(context.Background(), wrapped, hosts)
+	if len(got) != len(hosts) {
+		t.Fatalf("got %d results, want %d", len(got), len(hosts))
+	}
+	for i, h := range hosts {
+		if got[i].Target != h {
+			t.Fatalf("result[%d].Target = %q, want %q (order not preserved)", i, got[i].Target, h)
+		}
+	}
+	if !got[0].Reachable || !got[0].Bootstrapped {
+		t.Fatalf("up@one should be green, got %+v", got[0])
+	}
+	if !got[2].Reachable || !got[2].Bootstrapped {
+		t.Fatalf("up@three should be green, got %+v", got[2])
+	}
+	if got[1].Reachable || got[1].Bootstrapped || got[1].Err == nil {
+		t.Fatalf("down@two should be red with Err set, got %+v", got[1])
+	}
+}
+
+func TestAddHostStreamEmitsEveryStep(t *testing.T) {
+	st := emptyState(t)
+	st.Repos = []state.Repo{
+		{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"},
+	}
+
+	r := newFakeRunner().
+		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		defaultSSH("", nil)
+
+	var streamed []string
+	log, err := AddHostStream(context.Background(), st, r, "yasyf@yasyf-home", "yasyf@yasyf", false, func(msg string) {
+		streamed = append(streamed, msg)
+	})
+	if err != nil {
+		t.Fatalf("AddHostStream: %v", err)
+	}
+	assertSeq(t, streamed, log)
+}
+
 // targetFailingRunner wraps a Runner and and forces SSH to one target to fail,
 // exercising the down-host-continues path without ordering assumptions.
 type targetFailingRunner struct {

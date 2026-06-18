@@ -10,8 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/reposync/internal/apply"
+	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/host"
-	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
@@ -21,7 +22,42 @@ func newRepoCmd() *cobra.Command {
 		Use:   "repo",
 		Short: "Register, list, and unregister tracked repositories.",
 	}
-	cmd.AddCommand(newRepoAddCmd(), newRepoAddRemoteCmd(), newRepoRmCmd(), newRepoLsCmd())
+	cmd.AddCommand(newRepoAddCmd(), newRepoAddRemoteCmd(), newRepoRmCmd(), newRepoLsCmd(), newRepoDiscoverCmd())
+	return cmd
+}
+
+func newRepoDiscoverCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "discover",
+		Short: "List git/jj repos under default_location and whether each is tracked.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			res, err := discover.Repos(cmd.Context(), st)
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "RELPATH\tORIGIN\tKIND\tTRACKED")
+			for _, c := range res.Candidates {
+				origin := c.Origin
+				if origin == "" {
+					origin = "(local-only)"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", c.Relpath, origin, c.Kind, c.Tracked)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			for _, s := range res.Skipped {
+				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %s: %s\n", s.Name, s.Reason)
+			}
+			return nil
+		},
+	}
 	return cmd
 }
 
@@ -74,34 +110,17 @@ func runRepoAdd(ctx context.Context, path string, localOnly bool) error {
 	}
 
 	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly}
-	st, err = state.Update(func(s *state.State) error {
-		s.UpsertRepo(repo)
-		return nil
+	results, applyErr := apply.ApplyRepos(ctx, host.NewExecRunner(), apply.RepoSelection{
+		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly}},
 	})
-	if err != nil {
-		return err
+	if results == nil {
+		return applyErr
 	}
 	fmt.Printf("registered %s (origin %s)\n", relpath, originLabel(repo))
-
-	if localOnly {
-		return nil
+	if applyErr != nil {
+		fmt.Printf("WARN propagate/reconcile peers: %v\n", applyErr)
 	}
-
-	runner := host.NewExecRunner()
-	if err := host.PropagateRepo(ctx, st, runner, repo); err != nil {
-		fmt.Printf("WARN propagate %s to peers: %v\n", relpath, err)
-	}
-	results, err := reconcile.Reconcile(ctx, st)
-	if err != nil {
-		return err
-	}
-	if err := printReconcile(results); err != nil {
-		return err
-	}
-	if err := host.RemoteReconcile(ctx, st, runner); err != nil {
-		fmt.Printf("WARN reconcile peers: %v\n", err)
-	}
-	return nil
+	return printReconcile(results)
 }
 
 func newRepoAddRemoteCmd() *cobra.Command {

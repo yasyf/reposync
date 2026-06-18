@@ -15,7 +15,7 @@ func newHostCmd() *cobra.Command {
 		Use:   "host",
 		Short: "Register, list, and unregister peer hosts.",
 	}
-	cmd.AddCommand(newHostAddCmd(), newHostRmCmd(), newHostLsCmd())
+	cmd.AddCommand(newHostAddCmd(), newHostRmCmd(), newHostLsCmd(), newHostVerifyCmd())
 	return cmd
 }
 
@@ -75,6 +75,40 @@ func newHostLsCmd() *cobra.Command {
 				fmt.Fprintln(w, h)
 			}
 			return w.Flush()
+		},
+	}
+	return cmd
+}
+
+func newHostVerifyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Probe each registered host for ssh reachability, reposync install, and version.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			results := host.VerifyAll(cmd.Context(), host.NewExecRunner(), st.Hosts)
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "HOST\tREACHABLE\tBOOTSTRAPPED\tVERSION")
+			for _, v := range results {
+				version := v.Version
+				if version == "" {
+					version = "-"
+				}
+				fmt.Fprintf(w, "%s\t%t\t%t\t%s\n", v.Target, v.Reachable, v.Bootstrapped, version)
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			for _, v := range results {
+				if v.Err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %v\n", v.Target, v.Err)
+				}
+			}
+			return nil
 		},
 	}
 	return cmd

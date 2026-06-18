@@ -172,7 +172,7 @@ func TestReconcileClonesAbsentRepo(t *testing.T) {
 		t.Fatalf("origin = %q, want %q", origin, h.origin)
 	}
 	// Temp staging directory is cleaned up.
-	if h.exists(filepath.Join(h.dataLoc, tmpDirName)) {
+	if h.exists(filepath.Join(h.dataLoc, TmpDirName)) {
 		t.Fatal(".reposync-tmp left behind after reconcile")
 	}
 }
@@ -294,7 +294,7 @@ func TestReconcileNonRepoDirCollisionNotOverwritten(t *testing.T) {
 	if got := h.readFile(dest, "PRECIOUS.txt"); got != "keep me\n" {
 		t.Fatalf("collision dir file changed to %q", got)
 	}
-	if h.exists(filepath.Join(h.dataLoc, tmpDirName)) {
+	if h.exists(filepath.Join(h.dataLoc, TmpDirName)) {
 		t.Fatal(".reposync-tmp left behind after collision")
 	}
 }

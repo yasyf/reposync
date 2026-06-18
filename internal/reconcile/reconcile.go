@@ -18,7 +18,9 @@ import (
 	"github.com/yasyf/reposync/internal/vcs"
 )
 
-const tmpDirName = ".reposync-tmp"
+// TmpDirName is the bookkeeping subdirectory reconcile creates under the
+// default location for staging clones; scanners should skip it.
+const TmpDirName = ".reposync-tmp"
 
 const (
 	// ActionCloned means the repo was absent and was cloned into place.
@@ -47,7 +49,7 @@ func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
 		if err != nil {
 			return err
 		}
-		tmpRoot := filepath.Join(dl, tmpDirName)
+		tmpRoot := filepath.Join(dl, TmpDirName)
 		defer os.RemoveAll(tmpRoot)
 
 		results = make([]Result, len(st.Repos))

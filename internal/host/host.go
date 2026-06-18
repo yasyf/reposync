@@ -39,7 +39,7 @@ func DetectSelf(ctx context.Context, r Runner) (string, error) {
 	if err := json.Unmarshal([]byte(out), &status); err != nil {
 		return "", fmt.Errorf("parse tailscale status (pass --self to override): %w", err)
 	}
-	node := tailscaleNode(status.Self.DNSName)
+	node := TailscaleNode(status.Self.DNSName)
 	if node == "" {
 		return "", fmt.Errorf("empty tailscale node name (pass --self to override)")
 	}
@@ -54,7 +54,19 @@ func DetectSelf(ctx context.Context, r Runner) (string, error) {
 // reposync on it: install if missing, register the inverse host, share state,
 // then reconcile and install services. It returns a human-readable step log.
 func AddHost(ctx context.Context, st *state.State, r Runner, target, self string, noRecurse bool) ([]string, error) {
+	return AddHostStream(ctx, st, r, target, self, noRecurse, nil)
+}
+
+// AddHostStream is AddHost with live progress: onStep (may be nil) is called with
+// each step as it happens.
+func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self string, noRecurse bool, onStep func(string)) ([]string, error) {
 	var log []string
+	step := func(msg string) {
+		log = append(log, msg)
+		if onStep != nil {
+			onStep(msg)
+		}
+	}
 
 	if _, err := state.Update(func(s *state.State) error {
 		s.UpsertHost(target)
@@ -62,10 +74,10 @@ func AddHost(ctx context.Context, st *state.State, r Runner, target, self string
 	}); err != nil {
 		return log, fmt.Errorf("save state after registering %s: %w", target, err)
 	}
-	log = append(log, "registered host "+target+" in local state")
+	step("registered host " + target + " in local state")
 
 	if noRecurse {
-		log = append(log, "no-recurse: skipping remote bootstrap")
+		step("no-recurse: skipping remote bootstrap")
 		return log, nil
 	}
 
@@ -76,43 +88,43 @@ func AddHost(ctx context.Context, st *state.State, r Runner, target, self string
 		}
 		self = detected
 	}
-	log = append(log, "self identity: "+self)
+	step("self identity: " + self)
 
 	if remoteInstalled(ctx, r, target) {
-		log = append(log, "reposync already installed on "+target)
+		step("reposync already installed on " + target)
 	} else {
 		if err := remoteBrewInstall(ctx, r, target); err != nil {
 			return log, err
 		}
-		log = append(log, "installed reposync on "+target+" via brew")
+		step("installed reposync on " + target + " via brew")
 	}
 
 	if _, err := r.SSH(ctx, target, "reposync host add "+self+" --no-recurse"); err != nil {
 		return log, fmt.Errorf("register inverse host on %s: %w", target, err)
 	}
-	log = append(log, "registered inverse host "+self+" on "+target)
+	step("registered inverse host " + self + " on " + target)
 
 	for _, repo := range st.Repos {
 		if repo.LocalOnly || repo.Origin == "" {
 			continue
 		}
 		if _, err := r.SSH(ctx, target, addRemoteCmd(repo)); err != nil {
-			log = append(log, fmt.Sprintf("WARN share repo %s to %s: %v", repo.Relpath, target, err))
+			step(fmt.Sprintf("WARN share repo %s to %s: %v", repo.Relpath, target, err))
 			continue
 		}
-		log = append(log, "shared repo "+repo.Relpath+" to "+target)
+		step("shared repo " + repo.Relpath + " to " + target)
 	}
 
 	if _, err := r.SSH(ctx, target, "reposync reconcile"); err != nil {
-		log = append(log, fmt.Sprintf("WARN reconcile on %s: %v", target, err))
+		step(fmt.Sprintf("WARN reconcile on %s: %v", target, err))
 	} else {
-		log = append(log, "reconciled "+target)
+		step("reconciled " + target)
 	}
 
 	if _, err := r.SSH(ctx, target, "reposync install"); err != nil {
-		log = append(log, fmt.Sprintf("WARN install services on %s: %v", target, err))
+		step(fmt.Sprintf("WARN install services on %s: %v", target, err))
 	} else {
-		log = append(log, "installed services on "+target)
+		step("installed services on " + target)
 	}
 
 	return log, nil
@@ -150,6 +162,54 @@ func RemoteReconcile(ctx context.Context, st *state.State, r Runner) error {
 		_, err := r.SSH(ctx, target, "reposync rpc reconcile")
 		return err
 	})
+}
+
+// VerifyResult reports a single host's reachability and reposync install state.
+type VerifyResult struct {
+	Target       string
+	Reachable    bool
+	Bootstrapped bool
+	Version      string
+	Err          error
+}
+
+// Verify probes target over ssh: whether it is reachable, has reposync installed,
+// and its version.
+func Verify(ctx context.Context, r Runner, target string) VerifyResult {
+	res := VerifyResult{Target: target}
+	if remoteInstalled(ctx, r, target) {
+		res.Reachable = true
+		res.Bootstrapped = true
+		if out, err := r.SSH(ctx, target, "reposync --version"); err == nil {
+			res.Version = strings.TrimSpace(out)
+		}
+		return res
+	}
+	if _, err := r.SSH(ctx, target, "true"); err != nil {
+		res.Err = fmt.Errorf("probe %s: %w", target, err)
+		return res
+	}
+	res.Reachable = true
+	return res
+}
+
+// VerifyAll verifies every host concurrently, returning one result per host in
+// input order.
+func VerifyAll(ctx context.Context, r Runner, hosts []string) []VerifyResult {
+	results := make([]VerifyResult, len(hosts))
+	sem := make(chan struct{}, maxConcurrentHosts)
+	var wg sync.WaitGroup
+	for i, target := range hosts {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, target string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i] = Verify(ctx, r, target)
+		}(i, target)
+	}
+	wg.Wait()
+	return results
 }
 
 func remoteInstalled(ctx context.Context, r Runner, target string) bool {
@@ -208,7 +268,8 @@ func addRemoteCmd(repo state.Repo) string {
 	)
 }
 
-func tailscaleNode(dnsName string) string {
+// TailscaleNode returns the first DNS label of a tailscale DNSName.
+func TailscaleNode(dnsName string) string {
 	trimmed := strings.TrimSuffix(dnsName, ".")
 	label, _, _ := strings.Cut(trimmed, ".")
 	return label

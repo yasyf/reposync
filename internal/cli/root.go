@@ -9,6 +9,9 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+
+	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/internal/tui"
 )
 
 // Execute builds and runs the reposync root command under a context canceled on
@@ -31,6 +34,13 @@ func newRoot(version string) *cobra.Command {
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !isInteractive() {
+				return cmd.Help()
+			}
+			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: host.NewExecRunner()})
+		},
 	}
 	root.AddCommand(
 		newRepoCmd(),
@@ -41,6 +51,7 @@ func newRoot(version string) *cobra.Command {
 		newWatchCmd(),
 		newInstallCmd(),
 		newUninstallCmd(),
+		newTUICmd(version),
 	)
 	return root
 }
