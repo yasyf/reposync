@@ -169,7 +169,7 @@ func TestAddHostForwardNotInstalled(t *testing.T) {
 	got := r.sshCmds("yasyf@yasyf-home")
 	want := []string{
 		"command -v reposync",
-		"brew install --cask yasyf/tap/reposync",
+		"brew tap yasyf/tap && brew trust yasyf/tap && brew install --cask yasyf/tap/reposync",
 		"reposync host add yasyf@yasyf --no-recurse",
 		"reposync repo add-remote --origin 'https://github.com/yasyf/cc-review.git' --relpath 'cc-review' --trunk 'main'",
 		"reposync reconcile",

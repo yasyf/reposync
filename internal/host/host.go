@@ -160,7 +160,10 @@ func remoteInstalled(ctx context.Context, r Runner, target string) bool {
 }
 
 func remoteBrewInstall(ctx context.Context, r Runner, target string) error {
-	out, err := r.SSH(ctx, target, "brew install --cask yasyf/tap/reposync")
+	// brew trust is required when the remote sets HOMEBREW_REQUIRE_TAP_TRUST,
+	// which blocks loading casks from third-party taps; it is idempotent and a
+	// no-op otherwise.
+	out, err := r.SSH(ctx, target, "brew tap yasyf/tap && brew trust yasyf/tap && brew install --cask yasyf/tap/reposync")
 	if err == nil {
 		return nil
 	}
