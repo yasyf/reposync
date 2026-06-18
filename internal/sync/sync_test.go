@@ -109,6 +109,19 @@ func (h *harness) advanceOrigin(content string) string {
 	return h.originMain()
 }
 
+// seedGenerated writes a .gitattributes marking *.gen as linguist-generated plus
+// an initial build.gen, commits, and pushes both onto trunk via the seed clone.
+// Call after newHarness and before cloning the work repo so both files are on
+// trunk in the clone.
+func (h *harness) seedGenerated() {
+	h.t.Helper()
+	h.writeFile(h.seed, ".gitattributes", "*.gen linguist-generated\n")
+	h.writeFile(h.seed, "build.gen", "generated v1\n")
+	h.runGit(h.seed, "add", ".gitattributes", "build.gen")
+	h.runGit(h.seed, "commit", "-qm", "seed generated")
+	h.runGit(h.seed, "push", "-q", "origin", "main")
+}
+
 func (h *harness) originMain() string {
 	h.t.Helper()
 	return strings.TrimSpace(h.runGit(h.root, "-C", h.origin, "rev-parse", "main"))
@@ -321,6 +334,37 @@ func TestSyncBrokenRepoDoesNotAbortOthers(t *testing.T) {
 	r, _ := vcs.Open(filepath.Join(h.dataLoc, "alpha"), "main")
 	if got, _ := r.TrunkHash(context.Background()); got != want {
 		t.Fatalf("alpha trunk hash = %q, want %q", got, want)
+	}
+}
+
+func TestSyncRebasesGeneratedOnlyRepo(t *testing.T) {
+	h := newHarness(t)
+	h.seedGenerated()
+	dest := h.jjClone("delta")
+	// Dirty the working copy with ONLY a generated edit, recorded by a real snapshot.
+	h.writeFile(dest, "build.gen", "generated local edit\n")
+	h.runJJ(dest, "status")
+	// Advance trunk on a non-generated path so the generated edit rebases cleanly.
+	want := h.advanceOrigin("v2")
+	// Default short idle threshold: the clone ops are not seen as recent activity,
+	// so the only thing the dirt gate sees is the generated-only working-copy edit.
+	st := h.state(state.Repo{Relpath: "delta", Origin: h.origin, Trunk: "main"})
+
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "delta")
+	if res.Err != nil {
+		t.Fatalf("delta err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeRebasedGenerated {
+		t.Fatalf("delta outcome = %q, want rebased-generated", res.Outcome)
+	}
+
+	r, _ := vcs.Open(dest, "main")
+	if got, _ := r.TrunkHash(context.Background()); got != want {
+		t.Fatalf("delta trunk hash = %q, want %q", got, want)
 	}
 }
 

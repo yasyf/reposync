@@ -38,6 +38,8 @@ const (
 	OutcomeNoTrunk Outcome = "no-trunk"
 	// OutcomeNotDisposable means the working copy held real work and was left untouched.
 	OutcomeNotDisposable Outcome = "not-disposable"
+	// OutcomeRebasedGenerated means the working copy held only generated edits and was advanced onto trunk, taking upstream on conflict.
+	OutcomeRebasedGenerated Outcome = "rebased-generated"
 )
 
 // Repo is a tracked repository whose working copy can be safely advanced onto trunk.
@@ -106,8 +108,15 @@ func trunkHashViaGit(ctx context.Context, path, trunk string) (string, error) {
 }
 
 func run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return runStdin(ctx, dir, "", name, args...)
+}
+
+func runStdin(ctx context.Context, dir, stdin, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

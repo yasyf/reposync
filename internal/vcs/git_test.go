@@ -2,6 +2,7 @@ package vcs
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,5 +213,286 @@ func TestGitNeverPushOnAdvance(t *testing.T) {
 	}
 	if originBefore != f.originMain() {
 		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+}
+
+// TestGitInUseGeneratedOnlyNotBusy proves a working tree whose only uncommitted
+// edit is to a linguist-generated file is not busy from the dirt check. The fresh
+// clone's reflog still counts as recent activity under a normal idle window, so a
+// tiny idle window isolates the dirt classification as the asserted result.
+func TestGitInUseGeneratedOnlyNotBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy on generated-only dirt", reason)
+	}
+	if reason != "" {
+		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
+// TestGitInUseMixedDirtyIsBusy proves a tree dirty in both a generated and a
+// non-generated file is busy: the dirt is not generated-only.
+func TestGitInUseMixedDirtyIsBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.writeFile(dest, "foo.txt", "real work\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on mixed dirt")
+	}
+	if reason != "dirty working tree" {
+		t.Fatalf("reason = %q, want dirty working tree", reason)
+	}
+}
+
+// TestGitInUseDirtyGitattributesIsBusy proves an uncommitted edit to .gitattributes
+// itself is busy: .gitattributes is not a generated path.
+func TestGitInUseDirtyGitattributesIsBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+	f.writeFile(dest, ".gitattributes", "*.gen linguist-generated\n*.foo linguist-generated\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on dirty .gitattributes")
+	}
+	if reason != "dirty working tree" {
+		t.Fatalf("reason = %q, want dirty working tree", reason)
+	}
+}
+
+// TestGitInUseRenameToGeneratedIsBusy proves a rename of a non-generated file into
+// a generated-named path is busy: the rename source is non-generated, so the dirt
+// is not generated-only and the uncommitted rename of real work is never discarded.
+func TestGitInUseRenameToGeneratedIsBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+	f.runGit(dest, "mv", "README.md", "out.gen")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on rename of a non-generated file into a generated path")
+	}
+	if reason != "dirty working tree" {
+		t.Fatalf("reason = %q, want dirty working tree", reason)
+	}
+}
+
+// TestGitAdvanceGeneratedCleanApply proves a generated-only edit that trunk does
+// not touch is carried untouched through the fast-forward, reporting rebased-generated.
+func TestGitAdvanceGeneratedCleanApply(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	want := f.advanceOriginPath("x.txt", "sibling on trunk\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit preserved", c)
+	}
+}
+
+// TestGitAdvanceGeneratedConflictTakesUpstream proves a generated-only edit that
+// conflicts with what trunk changed is discarded in favor of upstream content.
+func TestGitAdvanceGeneratedConflictTakesUpstream(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	want := f.advanceOriginPath("build.gen", "trunk generated v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "trunk generated v2\n" {
+		t.Fatalf("build.gen = %q, want upstream content (local discarded)", c)
+	}
+}
+
+// TestGitAdvanceGeneratedBehindZeroNoOp proves a generated-only dirt with trunk
+// not moved is a no-op: up-to-date, local edit intact, main unchanged.
+func TestGitAdvanceGeneratedBehindZeroNoOp(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	mainBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date", got)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit untouched", c)
+	}
+	if mainAfter := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
+		t.Fatalf("local main moved from %q to %q, want unchanged", mainBefore, mainAfter)
+	}
+}
+
+// TestGitAdvanceUntrackedGeneratedPreserved proves an untracked generated file that
+// trunk does not touch survives a generated-aware advance with its local content.
+func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	f.writeFile(dest, "extra.gen", "untracked local\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy on untracked generated file", reason)
+	}
+
+	want := f.advanceOriginPath("y.txt", "sibling on trunk\n")
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if !f.fileExists(dest, "extra.gen") {
+		t.Fatal("untracked generated file was clobbered")
+	}
+	if c := f.readFile(dest, "extra.gen"); c != "untracked local\n" {
+		t.Fatalf("extra.gen = %q, want local content preserved", c)
+	}
+}
+
+// TestGitAdvanceStagedGeneratedAdvances proves a STAGED generated edit does not
+// wedge the fast-forward: with a staged edit on a trunk-changed generated path and
+// a staged edit on a trunk-untouched generated path, advance resets the index plus
+// worktree of the conflict path (taking upstream) and carries the untouched path,
+// reporting rebased-generated rather than hard-erroring on `git merge --ff-only`.
+func TestGitAdvanceStagedGeneratedAdvances(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	// A second generated file on trunk that the upcoming trunk commit will not touch.
+	f.writeFile(f.seed, "keep.gen", "trunk keep v1\n")
+	f.runGit(f.seed, "add", "keep.gen")
+	f.runGit(f.seed, "commit", "-qm", "seed keep.gen")
+	f.runGit(f.seed, "push", "-q", "origin", "main")
+
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	// Stage a generated edit on a trunk-untouched path and on a trunk-changed path.
+	f.writeFile(dest, "keep.gen", "local keep edit\n")
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.runGit(dest, "add", "keep.gen", "build.gen")
+
+	// Trunk changes build.gen (the conflict path) but leaves keep.gen alone.
+	want := f.advanceOriginPath("build.gen", "trunk generated v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "trunk generated v2\n" {
+		t.Fatalf("build.gen = %q, want upstream content (staged local discarded)", c)
+	}
+	if c := f.readFile(dest, "keep.gen"); c != "local keep edit\n" {
+		t.Fatalf("keep.gen = %q, want staged local content preserved", c)
+	}
+}
+
+// TestGitInUseUntrackedDirNonGeneratedIsBusy proves an untracked directory holding a
+// non-generated file is busy. `git status --porcelain` without -uall collapses the
+// directory into one '?? gendir/' record; with a directory-level generated attribute
+// that record resolves generated, so the real (non-generated) file inside would be
+// wrongly classified as generated-only and skipped. -uall lists the file
+// individually, exposing it as a real dirty path so the tree is correctly busy.
+func TestGitInUseUntrackedDirNonGeneratedIsBusy(t *testing.T) {
+	f := newFixture(t)
+	// Mark a whole directory generated, so the collapsed '?? gendir/' record itself
+	// resolves linguist-generated even though a non-generated file lives inside.
+	f.writeFile(f.seed, ".gitattributes", "*.gen linguist-generated\ngendir/ linguist-generated\n")
+	f.runGit(f.seed, "add", ".gitattributes")
+	f.runGit(f.seed, "commit", "-qm", "seed dir attr")
+	f.runGit(f.seed, "push", "-q", "origin", "main")
+
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	if err := os.MkdirAll(filepath.Join(dest, "gendir"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f.writeFile(dest, filepath.Join("gendir", "real.txt"), "real work\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on untracked directory with a non-generated file")
+	}
+	if reason != "dirty working tree" {
+		t.Fatalf("reason = %q, want dirty working tree", reason)
 	}
 }

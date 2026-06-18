@@ -3,11 +3,21 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const jjOpTimeLayout = "2006-01-02T15:04:05-0700"
+
+const (
+	// wcEmptyClean is the workingCopyState probe line for a disposable @: empty,
+	// undescribed, unbookmarked.
+	wcEmptyClean = "empty=true | desc=[] | bookmarks=[]"
+	// wcGeneratedDirty is the workingCopyState probe line for a candidate
+	// generated-only @: non-empty, undescribed, unbookmarked.
+	wcGeneratedDirty = "empty=false | desc=[] | bookmarks=[]"
+)
 
 // jjOpNoise is the allow-list of operation descriptions the poller produces or
 // that are not real user activity; ops matching these are ignored for InUse.
@@ -38,7 +48,13 @@ func (r *jjRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, e
 		return false, "", err
 	}
 	if strings.TrimSpace(dirty) != "" {
-		return true, "dirty working copy", nil
+		generatedOnly, err := r.changedPathsGeneratedOnly(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		if !generatedOnly {
+			return true, "dirty working copy", nil
+		}
 	}
 	out, err := r.jj(ctx, "op", "log", "--no-graph", "--ignore-working-copy",
 		"-T", `time.start().format("%Y-%m-%dT%H:%M:%S%z") ++ " | " ++ description.first_line() ++ "\n"`,
@@ -90,33 +106,141 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	if _, err := r.jj(ctx, "git", "fetch", "--remote", "origin", "--ignore-working-copy"); err != nil {
 		return "", fmt.Errorf("jj git fetch: %w", err)
 	}
-	disposable, err := r.disposable(ctx)
-	if err != nil {
-		return "", err
-	}
-	if !disposable {
-		return OutcomeNotDisposable, nil
-	}
 	moved, err := r.trunkMovedPastWorkingCopy(ctx)
 	if err != nil {
 		return "", err
 	}
-	if !moved {
-		return OutcomeUpToDate, nil
+	disposable, err := r.disposable(ctx)
+	if err != nil {
+		return "", err
 	}
-	if _, err := r.jj(ctx, "new", r.trunk); err != nil {
-		return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
+	if disposable {
+		if !moved {
+			return OutcomeUpToDate, nil
+		}
+		if _, err := r.jj(ctx, "new", r.trunk); err != nil {
+			return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
+		}
+		return OutcomeAdvanced, nil
 	}
-	return OutcomeAdvanced, nil
+	generatedOnly, err := r.generatedOnlyDirty(ctx)
+	if err != nil {
+		return "", err
+	}
+	if generatedOnly {
+		safe, err := r.ancestrySafe(ctx)
+		if err != nil {
+			return "", err
+		}
+		if safe {
+			if !moved {
+				return OutcomeUpToDate, nil
+			}
+			return r.rebaseGenerated(ctx)
+		}
+	}
+	return OutcomeNotDisposable, nil
 }
 
-func (r *jjRepo) disposable(ctx context.Context) (bool, error) {
-	out, err := r.jj(ctx, "log", "-r", "@", "--no-graph",
-		"-T", `separate(" | ", "empty=" ++ empty, "desc=[" ++ description.first_line() ++ "]", "bookmarks=[" ++ bookmarks.join(",") ++ "]") ++ "\n"`)
+// rebaseGenerated rebases @ (carrying only generated edits) onto trunk, then
+// resolves any conflicts by taking trunk's version of each conflicted path.
+func (r *jjRepo) rebaseGenerated(ctx context.Context) (Outcome, error) {
+	if _, err := r.jj(ctx, "rebase", "-r", "@", "-d", r.trunk); err != nil {
+		return "", fmt.Errorf("jj rebase: %w", err)
+	}
+	conflicts, err := r.jj(ctx, "resolve", "--list")
+	if err != nil {
+		if strings.Contains(err.Error(), "No conflicts found") {
+			return OutcomeRebasedGenerated, nil
+		}
+		return "", fmt.Errorf("jj resolve --list: %w", err)
+	}
+	for _, line := range strings.Split(conflicts, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		path := conflictListPath(line)
+		if _, err := r.jj(ctx, "restore", "--from", r.trunk, "--", path); err != nil {
+			return "", fmt.Errorf("jj restore %s: %w", path, err)
+		}
+	}
+	return OutcomeRebasedGenerated, nil
+}
+
+// jjConflictKind matches the trailing " <N>-sided conflict" marker that
+// `jj resolve --list` appends after each conflicted path.
+var jjConflictKind = regexp.MustCompile(`\s+\d+-sided conflict$`)
+
+// conflictListPath recovers the full conflicted path from a `jj resolve --list`
+// line by stripping the trailing conflict-kind marker, preserving spaces in the path.
+func conflictListPath(line string) string {
+	return strings.TrimSpace(jjConflictKind.ReplaceAllString(line, ""))
+}
+
+// changedPathsGeneratedOnly reports whether @ changes at least one path and every
+// changed path is marked linguist-generated.
+func (r *jjRepo) changedPathsGeneratedOnly(ctx context.Context) (bool, error) {
+	out, err := r.jj(ctx, "diff", "-r", "@", "--name-only")
+	if err != nil {
+		return false, fmt.Errorf("jj diff: %w", err)
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return false, nil
+	}
+	gen, err := generatedPaths(ctx, r.path, paths)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) == "empty=true | desc=[] | bookmarks=[]", nil
+	return len(gen) == len(paths), nil
+}
+
+// workingCopyState renders @'s emptiness, description, and bookmarks as a single
+// trimmed probe line, compared against wcEmptyClean / wcGeneratedDirty.
+func (r *jjRepo) workingCopyState(ctx context.Context) (string, error) {
+	out, err := r.jj(ctx, "log", "-r", "@", "--no-graph",
+		"-T", `separate(" | ", "empty=" ++ empty, "desc=[" ++ description.first_line() ++ "]", "bookmarks=[" ++ bookmarks.join(",") ++ "]") ++ "\n"`)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// generatedOnlyDirty reports whether @ holds only generated edits: non-empty, no
+// description, no bookmarks, and every changed path is generated.
+func (r *jjRepo) generatedOnlyDirty(ctx context.Context) (bool, error) {
+	state, err := r.workingCopyState(ctx)
+	if err != nil {
+		return false, err
+	}
+	if state != wcGeneratedDirty {
+		return false, nil
+	}
+	return r.changedPathsGeneratedOnly(ctx)
+}
+
+func (r *jjRepo) disposable(ctx context.Context) (bool, error) {
+	state, err := r.workingCopyState(ctx)
+	if err != nil {
+		return false, err
+	}
+	return state == wcEmptyClean, nil
+}
+
+// ancestrySafe reports whether every parent of @ is already contained in trunk.
+// A non-empty `@- ~ ::<trunk>` result means @ sits atop an unpushed local commit,
+// so rebasing @ would strand that work — unsafe.
+func (r *jjRepo) ancestrySafe(ctx context.Context) (bool, error) {
+	out, err := r.jj(ctx, "log", "-r", "@- ~ ::"+r.trunk, "--no-graph", "--ignore-working-copy", "-T", `"x"`)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "", nil
 }
 
 func (r *jjRepo) trunkMovedPastWorkingCopy(ctx context.Context) (bool, error) {

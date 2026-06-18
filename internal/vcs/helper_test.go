@@ -1,6 +1,7 @@
 package vcs
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -106,6 +107,28 @@ func (f *fixture) advanceOrigin(content string) string {
 	return f.originMain()
 }
 
+// seedGenerated writes a .gitattributes marking *.gen as linguist-generated plus
+// an initial build.gen, commits, and pushes both onto trunk via the seed clone.
+func (f *fixture) seedGenerated() {
+	f.t.Helper()
+	f.writeFile(f.seed, ".gitattributes", "*.gen linguist-generated\n")
+	f.writeFile(f.seed, "build.gen", "generated v1\n")
+	f.runGit(f.seed, "add", ".gitattributes", "build.gen")
+	f.runGit(f.seed, "commit", "-qm", "seed generated")
+	f.runGit(f.seed, "push", "-q", "origin", "main")
+}
+
+// advanceOriginPath writes content to path via the seed clone and pushes a new
+// commit to origin, returning the new origin main commit hash.
+func (f *fixture) advanceOriginPath(path, content string) string {
+	f.t.Helper()
+	f.writeFile(f.seed, path, content)
+	f.runGit(f.seed, "add", path)
+	f.runGit(f.seed, "commit", "-qm", "advance "+path)
+	f.runGit(f.seed, "push", "-q", "origin", "main")
+	return f.originMain()
+}
+
 // originMain returns the bare origin's current main commit hash.
 func (f *fixture) originMain() string {
 	f.t.Helper()
@@ -145,6 +168,25 @@ func (f *fixture) runJJ(dir string, args ...string) string {
 		f.t.Fatalf("jj %s: %v: %s", strings.Join(args, " "), err, out)
 	}
 	return string(out)
+}
+
+// runJJConflicts returns the conflict list from `jj resolve --list`, treating the
+// no-conflicts case (which exits non-zero with "No conflicts found" on stderr) as
+// an empty list rather than a fatal error.
+func (f *fixture) runJJConflicts(dir string) string {
+	f.t.Helper()
+	cmd := exec.Command("jj", "--repository", dir, "resolve", "--list")
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(stderr.String(), "No conflicts found") {
+			return ""
+		}
+		f.t.Fatalf("jj resolve --list: %v: %s", err, stderr.String())
+	}
+	return stdout.String()
 }
 
 func (f *fixture) writeFile(dir, name, content string) {

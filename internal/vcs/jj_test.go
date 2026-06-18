@@ -282,3 +282,276 @@ func TestJJNeverPushOnAdvance(t *testing.T) {
 		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
 	}
 }
+
+// jjGeneratedOnlyProbe renders @'s emptiness, description, and bookmarks so a test
+// can assert @ still carries only a generated edit (no description, no bookmarks).
+func (f *fixture) jjGeneratedOnlyProbe(repo string) string {
+	f.t.Helper()
+	out := f.runJJ(repo, "log", "-r", "@", "--no-graph", "--ignore-working-copy",
+		"-T", `separate(" | ", "empty=" ++ empty, "desc=[" ++ description.first_line() ++ "]", "bookmarks=[" ++ bookmarks.join(",") ++ "]") ++ "\n"`)
+	return strings.TrimSpace(out)
+}
+
+// jjParent returns @'s parent commit id.
+func (f *fixture) jjParent(repo string) string {
+	f.t.Helper()
+	out := f.runJJ(repo, "log", "-r", "@", "--no-graph", "--ignore-working-copy",
+		"-T", `parents.map(|c| c.commit_id()).join(",") ++ "\n"`)
+	return strings.TrimSpace(out)
+}
+
+// TestJJInUseGeneratedOnlyNotBusy proves a @ whose only change is a generated file
+// is not busy from the dirt check.
+func TestJJInUseGeneratedOnlyNotBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy on generated-only @", reason)
+	}
+	if reason != "" {
+		t.Fatalf("reason = %q, want empty", reason)
+	}
+}
+
+// TestJJInUseMixedDirtyIsBusy proves a @ changing both a generated and a
+// non-generated file is busy: the dirt is not generated-only.
+func TestJJInUseMixedDirtyIsBusy(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.writeFile(dest, "WORK.txt", "real work\n")
+	f.snapshotJJ(dest)
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on mixed dirt")
+	}
+	if reason != "dirty working copy" {
+		t.Fatalf("reason = %q, want dirty working copy", reason)
+	}
+}
+
+// TestJJAdvanceGeneratedCleanApply proves a generated-only @ is rebased onto a moved
+// trunk that does not touch the generated path, keeping the local edit untouched.
+func TestJJAdvanceGeneratedCleanApply(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+	want := f.advanceOriginPath("x.txt", "sibling on trunk\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if parent := f.jjParent(dest); parent != want {
+		t.Fatalf("@ parent = %q, want new trunk %q", parent, want)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit preserved", c)
+	}
+	if probe := f.jjGeneratedOnlyProbe(dest); probe != wcGeneratedDirty {
+		t.Fatalf("@ probe = %q, want non-empty generated-only @", probe)
+	}
+}
+
+// TestJJAdvanceGeneratedConflictTakesUpstream proves a generated-only @ that
+// conflicts with what trunk changed is resolved by restoring trunk's content.
+func TestJJAdvanceGeneratedConflictTakesUpstream(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+	want := f.advanceOriginPath("build.gen", "trunk generated v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if parent := f.jjParent(dest); parent != want {
+		t.Fatalf("@ parent = %q, want new trunk %q", parent, want)
+	}
+	conflicts := strings.TrimSpace(f.runJJConflicts(dest))
+	if conflicts != "" {
+		t.Fatalf("jj resolve --list = %q, want empty (conflicts resolved)", conflicts)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "trunk generated v2\n" {
+		t.Fatalf("build.gen = %q, want upstream content (local discarded)", c)
+	}
+}
+
+// TestJJAdvanceGeneratedTrunkNotMoved exercises a generated-only @ with trunk not
+// moved: nothing to advance onto, so @ must be left untouched. The outcome matches
+// the git sibling's behind==0 path, OutcomeUpToDate, for the identical state.
+func TestJJAdvanceGeneratedTrunkNotMoved(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+	changeBefore := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date", got)
+	}
+	changeAfter := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if changeBefore != changeAfter {
+		t.Fatalf("@ moved from %q to %q, want unchanged", changeBefore, changeAfter)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit untouched", c)
+	}
+}
+
+// TestJJAdvanceGeneratedAtopUnpushedCommitNotDisposable proves the ancestry safety
+// gate: a generated-only @ sitting on top of an UNPUSHED described commit must not be
+// rebased onto trunk, since that would strand the local commit and strip its files
+// from the working copy. Advance returns not-disposable, the described commit stays an
+// ancestor of @, and the local source file is intact on disk.
+func TestJJAdvanceGeneratedAtopUnpushedCommitNotDisposable(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	// An unpushed local commit carrying real work, then describe it. Snapshot the
+	// file into @ before describing so it lands in the commit, not in a later @.
+	f.writeFile(dest, "realsource.txt", "in progress real work\n")
+	f.snapshotJJ(dest)
+	f.runJJ(dest, "describe", "-m", "local unpushed work", "--ignore-working-copy")
+	unpushed := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+
+	// A generated-only @ on top of that unpushed commit.
+	f.runJJ(dest, "new", "--ignore-working-copy")
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+
+	// Move trunk so Advance reaches the disposability / ancestry checks.
+	f.advanceOriginPath("x.txt", "sibling on trunk\n")
+	changeBefore := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable (unpushed parent is unsafe to rebase)", got)
+	}
+	changeAfter := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if changeBefore != changeAfter {
+		t.Fatalf("@ moved from %q to %q, want unchanged", changeBefore, changeAfter)
+	}
+	// The unpushed described commit is still an ancestor of @.
+	ancestors := strings.TrimSpace(f.runJJ(dest, "log", "-r", unpushed+" & ::@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+	if ancestors != unpushed {
+		t.Fatalf("unpushed commit %q no longer an ancestor of @ (got %q): work stranded", unpushed, ancestors)
+	}
+	if c := f.readFile(dest, "realsource.txt"); c != "in progress real work\n" {
+		t.Fatalf("realsource.txt = %q, want local work intact (not clobbered)", c)
+	}
+}
+
+// TestJJAdvanceGeneratedConflictSpacedPath proves a generated path containing a SPACE
+// that conflicts with trunk is fully resolved: the `jj resolve --list` parser must
+// recover the whole path (not truncate at the first space), so after Advance the
+// conflict is cleared and the file holds upstream content.
+func TestJJAdvanceGeneratedConflictSpacedPath(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	// A generated file whose name contains a space, seeded on trunk.
+	const spaced = "out put.gen"
+	f.writeFile(f.seed, spaced, "trunk spaced v1\n")
+	f.runGit(f.seed, "add", spaced)
+	f.runGit(f.seed, "commit", "-qm", "seed spaced gen")
+	f.runGit(f.seed, "push", "-q", "origin", "main")
+
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, spaced, "local spaced edit\n")
+	f.snapshotJJ(dest)
+	want := f.advanceOriginPath(spaced, "trunk spaced v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if parent := f.jjParent(dest); parent != want {
+		t.Fatalf("@ parent = %q, want new trunk %q", parent, want)
+	}
+	conflicts := strings.TrimSpace(f.runJJConflicts(dest))
+	if conflicts != "" {
+		t.Fatalf("jj resolve --list = %q, want empty (spaced-path conflict resolved)", conflicts)
+	}
+	if c := f.readFile(dest, spaced); c != "trunk spaced v2\n" {
+		t.Fatalf("%s = %q, want upstream content (local discarded)", spaced, c)
+	}
+}
+
+// TestJJAdvanceDescribedGeneratedNotDisposable proves a @ that carries generated
+// dirt but also a description is not disposable: real work guards the no-clobber boundary.
+func TestJJAdvanceDescribedGeneratedNotDisposable(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.snapshotJJ(dest)
+	f.runJJ(dest, "describe", "-m", "work in progress", "--ignore-working-copy")
+	// Move trunk so Advance reaches the disposability check rather than short-circuiting.
+	f.advanceOriginPath("x.txt", "sibling on trunk\n")
+	changeBefore := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable", got)
+	}
+	changeAfter := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if changeBefore != changeAfter {
+		t.Fatalf("@ moved from %q to %q, want unchanged", changeBefore, changeAfter)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit untouched", c)
+	}
+}

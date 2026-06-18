@@ -3,6 +3,8 @@ package vcs
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -26,11 +28,11 @@ func (r *gitRepo) TrunkHash(ctx context.Context) (string, error) {
 }
 
 func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, error) {
-	status, err := r.git(ctx, "status", "--porcelain")
+	clean, generatedOnly, _, err := dirtState(ctx, r.path)
 	if err != nil {
 		return false, "", err
 	}
-	if strings.TrimSpace(status) != "" {
+	if !clean && !generatedOnly {
 		return true, "dirty working tree", nil
 	}
 	reflog, err := r.git(ctx, "reflog", "--date=iso", "-n", "1")
@@ -67,6 +69,13 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		return "", err
 	}
 	if branch == r.trunk {
+		_, generatedOnly, generated, err := dirtState(ctx, r.path)
+		if err != nil {
+			return "", err
+		}
+		if generatedOnly {
+			return r.advanceGenerated(ctx, behind, generated)
+		}
 		if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
 			return OutcomeUpToDate, nil
 		}
@@ -82,6 +91,66 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		return OutcomeAdvanced, nil
 	}
 	return OutcomeUpToDate, nil
+}
+
+// advanceGenerated advances an on-trunk working tree whose only uncommitted edits
+// are to generated files. Generated edits that conflict with what trunk changes
+// are dropped (upstream wins); cleanly-applying generated edits are carried
+// untouched through the fast-forward.
+func (r *gitRepo) advanceGenerated(ctx context.Context, behind int, generated []string) (Outcome, error) {
+	if behind == 0 {
+		return OutcomeUpToDate, nil
+	}
+	changed, err := r.trunkChangedPaths(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range generated {
+		if _, ok := changed[p]; !ok {
+			continue
+		}
+		tracked, err := r.tracked(ctx, p)
+		if err != nil {
+			return "", err
+		}
+		if tracked {
+			if _, err := r.git(ctx, "restore", "--staged", "--worktree", "--source=HEAD", "--", p); err != nil {
+				return "", fmt.Errorf("git restore %s: %w", p, err)
+			}
+			continue
+		}
+		if err := os.Remove(filepath.Join(r.path, p)); err != nil {
+			return "", fmt.Errorf("remove untracked generated %s: %w", p, err)
+		}
+	}
+	if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
+		return "", fmt.Errorf("git merge --ff-only: %w", err)
+	}
+	return OutcomeRebasedGenerated, nil
+}
+
+// trunkChangedPaths returns the set of paths that differ between HEAD and origin/<trunk>.
+func (r *gitRepo) trunkChangedPaths(ctx context.Context) (map[string]struct{}, error) {
+	out, err := r.git(ctx, "diff", "--name-only", "HEAD", "origin/"+r.trunk)
+	if err != nil {
+		return nil, fmt.Errorf("git diff trunk: %w", err)
+	}
+	changed := make(map[string]struct{})
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			changed[p] = struct{}{}
+		}
+	}
+	return changed, nil
+}
+
+// tracked reports whether path is tracked in the index.
+func (r *gitRepo) tracked(ctx context.Context, path string) (bool, error) {
+	out, err := r.git(ctx, "ls-files", "--error-unmatch", "--", path)
+	if err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(out) != "", nil
 }
 
 func (r *gitRepo) behindCount(ctx context.Context) (int, error) {
