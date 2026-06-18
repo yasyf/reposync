@@ -1,0 +1,50 @@
+# goreleaser config — https://goreleaser.com
+version: 2
+
+project_name: reposync
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+homebrew_casks:
+  - repository:
+      owner: yasyf
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/yasyf/reposync
+    description: Keep git repos in sync across your remote hosts.
+    # Strip the quarantine attribute so the unsigned binary runs on first launch.
+    hooks:
+      post:
+        install: |
+          if OS.mac? && Hardware::CPU.arm?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/reposync"]
+          end
