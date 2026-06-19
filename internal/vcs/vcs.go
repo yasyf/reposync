@@ -50,6 +50,9 @@ type Repo interface {
 	Origin(ctx context.Context) (string, error)
 	// InUse reports whether the repo has in-progress work or recent activity within idle.
 	InUse(ctx context.Context, idle time.Duration) (busy bool, reason string, err error)
+	// LastActivity returns the most recent real activity time, or the zero time
+	// (meaning unknown, never an error) when there is no activity.
+	LastActivity(ctx context.Context) (time.Time, error)
 	// HasTrunk reports whether a tracked origin trunk bookmark or ref exists.
 	HasTrunk(ctx context.Context) (bool, error)
 	// Advance fetches and safely advances the working copy onto trunk, never clobbering or pushing.

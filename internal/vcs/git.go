@@ -49,6 +49,14 @@ func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, 
 	return false, "", nil
 }
 
+func (r *gitRepo) LastActivity(ctx context.Context) (time.Time, error) {
+	reflog, err := r.git(ctx, "reflog", "--date=iso", "-n", "1")
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parseReflogTime(strings.TrimSpace(reflog))
+}
+
 func (r *gitRepo) HasTrunk(ctx context.Context) (bool, error) {
 	if _, err := r.git(ctx, "rev-parse", "--verify", "-q", "origin/"+r.trunk); err != nil {
 		return false, nil
@@ -183,20 +191,34 @@ func (r *gitRepo) currentBranch(ctx context.Context) (string, error) {
 }
 
 func (r *gitRepo) reflogRecent(line string, idle time.Duration) (bool, error) {
+	at, err := parseReflogTime(line)
+	if err != nil {
+		return false, err
+	}
+	if at.IsZero() {
+		return false, nil
+	}
+	return time.Since(at) < idle, nil
+}
+
+// parseReflogTime extracts the timestamp from a `git reflog --date=iso` line. It
+// returns the zero time and a nil error when the line carries no `@{...}` stamp
+// (an empty reflog), and an error only when a present stamp fails to parse.
+func parseReflogTime(line string) (time.Time, error) {
 	open := strings.Index(line, "@{")
 	if open < 0 {
-		return false, nil
+		return time.Time{}, nil
 	}
 	rest := line[open+2:]
 	end := strings.Index(rest, "}")
 	if end < 0 {
-		return false, fmt.Errorf("parse reflog timestamp %q", line)
+		return time.Time{}, fmt.Errorf("parse reflog timestamp %q", line)
 	}
 	at, err := time.Parse(gitReflogTimeLayout, rest[:end])
 	if err != nil {
-		return false, fmt.Errorf("parse reflog timestamp %q: %w", rest[:end], err)
+		return time.Time{}, fmt.Errorf("parse reflog timestamp %q: %w", rest[:end], err)
 	}
-	return time.Since(at) < idle, nil
+	return at, nil
 }
 
 func (r *gitRepo) git(ctx context.Context, args ...string) (string, error) {

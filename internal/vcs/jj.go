@@ -56,20 +56,38 @@ func (r *jjRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, e
 			return true, "dirty working copy", nil
 		}
 	}
+	started, desc, err := r.firstRealOp(ctx)
+	if err != nil {
+		return false, "", err
+	}
+	if !started.IsZero() && time.Since(started) < idle {
+		return true, "recent activity: " + desc, nil
+	}
+	return false, "", nil
+}
+
+func (r *jjRepo) LastActivity(ctx context.Context) (time.Time, error) {
+	started, _, err := r.firstRealOp(ctx)
+	return started, err
+}
+
+// firstRealOp returns the start time and description of the most recent non-noise
+// operation in the jj op log. It returns the zero time and an empty description
+// when the log holds only noise ops (or is empty); jjOpNoise is the noise set.
+func (r *jjRepo) firstRealOp(ctx context.Context) (time.Time, string, error) {
 	out, err := r.jj(ctx, "op", "log", "--no-graph", "--ignore-working-copy",
 		"-T", `time.start().format("%Y-%m-%dT%H:%M:%S%z") ++ " | " ++ description.first_line() ++ "\n"`,
 		"-n", "30")
 	if err != nil {
-		return false, "", err
+		return time.Time{}, "", err
 	}
-	now := time.Now()
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		rawTS, rawDesc, ok := strings.Cut(line, " | ")
 		if !ok {
-			return false, "", fmt.Errorf("parse jj op log line %q", line)
+			return time.Time{}, "", fmt.Errorf("parse jj op log line %q", line)
 		}
 		ts := strings.TrimSpace(rawTS)
 		desc := strings.TrimSpace(rawDesc)
@@ -78,13 +96,11 @@ func (r *jjRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, e
 		}
 		started, err := time.Parse(jjOpTimeLayout, ts)
 		if err != nil {
-			return false, "", fmt.Errorf("parse jj op timestamp %q: %w", ts, err)
+			return time.Time{}, "", fmt.Errorf("parse jj op timestamp %q: %w", ts, err)
 		}
-		if now.Sub(started) < idle {
-			return true, "recent activity: " + desc, nil
-		}
+		return started, desc, nil
 	}
-	return false, "", nil
+	return time.Time{}, "", nil
 }
 
 func (r *jjRepo) HasTrunk(ctx context.Context) (bool, error) {

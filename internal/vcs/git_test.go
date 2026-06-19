@@ -142,6 +142,39 @@ func TestGitInUseRecentReflog(t *testing.T) {
 	}
 }
 
+func TestGitLastActivity(t *testing.T) {
+	t.Run("recent after clone", func(t *testing.T) {
+		f := newFixture(t)
+		r := openGit(t, f.gitClone(filepath.Join(f.root, "clone")))
+
+		got, err := r.LastActivity(context.Background())
+		if err != nil {
+			t.Fatalf("last activity: %v", err)
+		}
+		if got.IsZero() {
+			t.Fatal("LastActivity = zero, want a recent clone reflog time")
+		}
+		if since := time.Since(got); since > time.Hour {
+			t.Fatalf("LastActivity = %v (%v ago), want within the last hour", got, since)
+		}
+	})
+
+	t.Run("zero on empty reflog", func(t *testing.T) {
+		f := newFixture(t)
+		dest := f.gitClone(filepath.Join(f.root, "clone"))
+		r := openGit(t, dest)
+		f.runGit(dest, "reflog", "expire", "--expire=now", "--all")
+
+		got, err := r.LastActivity(context.Background())
+		if err != nil {
+			t.Fatalf("last activity: %v", err)
+		}
+		if !got.IsZero() {
+			t.Fatalf("LastActivity = %v, want zero on an empty reflog", got)
+		}
+	})
+}
+
 func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
 	f := newFixture(t)
 	dest := f.gitClone(filepath.Join(f.root, "clone"))

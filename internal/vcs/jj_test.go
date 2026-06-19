@@ -91,6 +91,47 @@ func TestJJAdvanceUpToDate(t *testing.T) {
 	}
 }
 
+// TestJJLastActivity proves LastActivity returns the most recent non-noise op
+// start time. A fresh colocated clone already records real ops (fetch, checkout),
+// and a user operation (describe) adds another; both must surface as a recent,
+// non-zero time. The zero/no-activity case is unreachable here: jj always records
+// the clone's real ops, so the op log is never empty or noise-only.
+func TestJJLastActivity(t *testing.T) {
+	t.Run("recent after clone", func(t *testing.T) {
+		f := newFixture(t)
+		r := openJJ(t, f.jjClone(filepath.Join(f.root, "clone")))
+
+		got, err := r.LastActivity(context.Background())
+		if err != nil {
+			t.Fatalf("last activity: %v", err)
+		}
+		if got.IsZero() {
+			t.Fatal("LastActivity = zero, want a recent clone op time")
+		}
+		if since := time.Since(got); since > time.Hour {
+			t.Fatalf("LastActivity = %v (%v ago), want within the last hour", got, since)
+		}
+	})
+
+	t.Run("recent after describe operation", func(t *testing.T) {
+		f := newFixture(t)
+		dest := f.jjClone(filepath.Join(f.root, "clone"))
+		r := openJJ(t, dest)
+		f.runJJ(dest, "describe", "-m", "real work", "--ignore-working-copy")
+
+		got, err := r.LastActivity(context.Background())
+		if err != nil {
+			t.Fatalf("last activity: %v", err)
+		}
+		if got.IsZero() {
+			t.Fatal("LastActivity = zero, want the describe op time")
+		}
+		if since := time.Since(got); since > time.Hour {
+			t.Fatalf("LastActivity = %v (%v ago), want within the last hour", got, since)
+		}
+	})
+}
+
 func TestJJInUseDirtyNoClobber(t *testing.T) {
 	f := newFixture(t)
 	dest := f.jjClone(filepath.Join(f.root, "clone"))
