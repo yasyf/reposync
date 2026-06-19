@@ -26,6 +26,13 @@ const (
 
 	launchAgentsRelpath = "Library/LaunchAgents"
 
+	// daemonPath is the PATH the LaunchAgents run with. launchd's default PATH
+	// omits the Homebrew prefixes where jj and watchman live, so reconcile and the
+	// watch daemon fail to find them; EnvironmentVariables replaces the process
+	// PATH outright, so the system dirs are kept too. Both arches are listed so a
+	// single plist works on Apple Silicon and Intel.
+	daemonPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 	tickInterval  = 900
 	tickNice      = 10
 	watchThrottle = 10
@@ -44,6 +51,11 @@ var tickTemplate = template.Must(template.New("tick").Parse(`<?xml version="1.0"
 		<string>{{.Exe}}</string>
 		<string>reconcile</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>{{.Path}}</string>
+	</dict>
 	<key>StartInterval</key>
 	<integer>{{.Interval}}</integer>
 	<key>ThrottleInterval</key>
@@ -75,6 +87,11 @@ var watchTemplate = template.Must(template.New("watch").Parse(`<?xml version="1.
 		<string>{{.Exe}}</string>
 		<string>watch</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>{{.Path}}</string>
+	</dict>
 	<key>KeepAlive</key>
 	<true/>
 	<key>RunAtLoad</key>
@@ -139,6 +156,7 @@ func tickPlist(exe string) (string, error) {
 	return render(tickTemplate, map[string]any{
 		"Label":    TickLabel,
 		"Exe":      exe,
+		"Path":     daemonPath,
 		"Interval": tickInterval,
 		"Nice":     tickNice,
 		"LogPath":  logPath,
@@ -155,6 +173,7 @@ func watchPlist(exe string) (string, error) {
 	return render(watchTemplate, map[string]any{
 		"Label":    WatchLabel,
 		"Exe":      exe,
+		"Path":     daemonPath,
 		"Throttle": watchThrottle,
 		"LogPath":  logPath,
 	})

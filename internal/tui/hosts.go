@@ -15,6 +15,7 @@ import (
 
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/internal/service"
 	"github.com/yasyf/reposync/internal/state"
 )
 
@@ -481,6 +482,15 @@ func addHostCmd(ctx context.Context, r host.Runner, target string, lines chan st
 		log, err := host.AddHostStream(ctx, st, r, target, "", false, func(s string) {
 			lines <- s
 		})
+		// Bring this host online too: adding a peer should leave the local
+		// reconcile tick and watch daemon running without a separate install.
+		if err == nil {
+			if ierr := service.Install(ctx, service.NewLauncher(), false); ierr != nil {
+				lines <- fmt.Sprintf("WARN install local services: %v", ierr)
+			} else {
+				lines <- "installed local services"
+			}
+		}
 		close(lines)
 		return hostAddDoneMsg{target: target, log: log, err: err}
 	}

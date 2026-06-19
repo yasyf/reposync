@@ -248,6 +248,37 @@ func TestAddHostNoRecurse(t *testing.T) {
 	if !contains(persisted.Hosts, "yasyf@yasyf") {
 		t.Fatalf("host not registered in persisted state: %v", persisted.Hosts)
 	}
+	if persisted.Self != "yasyf@yasyf-home" {
+		t.Fatalf("self not persisted: got %q, want %q", persisted.Self, "yasyf@yasyf-home")
+	}
+}
+
+func TestAddHostDetectsAndPersistsSelf(t *testing.T) {
+	st := emptyState(t)
+
+	r := newFakeRunner().
+		onLocal("tailscale status --json", tailscaleJSON, nil).
+		onLocal("id -un", "yasyf\n", nil).
+		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		defaultSSH("", nil)
+
+	// self == "" forces tailscale auto-detection, resolving to yasyf@yasyf.
+	if _, err := AddHost(context.Background(), st, r, "yasyf@yasyf-home", "", false); err != nil {
+		t.Fatalf("AddHost: %v", err)
+	}
+
+	got := r.sshCmds("yasyf@yasyf-home")
+	if countContains(got, "reposync host add yasyf@yasyf --no-recurse") != 1 {
+		t.Fatalf("inverse registration must carry the detected self, got %v", got)
+	}
+
+	persisted, err := state.Load()
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if persisted.Self != "yasyf@yasyf" {
+		t.Fatalf("detected self not persisted: got %q, want %q", persisted.Self, "yasyf@yasyf")
+	}
 }
 
 func TestAddHostIdempotent(t *testing.T) {

@@ -68,27 +68,39 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 		}
 	}
 
+	// Resolve how peers reach this machine before persisting so state.Self is
+	// recorded on both ends of a bootstrap. It is required on the primary path
+	// (the inverse registration carries it) but best-effort on the no-recurse
+	// path, where a peer may not run tailscale.
+	if self == "" {
+		detected, err := DetectSelf(ctx, r)
+		if err != nil {
+			if !noRecurse {
+				return log, err
+			}
+		} else {
+			self = detected
+		}
+	}
+
 	if _, err := state.Update(func(s *state.State) error {
 		s.UpsertHost(target)
+		if self != "" {
+			s.Self = self
+		}
 		return nil
 	}); err != nil {
 		return log, fmt.Errorf("save state after registering %s: %w", target, err)
 	}
 	step("registered host " + target + " in local state")
+	if self != "" {
+		step("self identity: " + self)
+	}
 
 	if noRecurse {
 		step("no-recurse: skipping remote bootstrap")
 		return log, nil
 	}
-
-	if self == "" {
-		detected, err := DetectSelf(ctx, r)
-		if err != nil {
-			return log, err
-		}
-		self = detected
-	}
-	step("self identity: " + self)
 
 	if remoteInstalled(ctx, r, target) {
 		step("reposync already installed on " + target)

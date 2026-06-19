@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/internal/service"
 	"github.com/yasyf/reposync/internal/state"
 )
 
@@ -35,7 +36,21 @@ func newHostAddCmd() *cobra.Command {
 			for _, line := range log {
 				fmt.Println(line)
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			// Bring this host online too: adding a peer should leave the local
+			// reconcile tick and watch daemon running without a separate install.
+			// Skipped on the no-recurse inverse add, which the bootstrap installs
+			// over ssh.
+			if !noRecurse {
+				if err := service.Install(cmd.Context(), service.NewLauncher(), false); err != nil {
+					fmt.Printf("WARN install local services: %v\n", err)
+				} else {
+					fmt.Println("installed local services")
+				}
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&self, "self", "", "how peers reach this host (default: auto-detect via tailscale)")
