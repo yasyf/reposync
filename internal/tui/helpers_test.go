@@ -6,11 +6,26 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/reconcile"
 )
+
+func TestStartAddFocusesInput(t *testing.T) {
+	m := newHostsModel(Options{})
+	s, _ := m.startAdd("")
+	hm := s.(hostsModel)
+	if !hm.input.Focused() {
+		t.Fatal("startAdd must focus the input so the host target can be typed")
+	}
+	// A keystroke must reach the (focused) input, not be swallowed.
+	s, _ = hm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got := s.(hostsModel).input.Value(); got != "x" {
+		t.Fatalf("after typing into the add-host input, value = %q, want %q", got, "x")
+	}
+}
 
 func TestValidateTarget(t *testing.T) {
 	cases := []struct {
@@ -167,7 +182,7 @@ func repoModelWith(t *testing.T, items ...repoItem) reposModel {
 	for i, it := range items {
 		raw[i] = it
 	}
-	m.list.SetItems(raw)
+	m.setRepoItems(raw)
 	return m
 }
 

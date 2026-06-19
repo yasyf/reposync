@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/reconcile"
@@ -10,6 +12,18 @@ import (
 type reposLoadedMsg struct {
 	result discover.RepoResult
 	err    error
+}
+
+// repoStatusMsg carries one repo's live VCS state and last-activity time from an
+// async probe. generation stamps the scan it belongs to so a superseded scan's
+// late results are dropped.
+type repoStatusMsg struct {
+	relpath    string
+	status     repoStatus
+	reason     string
+	activity   time.Time
+	err        error
+	generation int
 }
 
 // reposAppliedMsg carries the outcome of applying a repo selection.

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"io"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
@@ -83,7 +84,55 @@ func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	} else {
 		row = "  " + row
 	}
-	io.WriteString(w, lipgloss.NewStyle().Render(row))
+	io.WriteString(w, lipgloss.NewStyle().MaxWidth(m.Width()).Render(row))
+}
+
+// renderHostDetail describes the selected host for the detail pane: its node,
+// discovery source, online and registration state, and the latest probe result.
+func renderHostDetail(item list.Item) string {
+	it, ok := item.(hostItem)
+	if !ok {
+		return dim.Render("No host selected.")
+	}
+
+	reg := dim.Render("unregistered")
+	if it.registered {
+		reg = badgeTracked.Render("registered")
+	}
+
+	online := dim.Render("offline")
+	if it.online {
+		online = badgeClean.Render("online")
+	}
+
+	status := dim.Render("· not checked")
+	switch it.state {
+	case verifyChecking:
+		status = glyphCheck.Render("… checking")
+	case verifyOK:
+		status = glyphOK.Render("✓ ready")
+	case verifyWarn:
+		status = glyphWarn.Render("⚠ reachable, not installed")
+	case verifyFail:
+		status = glyphFail.Render("✗ unreachable")
+	}
+
+	lines := []string{
+		detailTitle.Render(it.target),
+		"",
+		detailKey.Render("node    ") + it.node,
+		detailKey.Render("source  ") + it.source,
+		detailKey.Render("online  ") + online,
+		detailKey.Render("reg     ") + reg,
+		detailKey.Render("status  ") + status,
+	}
+	if it.state == verifyOK && it.verify.Version != "" {
+		lines = append(lines, detailKey.Render("version ")+it.verify.Version)
+	}
+	if it.state == verifyFail && it.verify.Err != nil {
+		lines = append(lines, "", dim.Render(it.verify.Err.Error()))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // classifyVerify maps a probe result onto a row state.

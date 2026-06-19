@@ -29,6 +29,8 @@ const verifyLegend = "✓ ready  ⚠ reachable, not installed  ✗ unreachable  
 type hostsModel struct {
 	opts       Options
 	list       list.Model
+	allItems   []list.Item
+	filter     filterBar
 	loading    bool
 	mode       int
 	input      textinput.Model
@@ -43,7 +45,16 @@ type hostsModel struct {
 	width      int
 	height     int
 	keys       hostsKeyMap
+
+	mdListW      int
+	mdDetailW    int
+	mdHeight     int
+	mdShowDetail bool
 }
+
+// hostsReserve is the rows the hosts screen keeps below the master-detail split
+// for the verify legend and status line.
+const hostsReserve = 2
 
 // hostConfirmState is an open removal confirmation awaiting its target.
 type hostConfirmState struct {
@@ -60,8 +71,9 @@ func newHostsModel(opts Options) hostsModel {
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	return hostsModel{opts: opts, list: l, loading: true, input: in, spin: sp, keys: newHostsKeyMap()}
+	return hostsModel{opts: opts, list: l, filter: newFilterBar(), loading: true, input: in, spin: sp, keys: newHostsKeyMap()}
 }
 
 func (m hostsModel) Title() string { return "Hosts" }
@@ -76,11 +88,11 @@ func (m hostsModel) Help() []key.Binding {
 	if m.confirm != nil {
 		return []key.Binding{m.keys.Confirm, m.keys.Cancel}
 	}
-	return []key.Binding{m.keys.Add, m.keys.Select, m.keys.Verify, m.keys.Remove}
+	return []key.Binding{m.keys.Filter, m.keys.Add, m.keys.Select, m.keys.Verify, m.keys.Remove}
 }
 
 func (m hostsModel) wantsKey(tea.KeyMsg) bool {
-	return m.mode == hostModeAdd || m.mode == hostModeBootstrapping || m.confirm != nil
+	return m.mode == hostModeAdd || m.mode == hostModeBootstrapping || m.confirm != nil || m.filter.Focused()
 }
 
 func (m hostsModel) Init() tea.Cmd {
@@ -92,7 +104,8 @@ func (m hostsModel) Update(msg tea.Msg) (screen, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height)
+		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = splitDims(msg.Width, msg.Height-filterBarLines-hostsReserve)
+		m.list.SetSize(m.mdListW, m.mdHeight)
 		m.logVP = viewport.New(msg.Width, max(1, msg.Height-2))
 		return m, nil
 
@@ -102,12 +115,13 @@ func (m hostsModel) Update(msg tea.Msg) (screen, tea.Cmd) {
 			m.status = statusErr.Render(msg.err.Error())
 			return m, nil
 		}
-		setCmd := m.list.SetItems(toListItems(msg.items))
-		return m, tea.Batch(setCmd, verifyAllCmd(m.opts.Runner, msg.items))
+		m.allItems = toListItems(msg.items)
+		cmd := m.refreshHosts()
+		return m, tea.Batch(cmd, verifyAllCmd(m.opts.Runner, msg.items))
 
 	case hostVerifiedMsg:
-		m.markVerified(msg.target, msg.res)
-		return m, nil
+		cmd := m.markVerified(msg.target, msg.res)
+		return m, cmd
 
 	case hostAddProgressMsg:
 		if m.lines == nil {
@@ -178,13 +192,14 @@ func (m hostsModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.list.SettingFilter() {
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
+	if m.filter.Focused() {
+		return m.handleFilterKey(msg)
 	}
 
 	switch {
+	case key.Matches(msg, m.keys.Filter):
+		cmd := m.filter.Focus()
+		return m, cmd
 	case key.Matches(msg, m.keys.Add):
 		return m.startAdd("")
 	case key.Matches(msg, m.keys.Verify):
@@ -198,6 +213,58 @@ func (m hostsModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
+}
+
+// handleFilterKey routes keys while the filter bar holds focus: esc clears and
+// blurs, enter blurs keeping the filter, anything else edits the query and
+// re-narrows the list live.
+func (m hostsModel) handleFilterKey(msg tea.KeyMsg) (screen, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.filter.Blur()
+		m.filter.Clear()
+		cmd := m.refreshHosts()
+		return m, cmd
+	case tea.KeyEnter:
+		m.filter.Blur()
+		return m, nil
+	}
+	var icmd tea.Cmd
+	m.filter, icmd = m.filter.Update(msg)
+	rcmd := m.refreshHosts()
+	return m, tea.Batch(icmd, rcmd)
+}
+
+// refreshHosts recomputes the visible list from the canonical slice under the
+// active filter, keeping the cursor on the same host.
+func (m *hostsModel) refreshHosts() tea.Cmd {
+	sel := selectedTarget(m.list)
+	visible := filterItems(m.allItems, m.filter.Value())
+	cmd := m.list.SetItems(visible)
+	selectTarget(&m.list, sel)
+	return cmd
+}
+
+// selectedTarget reports the target of the cursor row, or "" when the list is
+// empty, so a re-render can restore the selection.
+func selectedTarget(l list.Model) string {
+	if it, ok := l.SelectedItem().(hostItem); ok {
+		return it.target
+	}
+	return ""
+}
+
+// selectTarget moves the cursor back onto the row with the given target.
+func selectTarget(l *list.Model, target string) {
+	if target == "" {
+		return
+	}
+	for i, raw := range l.Items() {
+		if it, ok := raw.(hostItem); ok && it.target == target {
+			l.Select(i)
+			return
+		}
+	}
 }
 
 func (m hostsModel) handleAddKey(msg tea.KeyMsg) (screen, tea.Cmd) {
@@ -227,8 +294,8 @@ func (m hostsModel) selectRow() (screen, tea.Cmd) {
 		return m, nil
 	}
 	if it.registered {
-		m.markChecking(it.target)
-		return m, verifyHostCmd(m.opts.Runner, it.target)
+		ccmd := m.markChecking(it.target)
+		return m, tea.Batch(ccmd, verifyHostCmd(m.opts.Runner, it.target))
 	}
 	return m.startAdd(it.target)
 }
@@ -237,7 +304,8 @@ func (m hostsModel) startAdd(prefill string) (screen, tea.Cmd) {
 	m.mode = hostModeAdd
 	m.input.SetValue(prefill)
 	m.input.CursorEnd()
-	return m, m.input.Focus()
+	cmd := m.input.Focus()
+	return m, cmd
 }
 
 func (m hostsModel) startRemove() (screen, tea.Cmd) {
@@ -263,27 +331,29 @@ func (m hostsModel) startBootstrap(target string) (screen, tea.Cmd) {
 	return m, tea.Batch(m.spin.Tick, addHostCmd(ctx, m.opts.Runner, target, m.lines), waitForLine(m.lines))
 }
 
-func (m *hostsModel) markChecking(target string) {
-	for i, raw := range m.list.Items() {
+func (m *hostsModel) markChecking(target string) tea.Cmd {
+	for i, raw := range m.allItems {
 		it := raw.(hostItem)
 		if it.target == target {
 			it.state = verifyChecking
-			m.list.SetItem(i, it)
-			return
+			m.allItems[i] = it
+			break
 		}
 	}
+	return m.refreshHosts()
 }
 
-func (m *hostsModel) markVerified(target string, res host.VerifyResult) {
-	for i, raw := range m.list.Items() {
+func (m *hostsModel) markVerified(target string, res host.VerifyResult) tea.Cmd {
+	for i, raw := range m.allItems {
 		it := raw.(hostItem)
 		if it.target == target {
 			it.verify = res
 			it.state = classifyVerify(res)
-			m.list.SetItem(i, it)
-			return
+			m.allItems[i] = it
+			break
 		}
 	}
+	return m.refreshHosts()
 }
 
 func (m hostsModel) View() string {
@@ -303,7 +373,8 @@ func (m hostsModel) View() string {
 		return dim.Render("No hosts discovered. Press + to add one.")
 	}
 
-	body := lipgloss.JoinVertical(lipgloss.Left, m.list.View(), dim.Render(verifyLegend))
+	split := masterDetail(m.list.View(), renderHostDetail(m.list.SelectedItem()), m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail)
+	body := lipgloss.JoinVertical(lipgloss.Left, m.filter.View(len(m.list.Items()), len(m.allItems)), split, dim.Render(verifyLegend))
 	if m.confirm != nil {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, confirmBox.Render(m.confirm.prompt))
 	}

@@ -26,6 +26,8 @@ type confirmState struct {
 type reposModel struct {
 	opts     Options
 	list     list.Model
+	allItems []list.Item
+	filter   filterBar
 	loading  bool
 	applying bool
 	spin     spinner.Model
@@ -34,7 +36,19 @@ type reposModel struct {
 	empty    bool
 	scanDir  string
 	keys     reposKeyMap
+
+	sortMode   sortMode
+	generation int
+
+	mdListW      int
+	mdDetailW    int
+	mdHeight     int
+	mdShowDetail bool
 }
+
+// reposReserve is the rows the repos screen keeps below the master-detail split
+// for its status line.
+const reposReserve = 1
 
 func newReposModel(opts Options) reposModel {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
@@ -42,8 +56,9 @@ func newReposModel(opts Options) reposModel {
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	return reposModel{opts: opts, list: l, loading: true, spin: sp, keys: newReposKeyMap()}
+	return reposModel{opts: opts, list: l, filter: newFilterBar(), loading: true, spin: sp, keys: newReposKeyMap()}
 }
 
 func (m reposModel) Title() string { return "Repos" }
@@ -52,11 +67,11 @@ func (m reposModel) Help() []key.Binding {
 	if m.confirm != nil {
 		return []key.Binding{m.keys.Yes, m.keys.No}
 	}
-	return []key.Binding{m.keys.Toggle, m.keys.Apply}
+	return []key.Binding{m.keys.Filter, m.keys.Toggle, m.keys.Apply, m.keys.Sort}
 }
 
 func (m reposModel) wantsKey(tea.KeyMsg) bool {
-	return m.confirm != nil || m.list.SettingFilter()
+	return m.confirm != nil || m.filter.Focused()
 }
 
 func (m reposModel) Init() tea.Cmd {
@@ -66,7 +81,8 @@ func (m reposModel) Init() tea.Cmd {
 func (m reposModel) Update(msg tea.Msg) (screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, msg.Height)
+		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = splitDims(msg.Width, msg.Height-filterBarLines-reposReserve)
+		m.list.SetSize(m.mdListW, m.mdHeight)
 		return m, nil
 
 	case reposLoadedMsg:
@@ -77,7 +93,10 @@ func (m reposModel) Update(msg tea.Msg) (screen, tea.Cmd) {
 		}
 		m.empty = len(msg.result.Candidates) == 0
 		m.scanDir = scanDir()
-		return m, m.list.SetItems(newRepoItems(msg.result.Candidates))
+		return m.loadItems(msg.result.Candidates)
+
+	case repoStatusMsg:
+		return m.applyStatus(msg)
 
 	case reposAppliedMsg:
 		m.applying = false
@@ -116,21 +135,114 @@ func (m reposModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.list.SettingFilter() {
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
+	if m.filter.Focused() {
+		return m.handleFilterKey(msg)
 	}
 
 	switch {
+	case key.Matches(msg, m.keys.Filter):
+		cmd := m.filter.Focus()
+		return m, cmd
 	case key.Matches(msg, m.keys.Toggle):
 		return m.toggle()
 	case key.Matches(msg, m.keys.Apply):
 		return m.apply()
+	case key.Matches(msg, m.keys.Sort):
+		return m.cycleSort()
 	}
 
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+// handleFilterKey routes keys while the filter bar holds focus: esc clears and
+// blurs, enter blurs keeping the filter, anything else edits the query and
+// re-narrows the list live.
+func (m reposModel) handleFilterKey(msg tea.KeyMsg) (screen, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.filter.Blur()
+		m.filter.Clear()
+		cmd := m.refresh()
+		return m, cmd
+	case tea.KeyEnter:
+		m.filter.Blur()
+		return m, nil
+	}
+	var icmd tea.Cmd
+	m.filter, icmd = m.filter.Update(msg)
+	rcmd := m.refresh()
+	return m, tea.Batch(icmd, rcmd)
+}
+
+// refresh recomputes the visible list from the canonical slice under the active
+// filter and sort, keeping the cursor on the same repo.
+func (m *reposModel) refresh() tea.Cmd {
+	sel := selectedRelpath(m.list)
+	visible := filterItems(m.allItems, m.filter.Value())
+	sortRepoItems(visible, m.sortMode)
+	cmd := m.list.SetItems(visible)
+	selectRelpath(&m.list, sel)
+	return cmd
+}
+
+// setRepoItems installs a canonical item set and renders it under the active
+// filter and sort. It is the seam tests use to stage rows without discovery.
+func (m *reposModel) setRepoItems(items []list.Item) {
+	m.allItems = items
+	m.refresh()
+}
+
+// loadItems sorts freshly discovered candidates by the active mode, shows them
+// immediately, and fans out an async status probe per repo stamped with the
+// current generation so a superseded scan's late results are ignored.
+func (m reposModel) loadItems(cands []discover.Candidate) (screen, tea.Cmd) {
+	m.generation++
+	gen := m.generation
+
+	m.allItems = newRepoItems(cands)
+
+	idle := loadIdleThreshold()
+	cmds := []tea.Cmd{m.refresh()}
+	for _, raw := range m.allItems {
+		it := raw.(repoItem)
+		cmds = append(cmds, repoStatusCmd(it.cand.AbsPath, it.cand.Relpath, "", idle, gen))
+	}
+	return m, tea.Batch(cmds...)
+}
+
+// applyStatus folds one async probe result into its canonical row and re-renders
+// under the active filter and sort. Results from a superseded scan are dropped.
+func (m reposModel) applyStatus(msg repoStatusMsg) (screen, tea.Cmd) {
+	if msg.generation != m.generation {
+		return m, nil
+	}
+	for i, raw := range m.allItems {
+		it := raw.(repoItem)
+		if it.cand.Relpath != msg.relpath {
+			continue
+		}
+		if msg.err != nil {
+			it.status = statusError
+			it.reason = msg.err.Error()
+		} else {
+			it.status = msg.status
+			it.reason = msg.reason
+			it.activity = msg.activity
+		}
+		m.allItems[i] = it
+		break
+	}
+	cmd := m.refresh()
+	return m, cmd
+}
+
+// cycleSort advances to the next sort mode and re-renders, preserving the
+// selected repo.
+func (m reposModel) cycleSort() (screen, tea.Cmd) {
+	m.sortMode = m.sortMode.next()
+	cmd := m.refresh()
 	return m, cmd
 }
 
@@ -139,13 +251,22 @@ func (m reposModel) toggle() (screen, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	it.selected = !it.selected
-	return m, m.list.SetItem(m.list.GlobalIndex(), it)
+	for i, raw := range m.allItems {
+		ci := raw.(repoItem)
+		if ci.cand.Relpath != it.cand.Relpath {
+			continue
+		}
+		ci.selected = !ci.selected
+		m.allItems[i] = ci
+		break
+	}
+	cmd := m.refresh()
+	return m, cmd
 }
 
 func (m reposModel) apply() (screen, tea.Cmd) {
 	var sel apply.RepoSelection
-	for _, raw := range m.list.Items() {
+	for _, raw := range m.allItems {
 		it := raw.(repoItem)
 		switch {
 		case it.selected && !it.cand.Tracked:
@@ -177,17 +298,19 @@ func (m reposModel) View() string {
 		return dim.Render(fmt.Sprintf("No git/jj repos found under %s.", m.scanDir))
 	}
 
-	body := m.list.View()
+	split := masterDetail(m.list.View(), renderRepoDetail(m.list.SelectedItem()), m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail)
+	body := lipgloss.JoinVertical(lipgloss.Left, m.filter.View(len(m.list.Items()), len(m.allItems)), split)
 	if m.confirm != nil {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, confirmBox.Render(m.confirm.prompt))
 	}
 	if m.applying {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, m.spin.View()+" Applying…")
 	}
+	context := dim.Render("↕ " + m.sortMode.String())
 	if m.status != "" {
-		body = lipgloss.JoinVertical(lipgloss.Left, body, m.status)
+		context = m.status
 	}
-	return body
+	return lipgloss.JoinVertical(lipgloss.Left, body, context)
 }
 
 // discoverReposCmd scans the default location for repositories. Discovery is

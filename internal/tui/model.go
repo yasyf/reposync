@@ -1,16 +1,20 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/yasyf/reposync/internal/state"
 )
 
-// tabBarLines and helpLines are the fixed chrome rows the router reserves above
+// headerLines and helpLines are the fixed chrome rows the router reserves above
 // and below the active screen when laying out its inner height.
 const (
-	tabBarLines = 1
+	headerLines = 1
 	helpLines   = 1
 )
 
@@ -18,8 +22,9 @@ const (
 type rootModel struct {
 	opts     Options
 	active   int
-	screens  [2]screen
-	inited   [2]bool
+	screens  []screen
+	inited   []bool
+	self     string
 	width    int
 	height   int
 	keys     globalKeyMap
@@ -28,13 +33,27 @@ type rootModel struct {
 }
 
 func newRootModel(opts Options) rootModel {
+	screens := []screen{newReposModel(opts), newHostsModel(opts)}
+	inited := make([]bool, len(screens))
+	inited[0] = true
 	return rootModel{
 		opts:    opts,
-		screens: [2]screen{newReposModel(opts), newHostsModel(opts)},
-		inited:  [2]bool{true, false},
+		screens: screens,
+		inited:  inited,
+		self:    detectSelf(),
 		keys:    newGlobalKeyMap(),
 		help:    help.New(),
 	}
+}
+
+// detectSelf reads this host's identity for the header band; an unreadable or
+// unset identity simply leaves the brand mark standing alone.
+func detectSelf() string {
+	st, err := state.Load()
+	if err != nil {
+		return ""
+	}
+	return st.Self
 }
 
 func (m rootModel) Init() tea.Cmd {
@@ -95,18 +114,20 @@ func (m rootModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.screens[m.active].View(), m.helpView())
+	return lipgloss.JoinVertical(lipgloss.Left, m.header(), m.screens[m.active].View(), m.helpView())
 }
 
 func (m rootModel) innerHeight() int {
-	inner := m.height - tabBarLines - helpLines
+	inner := m.height - headerLines - helpLines
 	if inner < 1 {
 		return 1
 	}
 	return inner
 }
 
-func (m rootModel) tabBar() string {
+// header renders the brand mark, this host's identity, and the tab strip on a
+// single line.
+func (m rootModel) header() string {
 	tabs := make([]string, len(m.screens))
 	for i, s := range m.screens {
 		if i == m.active {
@@ -115,7 +136,12 @@ func (m rootModel) tabBar() string {
 		}
 		tabs[i] = inactiveTab.Render(s.Title())
 	}
-	return tabSep.Render("[ ") + tabs[0] + tabSep.Render(" | ") + tabs[1] + tabSep.Render(" ]")
+
+	brand := headerTitle.Render("reposync")
+	if m.self != "" {
+		brand += headerHint.Render(" · " + m.self)
+	}
+	return brand + "  " + tabSep.Render("[") + strings.Join(tabs, tabSep.Render("|")) + tabSep.Render("]")
 }
 
 func (m rootModel) helpView() string {
