@@ -74,13 +74,10 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 	// path, where a peer may not run tailscale.
 	if self == "" {
 		detected, err := DetectSelf(ctx, r)
-		if err != nil {
-			if !noRecurse {
-				return log, err
-			}
-		} else {
-			self = detected
+		if err != nil && !noRecurse {
+			return log, err
 		}
+		self = detected // "" when detection fails on the no-recurse path
 	}
 
 	if _, err := state.Update(func(s *state.State) error {
