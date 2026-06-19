@@ -52,12 +52,7 @@ func discoverTailscale(ctx context.Context, r host.Runner, localUser string) ([]
 		return nil, []SkipNote{{Name: "tailscale", Reason: err.Error()}}
 	}
 	var status struct {
-		Peer map[string]struct {
-			DNSName  string
-			HostName string
-			Online   bool
-			OS       string
-		}
+		Peer map[string]tailscalePeer
 	}
 	if err := json.Unmarshal([]byte(out), &status); err != nil {
 		return nil, []SkipNote{{Name: "tailscale", Reason: err.Error()}}
@@ -69,6 +64,12 @@ func discoverTailscale(ctx context.Context, r host.Runner, localUser string) ([]
 		if node == "" {
 			continue
 		}
+		if isMullvad(p) {
+			continue
+		}
+		if isLikelyEphemeral(p) {
+			continue
+		}
 		cands = append(cands, HostCandidate{
 			Node:          node,
 			DefaultTarget: target(localUser, node),
@@ -77,6 +78,44 @@ func discoverTailscale(ctx context.Context, r host.Runner, localUser string) ([]
 		})
 	}
 	return cands, nil
+}
+
+// tailscalePeer is the subset of a `tailscale status --json` peer that discovery
+// decodes. Location is a pointer so a JSON null (a personal node) is
+// distinguishable from a populated object (a Mullvad relay); KeyExpiry is a
+// pointer so a null/absent expiry is distinguishable from a real one.
+type tailscalePeer struct {
+	DNSName   string
+	HostName  string
+	Online    bool
+	OS        string
+	Tags      []string
+	KeyExpiry *time.Time
+	Location  *struct{}
+}
+
+// isMullvad reports whether p is a Mullvad relay rather than a personal node.
+// Mullvad peers carry a populated Location and the mullvad-exit-node tag, while
+// personal nodes report Location=null and no such tag; either signal alone marks
+// a relay, so they are OR'd.
+func isMullvad(p tailscalePeer) bool {
+	if p.Location != nil {
+		return true
+	}
+	for _, t := range p.Tags {
+		if t == "tag:mullvad-exit-node" {
+			return true
+		}
+	}
+	return false
+}
+
+// isLikelyEphemeral best-effort flags an ephemeral peer. `tailscale status
+// --json` carries no Ephemeral field, so a nil KeyExpiry is the only hint, and it
+// is not a clean signal (a personal node with key expiry disabled reports it too);
+// the guard therefore fires only on non-Mullvad peers.
+func isLikelyEphemeral(p tailscalePeer) bool {
+	return !isMullvad(p) && p.KeyExpiry == nil
 }
 
 // discoverBonjour browses _ssh._tcp services for up to bonjourTimeout. The lookup

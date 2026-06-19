@@ -46,8 +46,10 @@ func (f *fakeRunner) SSH(_ context.Context, _, _ string) (string, error) {
 const tailscaleStatusJSON = `{
   "Self": {"DNSName": "self.tailnet.ts.net.", "HostName": "self", "Online": true},
   "Peer": {
-    "key-alpha": {"DNSName": "alpha.tailnet.ts.net.", "HostName": "alpha", "Online": true,  "OS": "linux"},
-    "key-beta":  {"DNSName": "beta.tailnet.ts.net.",  "HostName": "beta",  "Online": false, "OS": "macOS"}
+    "key-alpha": {"DNSName": "alpha.tailnet.ts.net.", "HostName": "alpha", "Online": true,  "OS": "linux", "KeyExpiry": "2027-01-01T00:00:00Z"},
+    "key-beta":  {"DNSName": "beta.tailnet.ts.net.",  "HostName": "beta",  "Online": false, "OS": "macOS", "KeyExpiry": "2027-01-01T00:00:00Z"},
+    "key-mullvad": {"DNSName": "ca-tor-wg-204.mullvad.ts.net.", "HostName": "ca-tor-wg-204", "Online": true, "OS": "linux", "Tags": ["tag:mullvad-exit-node"], "KeyExpiry": null, "Location": {"Country": "Canada", "CountryCode": "ca", "City": "Toronto", "CityCode": "tor"}},
+    "key-ephemeral": {"DNSName": "ephemeral.tailnet.ts.net.", "HostName": "ephemeral", "Online": true, "OS": "linux", "KeyExpiry": null}
   }
 }`
 
@@ -99,6 +101,30 @@ func TestDiscoverTailscale(t *testing.T) {
 	}
 	if beta.Online {
 		t.Fatal("beta Online = true, want false")
+	}
+}
+
+func TestDiscoverTailscaleDropsMullvad(t *testing.T) {
+	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+
+	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
+	if len(notes) != 0 {
+		t.Fatalf("notes = %+v, want none", notes)
+	}
+	if hasNode(cands, "ca-tor-wg-204") {
+		t.Fatalf("mullvad exit node must be dropped, got %+v", cands)
+	}
+}
+
+func TestDiscoverTailscaleDropsEphemeral(t *testing.T) {
+	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+
+	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
+	if len(notes) != 0 {
+		t.Fatalf("notes = %+v, want none", notes)
+	}
+	if hasNode(cands, "ephemeral") {
+		t.Fatalf("ephemeral node must be dropped, got %+v", cands)
 	}
 }
 
