@@ -186,7 +186,7 @@ func Install(ctx context.Context, l Loader, tickOnly bool) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("install requires macOS launchd, not %s", runtime.GOOS)
 	}
-	exe, err := resolveExe()
+	exe, err := exePath()
 	if err != nil {
 		return err
 	}
@@ -250,18 +250,18 @@ func writeAndLoad(ctx context.Context, l Loader, agentsDir, label string, render
 	return nil
 }
 
-// resolveExe returns the absolute, symlink-resolved path to this binary so a
-// Homebrew symlink in the plist points at the real binary.
-func resolveExe() (string, error) {
+// exePath returns the path used to invoke this binary, deliberately NOT
+// resolving symlinks. On a Homebrew install that keeps the plist pointed at the
+// stable /opt/homebrew/bin/reposync symlink, which brew relinks on every
+// upgrade, so the LaunchAgents survive `brew upgrade` untouched. Resolving would
+// bake in a versioned Caskroom path that the next upgrade purges, leaving the
+// agents pointing at a deleted binary.
+func exePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve executable: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(exe)
-	if err != nil {
-		return "", fmt.Errorf("resolve executable symlinks for %s: %w", exe, err)
-	}
-	return resolved, nil
+	return exe, nil
 }
 
 func homeJoin(relpath string) (string, error) {
