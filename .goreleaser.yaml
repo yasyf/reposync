@@ -19,27 +19,16 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
+    # Developer ID sign + notarize the darwin binaries via codesign + notarytool
+    # (quill SIGKILLs on arm64 — anchore/quill#566). No-op without the MACOS_* env.
+    hooks:
+      post:
+        - cmd: bash scripts/macos-codesign.sh "{{ .Path }}" "{{ .Target }}"
+          output: true
 
 archives:
   - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-
-# Developer-ID sign + notarize the darwin binaries (quill, runs on the linux runner) when the
-# MACOS_* secrets are set; no-op otherwise. See yasyf/cc-skills repo-bootstrap go-ci-and-release.md.
-notarize:
-  macos:
-    - enabled: '{{ if envOrDefault "MACOS_SIGN_P12" "" }}true{{ else }}false{{ end }}'
-      ids:
-        - reposync
-      sign:
-        certificate: "{{ .Env.MACOS_SIGN_P12 }}"
-        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
-      notarize:
-        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
-        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
-        key: "{{ .Env.MACOS_NOTARY_KEY }}"
-        wait: true
-        timeout: 20m
 
 checksum:
   name_template: checksums.txt
