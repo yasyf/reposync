@@ -22,10 +22,7 @@ const bonjourTimeout = 3 * time.Second
 // error, so Hosts never returns a non-nil error (the deliberate exception to
 // fail-fast — there is nothing to fix when a source is simply absent).
 func Hosts(ctx context.Context, r host.Runner, st *state.State) (HostResult, error) {
-	var (
-		cands []HostCandidate
-		notes []SkipNote
-	)
+	var notes []SkipNote
 
 	out, err := r.Local(ctx, "id", "-un")
 	localUser := strings.TrimSpace(out)
@@ -34,12 +31,14 @@ func Hosts(ctx context.Context, r host.Runner, st *state.State) (HostResult, err
 	}
 
 	tsCands, tsNotes := discoverTailscale(ctx, r, localUser)
-	cands = append(cands, tsCands...)
 	notes = append(notes, tsNotes...)
 
 	bjCands, bjNotes := discoverBonjour(ctx, localUser)
-	cands = append(cands, bjCands...)
 	notes = append(notes, bjNotes...)
+
+	cands := make([]HostCandidate, 0, len(tsCands)+len(bjCands))
+	cands = append(cands, tsCands...)
+	cands = append(cands, bjCands...)
 
 	return HostResult{Candidates: mergeHosts(cands, st), Notes: notes}, nil
 }
@@ -164,7 +163,7 @@ func mergeHosts(cands []HostCandidate, st *state.State) []HostCandidate {
 	byNode := map[string]HostCandidate{}
 	for _, c := range cands {
 		existing, ok := byNode[c.Node]
-		if ok && !(c.Source == "tailscale" && existing.Source == "bonjour") {
+		if ok && (c.Source != "tailscale" || existing.Source != "bonjour") {
 			continue
 		}
 		byNode[c.Node] = c

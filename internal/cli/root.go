@@ -35,7 +35,7 @@ func newRoot(version string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !isInteractive() {
 				return cmd.Help()
 			}

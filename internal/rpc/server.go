@@ -36,7 +36,7 @@ func NewServer(load func() (*state.State, error)) *Server {
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		_ = ln.Close()
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -51,7 +51,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetReadDeadline(time.Now().Add(requestReadTimeout)); err != nil {
 		return
 	}
@@ -60,7 +60,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		writeResponse(conn, Response{Err: fmt.Sprintf("read request: %v", err)})
 		return
 	}
-	conn.SetReadDeadline(time.Time{}) // clear; dispatch may run long
+	_ = conn.SetReadDeadline(time.Time{}) // clear; dispatch may run long
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
 		writeResponse(conn, Response{Err: fmt.Sprintf("decode request: %v", err)})
@@ -106,5 +106,5 @@ func writeResponse(conn net.Conn, resp Response) {
 	if err != nil {
 		return
 	}
-	conn.Write(append(data, '\n'))
+	_, _ = conn.Write(append(data, '\n'))
 }

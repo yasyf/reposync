@@ -115,6 +115,7 @@ func run(ctx context.Context, dir, name string, args ...string) (string, error) 
 }
 
 func runStdin(ctx context.Context, dir, stdin, name string, args ...string) (string, error) {
+	//nolint:gosec // G204: reposync drives git/jj by design; name and args come from trusted repo config and internal call sites, not untrusted input.
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	if stdin != "" {

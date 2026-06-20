@@ -204,7 +204,8 @@ func (m reposModel) loadItems(cands []discover.Candidate) (screen, tea.Cmd) {
 	m.allItems = newRepoItems(cands)
 
 	idle := loadIdleThreshold()
-	cmds := []tea.Cmd{m.refresh()}
+	cmds := make([]tea.Cmd, 0, 1+len(m.allItems))
+	cmds = append(cmds, m.refresh())
 	for _, raw := range m.allItems {
 		it := raw.(repoItem)
 		cmds = append(cmds, repoStatusCmd(it.cand.AbsPath, it.cand.Relpath, "", idle, gen))
@@ -328,7 +329,7 @@ func discoverReposCmd() tea.Cmd {
 
 func applyReposCmd(r host.Runner, sel apply.RepoSelection) tea.Cmd {
 	return func() tea.Msg {
-		results, err := apply.ApplyRepos(context.Background(), r, sel)
+		results, err := apply.Repos(context.Background(), r, sel)
 		return reposAppliedMsg{results: results, err: err}
 	}
 }

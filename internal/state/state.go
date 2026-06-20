@@ -99,9 +99,9 @@ func (s *State) Save() error {
 		return fmt.Errorf("create temp state: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp state: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -227,7 +227,7 @@ func Load() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is reposync's own state file under the fixed config dir, not user-supplied.
 	if errors.Is(err, os.ErrNotExist) {
 		s := &State{}
 		s.applyDefaults()
@@ -278,7 +278,7 @@ func WithLock(fn func() error) error {
 	if err := lock.Lock(); err != nil {
 		return fmt.Errorf("acquire reconcile lock: %w", err)
 	}
-	defer lock.Unlock()
+	defer func() { _ = lock.Unlock() }()
 	return fn()
 }
 

@@ -15,7 +15,7 @@ func newSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Idle-safe fetch and fast-forward of every registered repo (never pushes).",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err

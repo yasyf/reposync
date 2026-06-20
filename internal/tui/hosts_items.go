@@ -84,7 +84,7 @@ func (d hostDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 	} else {
 		row = "  " + row
 	}
-	io.WriteString(w, lipgloss.NewStyle().MaxWidth(m.Width()).Render(row))
+	_, _ = io.WriteString(w, lipgloss.NewStyle().MaxWidth(m.Width()).Render(row))
 }
 
 // renderHostDetail describes the selected host for the detail pane: its node,

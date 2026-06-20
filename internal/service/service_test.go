@@ -170,7 +170,7 @@ func TestInstallBothAgents(t *testing.T) {
 	tickPath := plistPath(home, TickLabel)
 	watchPath := plistPath(home, WatchLabel)
 
-	tickData, err := os.ReadFile(tickPath)
+	tickData, err := os.ReadFile(tickPath) //nolint:gosec // G304: test reads a plist from a test-controlled temp home.
 	if err != nil {
 		t.Fatalf("read tick plist: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestInstallBothAgents(t *testing.T) {
 		"<key>StartInterval</key>\n\t<integer>900</integer>",
 	)
 
-	watchData, err := os.ReadFile(watchPath)
+	watchData, err := os.ReadFile(watchPath) //nolint:gosec // G304: test reads a plist from a test-controlled temp home.
 	if err != nil {
 		t.Fatalf("read watch plist: %v", err)
 	}
@@ -288,6 +288,7 @@ func equalStrings(a, b []string) bool {
 		return false
 	}
 	for i := range a {
+		//nolint:gosec // G602: guarded above by len(a) != len(b), so b[i] is in range for every i in range a.
 		if a[i] != b[i] {
 			return false
 		}

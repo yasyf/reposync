@@ -66,7 +66,7 @@ func (m rootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		inner := tea.WindowSizeMsg{Width: msg.Width, Height: m.innerHeight()}
-		var cmds []tea.Cmd
+		cmds := make([]tea.Cmd, 0, len(m.screens))
 		for i := range m.screens {
 			s, cmd := m.screens[i].Update(inner)
 			m.screens[i] = s

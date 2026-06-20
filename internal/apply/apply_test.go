@@ -53,7 +53,7 @@ func newHarness(t *testing.T) *harness {
 		seed:    filepath.Join(root, "seed"),
 		dataLoc: filepath.Join(root, "data"),
 	}
-	if err := os.MkdirAll(h.dataLoc, 0o755); err != nil {
+	if err := os.MkdirAll(h.dataLoc, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
 	h.runGit(root, "init", "--bare", "-b", "main", h.origin)
@@ -104,6 +104,7 @@ func (h *harness) configGit(dir string) {
 
 func (h *harness) runGit(dir string, args ...string) string {
 	h.t.Helper()
+	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -188,7 +189,7 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 		},
 	}
 
-	results, err := ApplyRepos(context.Background(), &fakeRunner{}, sel)
+	results, err := Repos(context.Background(), &fakeRunner{}, sel)
 	if err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
@@ -237,7 +238,7 @@ func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
 			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
 		},
 	}
-	if _, err := ApplyRepos(context.Background(), r, sel); err != nil {
+	if _, err := Repos(context.Background(), r, sel); err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
 
@@ -275,7 +276,7 @@ func TestApplyReposLocalOnlyNotPropagated(t *testing.T) {
 			{Relpath: "local", Origin: "", Kind: "git", LocalOnly: true},
 		},
 	}
-	if _, err := ApplyRepos(context.Background(), r, sel); err != nil {
+	if _, err := Repos(context.Background(), r, sel); err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
 
@@ -307,7 +308,7 @@ func TestApplyReposDisableUntracksButKeepsCheckout(t *testing.T) {
 	}
 
 	sel := RepoSelection{Disable: []string{"alpha"}}
-	if _, err := ApplyRepos(context.Background(), &fakeRunner{}, sel); err != nil {
+	if _, err := Repos(context.Background(), &fakeRunner{}, sel); err != nil {
 		t.Fatalf("ApplyRepos disable: %v", err)
 	}
 
@@ -338,7 +339,7 @@ func TestApplyReposPropagateFailureKeepsResults(t *testing.T) {
 			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
 		},
 	}
-	results, err := ApplyRepos(context.Background(), r, sel)
+	results, err := Repos(context.Background(), r, sel)
 	if err == nil {
 		t.Fatal("expected a joined propagation error when the peer push fails")
 	}

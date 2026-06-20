@@ -31,7 +31,7 @@ func newRepoDiscoverCmd() *cobra.Command {
 		Use:   "discover",
 		Short: "List git/jj repos under default_location and whether each is tracked.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
@@ -41,19 +41,19 @@ func newRepoDiscoverCmd() *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "RELPATH\tORIGIN\tKIND\tTRACKED")
+			_, _ = fmt.Fprintln(w, "RELPATH\tORIGIN\tKIND\tTRACKED")
 			for _, c := range res.Candidates {
 				origin := c.Origin
 				if origin == "" {
 					origin = "(local-only)"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", c.Relpath, origin, c.Kind, c.Tracked)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", c.Relpath, origin, c.Kind, c.Tracked)
 			}
 			if err := w.Flush(); err != nil {
 				return err
 			}
 			for _, s := range res.Skipped {
-				fmt.Fprintf(cmd.ErrOrStderr(), "skipped %s: %s\n", s.Name, s.Reason)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "skipped %s: %s\n", s.Name, s.Reason)
 			}
 			return nil
 		},
@@ -110,7 +110,7 @@ func runRepoAdd(ctx context.Context, path string, localOnly bool) error {
 	}
 
 	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly}
-	results, applyErr := apply.ApplyRepos(ctx, host.NewExecRunner(), apply.RepoSelection{
+	results, applyErr := apply.Repos(ctx, host.NewExecRunner(), apply.RepoSelection{
 		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly}},
 	})
 	if results == nil {
@@ -128,7 +128,7 @@ func newRepoAddRemoteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add-remote",
 		Short: "Idempotently upsert a repo by origin (used for peer propagation).",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			_, err := state.Update(func(s *state.State) error {
 				s.UpsertRepo(state.Repo{Relpath: relpath, Origin: origin, Trunk: trunk})
 				return nil
@@ -139,8 +139,8 @@ func newRepoAddRemoteCmd() *cobra.Command {
 	cmd.Flags().StringVar(&origin, "origin", "", "origin remote URL")
 	cmd.Flags().StringVar(&relpath, "relpath", "", "path relative to default_location")
 	cmd.Flags().StringVar(&trunk, "trunk", "main", "trunk branch")
-	cmd.MarkFlagRequired("origin")
-	cmd.MarkFlagRequired("relpath")
+	_ = cmd.MarkFlagRequired("origin")
+	_ = cmd.MarkFlagRequired("relpath")
 	return cmd
 }
 
@@ -149,7 +149,7 @@ func newRepoRmCmd() *cobra.Command {
 		Use:   "rm <path>",
 		Short: "Unregister a repo (does not delete the checkout).",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
@@ -176,15 +176,15 @@ func newRepoLsCmd() *cobra.Command {
 		Use:   "ls",
 		Short: "List registered repos.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "RELPATH\tORIGIN\tTRUNK\tLOCAL_ONLY")
+			_, _ = fmt.Fprintln(w, "RELPATH\tORIGIN\tTRUNK\tLOCAL_ONLY")
 			for _, r := range st.Repos {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", r.Relpath, originLabel(r), r.Trunk, r.LocalOnly)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", r.Relpath, originLabel(r), r.Trunk, r.LocalOnly)
 			}
 			return w.Flush()
 		},

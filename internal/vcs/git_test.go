@@ -513,7 +513,7 @@ func TestGitInUseUntrackedDirNonGeneratedIsBusy(t *testing.T) {
 	dest := f.gitClone(filepath.Join(f.root, "clone"))
 	r := openGit(t, dest)
 
-	if err := os.MkdirAll(filepath.Join(dest, "gendir"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(dest, "gendir"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	f.writeFile(dest, filepath.Join("gendir", "real.txt"), "real work\n")

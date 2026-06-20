@@ -63,7 +63,7 @@ func newHostRmCmd() *cobra.Command {
 		Use:   "rm <user@node>",
 		Short: "Unregister a peer host.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			if err := host.RemoveHost(args[0]); err != nil {
 				return err
 			}
@@ -79,15 +79,15 @@ func newHostLsCmd() *cobra.Command {
 		Use:   "ls",
 		Short: "List registered peer hosts.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "HOST")
+			_, _ = fmt.Fprintln(w, "HOST")
 			for _, h := range st.Hosts {
-				fmt.Fprintln(w, h)
+				_, _ = fmt.Fprintln(w, h)
 			}
 			return w.Flush()
 		},
@@ -100,27 +100,27 @@ func newHostVerifyCmd() *cobra.Command {
 		Use:   "verify",
 		Short: "Probe each registered host for ssh reachability, reposync install, and version.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
 			}
 			results := host.VerifyAll(cmd.Context(), host.NewExecRunner(), st.Hosts)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "HOST\tREACHABLE\tBOOTSTRAPPED\tVERSION")
+			_, _ = fmt.Fprintln(w, "HOST\tREACHABLE\tBOOTSTRAPPED\tVERSION")
 			for _, v := range results {
 				version := v.Version
 				if version == "" {
 					version = "-"
 				}
-				fmt.Fprintf(w, "%s\t%t\t%t\t%s\n", v.Target, v.Reachable, v.Bootstrapped, version)
+				_, _ = fmt.Fprintf(w, "%s\t%t\t%t\t%s\n", v.Target, v.Reachable, v.Bootstrapped, version)
 			}
 			if err := w.Flush(); err != nil {
 				return err
 			}
 			for _, v := range results {
 				if v.Err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %v\n", v.Target, v.Err)
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %v\n", v.Target, v.Err)
 				}
 			}
 			return nil

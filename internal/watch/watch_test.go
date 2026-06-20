@@ -46,13 +46,13 @@ func TestWatchmanObservesRefChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	// watchman rejects a symlinked root (macOS /tmp -> /private/tmp), so resolve it.
 	if dir, err = filepath.EvalSymlinks(dir); err != nil {
 		t.Fatalf("resolve temp dir: %v", err)
 	}
 	refdir := filepath.Join(dir, ".git", "refs", "remotes", "origin")
-	if err := os.MkdirAll(refdir, 0o755); err != nil {
+	if err := os.MkdirAll(refdir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(refdir, "main"), []byte("aaaa\n"), 0o600); err != nil {
@@ -66,15 +66,15 @@ func TestWatchmanObservesRefChange(t *testing.T) {
 		t.Fatalf("dial watchman: %v", err)
 	}
 	t.Cleanup(func() {
-		wm.send("watch-del", refdir)
-		wm.close()
+		_ = wm.send("watch-del", refdir)
+		_ = wm.close()
 	})
 
 	const subName = "reposync:test:0"
 	events := make(chan string, 8)
 	dispatch := func(pdu map[string]json.RawMessage) {
 		var name string
-		json.Unmarshal(pdu["subscription"], &name)
+		_ = json.Unmarshal(pdu["subscription"], &name)
 		select {
 		case events <- name:
 		default:
@@ -83,7 +83,7 @@ func TestWatchmanObservesRefChange(t *testing.T) {
 	if err := wm.subscribe(refdir, subName, dispatch); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	go wm.runSubscriptions(ctx, dispatch)
+	go func() { _ = wm.runSubscriptions(ctx, dispatch) }()
 
 	// Mutate the ref after the subscription clock; expect a subscription PDU.
 	time.Sleep(50 * time.Millisecond)

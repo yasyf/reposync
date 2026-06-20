@@ -22,7 +22,7 @@ func TestWatchServesRPCAndCleansSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkdtemp: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(base) })
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	t.Setenv("XDG_CONFIG_HOME", base)
 
 	st := &state.State{DefaultLocation: filepath.Join(base, "data")}

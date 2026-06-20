@@ -22,7 +22,7 @@ func newTUICmd(version string) *cobra.Command {
 		Short:  "Launch the interactive TUI.",
 		Hidden: true,
 		Args:   cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: host.NewExecRunner()})
 		},
 	}

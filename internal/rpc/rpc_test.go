@@ -40,7 +40,7 @@ func newHarness(t *testing.T) *harness {
 		seed:    filepath.Join(root, "seed"),
 		dataLoc: filepath.Join(root, "data"),
 	}
-	if err := os.MkdirAll(h.dataLoc, 0o755); err != nil {
+	if err := os.MkdirAll(h.dataLoc, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
 	h.runGit(root, "init", "--bare", "-b", "main", h.origin)
@@ -96,6 +96,7 @@ func (h *harness) configGit(dir string) {
 
 func (h *harness) runGit(dir string, args ...string) string {
 	h.t.Helper()
+	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -107,13 +108,14 @@ func (h *harness) runGit(dir string, args ...string) string {
 
 func (h *harness) writeFile(dir, name, content string) {
 	h.t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 		h.t.Fatalf("write %s: %v", name, err)
 	}
 }
 
 func (h *harness) readFile(dir, name string) string {
 	h.t.Helper()
+	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		h.t.Fatalf("read %s: %v", name, err)
@@ -130,7 +132,7 @@ func serve(t *testing.T, srv *Server) string {
 	if err != nil {
 		t.Fatalf("mkdir sock dir: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "s.sock")
 
 	ln, err := net.Listen("unix", sock)
@@ -148,7 +150,7 @@ func serve(t *testing.T, srv *Server) string {
 	t.Cleanup(func() {
 		cancel()
 		<-done
-		ln.Close()
+		_ = ln.Close()
 	})
 	return sock
 }
@@ -242,7 +244,7 @@ func TestUnknownMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte(`{"method":"bogus"}` + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}

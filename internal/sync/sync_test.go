@@ -49,7 +49,7 @@ func newHarness(t *testing.T) *harness {
 		seed:    filepath.Join(root, "seed"),
 		dataLoc: filepath.Join(root, "data"),
 	}
-	if err := os.MkdirAll(h.dataLoc, 0o755); err != nil {
+	if err := os.MkdirAll(h.dataLoc, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
 	h.runGit(root, "init", "--bare", "-b", "main", h.origin)
@@ -135,6 +135,7 @@ func (h *harness) configGit(dir string) {
 
 func (h *harness) runGit(dir string, args ...string) string {
 	h.t.Helper()
+	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -146,6 +147,7 @@ func (h *harness) runGit(dir string, args ...string) string {
 
 func (h *harness) runJJ(dir string, args ...string) string {
 	h.t.Helper()
+	//nolint:gosec // G204: test helper running jj with test-controlled args against a temp repo.
 	cmd := exec.Command("jj", append([]string{"--repository", dir}, args...)...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -164,6 +166,7 @@ func (h *harness) writeFile(dir, name, content string) {
 
 func (h *harness) readFile(dir, name string) string {
 	h.t.Helper()
+	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		h.t.Fatalf("read %s: %v", name, err)
@@ -238,6 +241,7 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 func TestSyncNoTrunkRepo(t *testing.T) {
 	h := newHarness(t)
 	dest := filepath.Join(h.dataLoc, "gamma")
+	//nolint:gosec // G204: test running jj against a test-controlled temp dest.
 	cmd := exec.Command("jj", "git", "init", "--colocate", dest)
 	cmd.Dir = h.root
 	if out, err := cmd.CombinedOutput(); err != nil {

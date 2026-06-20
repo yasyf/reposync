@@ -88,6 +88,7 @@ func (f *fixture) jjClone(dest string) string {
 // jjInit creates a remoteless colocated jj repo at dest.
 func (f *fixture) jjInit(dest string) string {
 	f.t.Helper()
+	//nolint:gosec // G204: test helper running jj against a test-controlled temp dest.
 	cmd := exec.Command("jj", "git", "init", "--colocate", dest)
 	cmd.Dir = f.root
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -150,6 +151,7 @@ func (f *fixture) configGit(dir string) {
 
 func (f *fixture) runGit(dir string, args ...string) string {
 	f.t.Helper()
+	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -161,6 +163,7 @@ func (f *fixture) runGit(dir string, args ...string) string {
 
 func (f *fixture) runJJ(dir string, args ...string) string {
 	f.t.Helper()
+	//nolint:gosec // G204: test helper running jj with test-controlled args against a temp repo.
 	cmd := exec.Command("jj", append([]string{"--repository", dir}, args...)...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
@@ -175,6 +178,7 @@ func (f *fixture) runJJ(dir string, args ...string) string {
 // an empty list rather than a fatal error.
 func (f *fixture) runJJConflicts(dir string) string {
 	f.t.Helper()
+	//nolint:gosec // G204: test helper running jj against a test-controlled temp repo.
 	cmd := exec.Command("jj", "--repository", dir, "resolve", "--list")
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
@@ -198,6 +202,7 @@ func (f *fixture) writeFile(dir, name, content string) {
 
 func (f *fixture) readFile(dir, name string) string {
 	f.t.Helper()
+	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
 	data, err := os.ReadFile(filepath.Join(dir, name))
 	if err != nil {
 		f.t.Fatalf("read %s: %v", name, err)

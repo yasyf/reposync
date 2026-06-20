@@ -50,7 +50,7 @@ func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
 			return err
 		}
 		tmpRoot := filepath.Join(dl, TmpDirName)
-		defer os.RemoveAll(tmpRoot)
+		defer func() { _ = os.RemoveAll(tmpRoot) }()
 
 		results = make([]Result, len(st.Repos))
 		for i, repo := range st.Repos {
@@ -85,14 +85,14 @@ func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmp
 // clone of the expected origin, then atomically renames it onto abspath. A
 // pre-existing non-repo directory at abspath makes the rename fail loudly.
 func clone(ctx context.Context, repo state.Repo, abspath, tmpRoot string) error {
-	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+	if err := os.MkdirAll(tmpRoot, 0o750); err != nil {
 		return fmt.Errorf("create temp root %s: %w", tmpRoot, err)
 	}
 	parent, err := os.MkdirTemp(tmpRoot, "clone-*")
 	if err != nil {
 		return fmt.Errorf("create temp clone dir: %w", err)
 	}
-	defer os.RemoveAll(parent)
+	defer func() { _ = os.RemoveAll(parent) }()
 	tmp := filepath.Join(parent, filepath.Base(repo.Relpath))
 
 	if err := vcs.Clone(ctx, repo.Origin, tmp); err != nil {
@@ -101,7 +101,7 @@ func clone(ctx context.Context, repo state.Repo, abspath, tmpRoot string) error 
 	if err := verifyClone(ctx, tmp, repo.Origin); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(abspath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abspath), 0o750); err != nil {
 		return fmt.Errorf("create parent of %s: %w", abspath, err)
 	}
 	if err := os.Rename(tmp, abspath); err != nil {

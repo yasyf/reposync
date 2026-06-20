@@ -50,7 +50,7 @@ func Watch(ctx context.Context, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	defer wm.close()
+	defer func() { _ = wm.close() }()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -59,7 +59,7 @@ func Watch(ctx context.Context, st *state.State) error {
 	dispatch := func(pdu map[string]json.RawMessage) {
 		var name string
 		if raw, ok := pdu["subscription"]; ok {
-			json.Unmarshal(raw, &name)
+			_ = json.Unmarshal(raw, &name)
 		}
 		if repo, ok := subs[name]; ok {
 			eng.onEvent(ctx, repo)
@@ -76,14 +76,14 @@ func Watch(ctx context.Context, st *state.State) error {
 			// watchman resolves the watch root with strict case-sensitive rules and
 			// rejects a symlinked path (e.g. macOS /tmp -> /private/tmp), so hand it
 			// the real path.
-			real, err := filepath.EvalSymlinks(dir)
+			realPath, err := filepath.EvalSymlinks(dir)
 			if err != nil {
 				log.Printf("watch: %s: resolve watch dir %s: %v", repo.Relpath, dir, err)
 				continue
 			}
 			name := fmt.Sprintf("reposync:%s:%d", repo.Relpath, i)
 			subs[name] = repo
-			if err := wm.subscribe(real, name, dispatch); err != nil {
+			if err := wm.subscribe(realPath, name, dispatch); err != nil {
 				delete(subs, name)
 				log.Printf("watch: %s: %v", repo.Relpath, err)
 			}
@@ -94,7 +94,7 @@ func Watch(ctx context.Context, st *state.State) error {
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	errc := make(chan error, 2)
 	go func() { errc <- wm.runSubscriptions(ctx, dispatch) }()

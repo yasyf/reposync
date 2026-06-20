@@ -98,7 +98,7 @@ func (c *watchmanConn) request(onSubscription func(map[string]json.RawMessage), 
 		}
 		if raw, ok := pdu["error"]; ok {
 			var msg string
-			json.Unmarshal(raw, &msg)
+			_ = json.Unmarshal(raw, &msg)
 			return nil, fmt.Errorf("watchman error: %s", msg)
 		}
 		return pdu, nil
@@ -117,7 +117,7 @@ func (c *watchmanConn) subscribe(dir, name string, onSubscription func(map[strin
 	}
 	root := dir
 	if raw, ok := watchResp["watch"]; ok {
-		json.Unmarshal(raw, &root)
+		_ = json.Unmarshal(raw, &root)
 	}
 
 	clockResp, err := c.request(onSubscription, "clock", root)
@@ -126,7 +126,7 @@ func (c *watchmanConn) subscribe(dir, name string, onSubscription func(map[strin
 	}
 	var clock string
 	if raw, ok := clockResp["clock"]; ok {
-		json.Unmarshal(raw, &clock)
+		_ = json.Unmarshal(raw, &clock)
 	}
 
 	query := map[string]any{
@@ -145,7 +145,7 @@ func (c *watchmanConn) subscribe(dir, name string, onSubscription func(map[strin
 func (c *watchmanConn) runSubscriptions(ctx context.Context, onSubscription func(map[string]json.RawMessage)) error {
 	go func() {
 		<-ctx.Done()
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 	for {
 		pdu, err := c.readPDU()

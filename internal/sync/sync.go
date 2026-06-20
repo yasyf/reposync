@@ -28,7 +28,7 @@ type Result struct {
 // pushing. When repoFilter is non-empty only the repo whose absolute path or
 // relpath matches it is synced; an unmatched filter is an error. origin is the
 // optional anti-echo provenance tag from the watcher, currently advisory.
-func Sync(ctx context.Context, st *state.State, repoFilter, origin string) ([]Result, error) {
+func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
 		return nil, err

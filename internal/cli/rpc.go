@@ -24,7 +24,7 @@ func newRPCSyncCmd() *cobra.Command {
 		Use:   "sync",
 		Short: "Ask the daemon to idle-sync the registered repos.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			sock, err := state.SockPath()
 			if err != nil {
 				return err
@@ -46,7 +46,7 @@ func newRPCReconcileCmd() *cobra.Command {
 		Use:   "reconcile",
 		Short: "Ask the daemon to clone-and-sync every registered repo.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			sock, err := state.SockPath()
 			if err != nil {
 				return err

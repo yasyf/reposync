@@ -12,7 +12,7 @@ func newWatchCmd() *cobra.Command {
 		Use:   "watch",
 		Short: "Run the event-based watch daemon, notifying peers on trunk changes.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err

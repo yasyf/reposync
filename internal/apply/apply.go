@@ -20,12 +20,12 @@ type RepoSelection struct {
 	Disable []string
 }
 
-// ApplyRepos applies the selection in one locked state mutation, then converges
+// Repos applies the selection in one locked state mutation, then converges
 // with a single reconcile and a single peer push. It returns the reconcile
 // results; peer-propagation failures are joined into the error but never discard
 // those results. Disabling removes a repo from tracking only — its on-disk
 // checkout is left in place.
-func ApplyRepos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.Result, error) {
+func Repos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.Result, error) {
 	st, err := state.Update(func(s *state.State) error {
 		for _, c := range sel.Enable {
 			s.UpsertRepo(state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})

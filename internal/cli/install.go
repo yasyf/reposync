@@ -18,7 +18,7 @@ func newInstallCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Install the launchd reconcile tick and watch daemon LaunchAgents.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := service.Install(cmd.Context(), service.NewLauncher(), tickOnly); err != nil {
 				return err
 			}
@@ -34,7 +34,7 @@ func newUninstallCmd() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Unload and remove the reposync LaunchAgents.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := service.Uninstall(cmd.Context(), service.NewLauncher()); err != nil {
 				return err
 			}

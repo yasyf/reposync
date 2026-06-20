@@ -78,7 +78,7 @@ func (d repoDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 		row = pendingAccent.Render(row)
 	}
 
-	io.WriteString(w, lipgloss.NewStyle().MaxWidth(m.Width()).Render(row))
+	_, _ = io.WriteString(w, lipgloss.NewStyle().MaxWidth(m.Width()).Render(row))
 }
 
 // renderRepoDetail describes the selected repo for the detail pane: its kind,

@@ -14,7 +14,7 @@ func newReconcileCmd() *cobra.Command {
 		Use:   "reconcile",
 		Short: "Clone every missing repo and idle-sync every present one.",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err

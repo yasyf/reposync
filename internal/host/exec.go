@@ -28,6 +28,7 @@ func (execRunner) SSH(ctx context.Context, target, remoteCmd string) (string, er
 }
 
 func runCmd(ctx context.Context, name string, args ...string) (string, error) {
+	//nolint:gosec // G204: reposync is a CLI sync tool whose job is to run ssh/git; name and args come from trusted local state (registered hosts, repo config), not untrusted input.
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

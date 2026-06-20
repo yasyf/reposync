@@ -27,7 +27,7 @@ func newReposHarness(t *testing.T) *reposHarness {
 		t.Fatalf("resolve temp dir: %v", err)
 	}
 	dataLoc := filepath.Join(root, "data")
-	if err := os.MkdirAll(dataLoc, 0o755); err != nil {
+	if err := os.MkdirAll(dataLoc, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
 	return &reposHarness{t: t, dataLoc: dataLoc}
@@ -43,7 +43,7 @@ func requireGit(t *testing.T) {
 func (h *reposHarness) child(name string) string {
 	h.t.Helper()
 	dir := filepath.Join(h.dataLoc, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		h.t.Fatalf("mkdir %s: %v", name, err)
 	}
 	return dir
@@ -63,6 +63,7 @@ func (h *reposHarness) gitRepo(name, origin string) string {
 
 func (h *reposHarness) runGit(dir string, args ...string) string {
 	h.t.Helper()
+	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -119,7 +120,8 @@ func TestReposClassifiesChildren(t *testing.T) {
 	if err := os.Chmod(brokenGit, 0o000); err != nil {
 		t.Fatalf("chmod broken .git: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(brokenGit, 0o755) })
+	//nolint:gosec // G302: brokenGit is a directory; 0o750 restores traversable perms for test cleanup.
+	t.Cleanup(func() { _ = os.Chmod(brokenGit, 0o750) })
 
 	st := h.state(state.Repo{Relpath: "withorigin", Origin: origin, Trunk: "main"})
 

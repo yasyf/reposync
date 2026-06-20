@@ -24,7 +24,7 @@ func call(ctx context.Context, sockPath string, req Request) (*Response, error) 
 	if err != nil {
 		return nil, fmt.Errorf("dial daemon at %s: %w", sockPath, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {

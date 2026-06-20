@@ -126,6 +126,7 @@ func NewLauncher() Loader {
 }
 
 func (launchctlLoader) Load(ctx context.Context, plistPath string) error {
+	//nolint:gosec // G204: plistPath is reposync's own generated launchd plist path, not user-supplied.
 	cmd := exec.CommandContext(ctx, "launchctl", "load", plistPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl load %s: %w: %s", plistPath, err, bytes.TrimSpace(out))
@@ -134,6 +135,7 @@ func (launchctlLoader) Load(ctx context.Context, plistPath string) error {
 }
 
 func (launchctlLoader) Unload(ctx context.Context, plistPath string) error {
+	//nolint:gosec // G204: plistPath is reposync's own generated launchd plist path, not user-supplied.
 	out, err := exec.CommandContext(ctx, "launchctl", "unload", plistPath).CombinedOutput()
 	if err == nil {
 		return nil

@@ -17,7 +17,7 @@ type recordingRunner struct {
 	err  error
 }
 
-func (r *recordingRunner) SSH(ctx context.Context, target, remoteCmd string) (string, error) {
+func (r *recordingRunner) SSH(_ context.Context, target, remoteCmd string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cmds == nil {
