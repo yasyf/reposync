@@ -17,7 +17,7 @@ import (
 
 const (
 	// TickLabel is the launchd label for the periodic reconcile tick.
-	TickLabel = "com.github.yasyf.reposync"
+	TickLabel = "com.github.yasyf.reposync.reconcile"
 	// WatchLabel is the launchd label for the long-lived watch daemon.
 	WatchLabel = "com.github.yasyf.reposync.watch"
 

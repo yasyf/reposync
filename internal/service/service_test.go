@@ -52,7 +52,7 @@ func TestTickPlist(t *testing.T) {
 	logPath := filepath.Join(home, tickLogRelpath)
 	assertContains(t,
 		out,
-		"<string>com.github.yasyf.reposync</string>",
+		"<string>com.github.yasyf.reposync.reconcile</string>",
 		"<string>"+fakeExe+"</string>",
 		"<string>reconcile</string>",
 		"<key>EnvironmentVariables</key>",
@@ -175,7 +175,7 @@ func TestInstallBothAgents(t *testing.T) {
 		t.Fatalf("read tick plist: %v", err)
 	}
 	assertContains(t, string(tickData),
-		"<string>com.github.yasyf.reposync</string>",
+		"<string>com.github.yasyf.reposync.reconcile</string>",
 		"<string>reconcile</string>",
 		"<key>StartInterval</key>\n\t<integer>900</integer>",
 	)
