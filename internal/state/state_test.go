@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestLoadMissingReturnsDefaults(t *testing.T) {
@@ -33,6 +36,9 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	}
 	if got := time.Duration(s.Settings.WatchDebounce); got != 3*time.Second {
 		t.Errorf("WatchDebounce = %s, want 3s", got)
+	}
+	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
+		t.Errorf("RepoOpTimeout = %s, want 2m", got)
 	}
 }
 
@@ -63,6 +69,9 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 	}
 	if got := time.Duration(s.Settings.WatchDebounce); got != 3*time.Second {
 		t.Errorf("WatchDebounce = %s, want default 3s", got)
+	}
+	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
+		t.Errorf("RepoOpTimeout = %s, want default 2m", got)
 	}
 }
 
@@ -97,6 +106,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			Interval:      Duration(15 * time.Minute),
 			IdleThreshold: Duration(5 * time.Minute),
 			WatchDebounce: Duration(3 * time.Second),
+			RepoOpTimeout: Duration(2 * time.Minute),
 		},
 	}
 	if err := want.Save(); err != nil {
@@ -298,7 +308,7 @@ func TestWithLockRunsFnAndCreatesLockFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	ran := false
-	if err := WithLock(func() error {
+	if err := WithLock(context.Background(), func() error {
 		ran = true
 		return nil
 	}); err != nil {
@@ -316,8 +326,74 @@ func TestWithLockRunsFnAndCreatesLockFile(t *testing.T) {
 		t.Errorf("lock file missing: %v", err)
 	}
 
-	if err := WithLock(func() error { return nil }); err != nil {
+	if err := WithLock(context.Background(), func() error { return nil }); err != nil {
 		t.Errorf("second WithLock: %v", err)
+	}
+}
+
+func TestWithLockContendedReturnsErrLockBusy(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	dir, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the lock via an independent flock handle on the same file, simulating
+	// another process holding the reconcile lock.
+	holder := flock.New(filepath.Join(dir, lockFile))
+	locked, err := holder.TryLock()
+	if err != nil {
+		t.Fatalf("hold lock: %v", err)
+	}
+	if !locked {
+		t.Fatal("could not acquire lock to hold")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	ran := false
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		done <- WithLock(ctx, func() error {
+			ran = true
+			return nil
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("contended WithLock took %s, want fast failure", elapsed)
+		}
+		if !errors.Is(err, ErrLockBusy) {
+			t.Fatalf("WithLock err = %v, want ErrLockBusy", err)
+		}
+		if ran {
+			t.Error("fn ran despite the lock being held")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("contended WithLock blocked past its deadline")
+	}
+
+	// Release the held lock; a fresh acquire must now succeed.
+	if err := holder.Unlock(); err != nil {
+		t.Fatalf("release held lock: %v", err)
+	}
+	acquired := false
+	if err := WithLock(context.Background(), func() error {
+		acquired = true
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLock after release: %v", err)
+	}
+	if !acquired {
+		t.Error("fn did not run after the lock was released")
 	}
 }
 
@@ -378,7 +454,7 @@ func TestRepoAbsPath(t *testing.T) {
 func TestUpdatePersistsMutation(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	out, err := Update(func(s *State) error {
+	out, err := Update(context.Background(), func(s *State) error {
 		s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
 		return nil
 	})
@@ -402,7 +478,7 @@ func TestUpdateFnErrorAbortsSave(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	sentinel := errors.New("boom")
-	out, err := Update(func(s *State) error {
+	out, err := Update(context.Background(), func(s *State) error {
 		s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
 		return sentinel
 	})
@@ -434,7 +510,7 @@ func TestUpdateConcurrentNoLostUpdates(t *testing.T) {
 			defer wg.Done()
 			relpath := fmt.Sprintf("repo-%02d", i)
 			origin := fmt.Sprintf("https://example.com/repo-%02d.git", i)
-			_, errs[i] = Update(func(s *State) error {
+			_, errs[i] = Update(context.Background(), func(s *State) error {
 				s.UpsertRepo(Repo{Relpath: relpath, Origin: origin, Trunk: "main"})
 				return nil
 			})

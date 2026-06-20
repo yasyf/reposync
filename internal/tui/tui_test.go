@@ -45,7 +45,7 @@ func hermeticOptions(t *testing.T) Options {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	emptyRepos := t.TempDir()
-	if _, err := state.Update(func(s *state.State) error {
+	if _, err := state.Update(context.Background(), func(s *state.State) error {
 		s.DefaultLocation = emptyRepos
 		return nil
 	}); err != nil {

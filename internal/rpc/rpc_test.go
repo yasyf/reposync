@@ -84,6 +84,7 @@ func (h *harness) state(repos ...state.Repo) *state.State {
 		Repos:           repos,
 		Settings: state.Settings{
 			IdleThreshold: state.Duration(time.Nanosecond),
+			RepoOpTimeout: state.Duration(time.Minute),
 		},
 	}
 }

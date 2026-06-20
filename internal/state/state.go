@@ -3,6 +3,7 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,13 @@ const (
 	defaultInterval      = 15 * time.Minute
 	defaultIdleThreshold = 5 * time.Minute
 	defaultWatchDebounce = 3 * time.Second
+	defaultRepoOpTimeout = 2 * time.Minute
+
+	lockRetryDelay = 200 * time.Millisecond
 )
+
+// ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
+var ErrLockBusy = errors.New("reconcile lock held by another process")
 
 // Duration is a time.Duration that marshals to and from a JSON string such as "15m".
 type Duration time.Duration
@@ -34,6 +41,7 @@ type Settings struct {
 	Interval      Duration `json:"interval"`
 	IdleThreshold Duration `json:"idle_threshold"`
 	WatchDebounce Duration `json:"watch_debounce"`
+	RepoOpTimeout Duration `json:"repo_op_timeout"`
 }
 
 // Repo is a tracked repository placed at Relpath under the host's default location.
@@ -188,6 +196,9 @@ func (s *State) applyDefaults() {
 	if s.Settings.WatchDebounce == 0 {
 		s.Settings.WatchDebounce = Duration(defaultWatchDebounce)
 	}
+	if s.Settings.RepoOpTimeout == 0 {
+		s.Settings.RepoOpTimeout = Duration(defaultRepoOpTimeout)
+	}
 }
 
 // Dir returns the reposync config directory under XDG_CONFIG_HOME or ~/.config.
@@ -246,9 +257,9 @@ func Load() (*State, error) {
 
 // Update runs fn against a freshly loaded State under the reconcile-lock flock,
 // then atomically saves it. Serializes read-modify-write across processes.
-func Update(fn func(*State) error) (*State, error) {
+func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 	var out *State
-	err := WithLock(func() error {
+	err := WithLock(ctx, func() error {
 		st, err := Load()
 		if err != nil {
 			return err
@@ -265,8 +276,10 @@ func Update(fn func(*State) error) (*State, error) {
 	return out, err
 }
 
-// WithLock runs fn while holding an exclusive flock on the reconcile lock file.
-func WithLock(fn func() error) error {
+// WithLock runs fn while holding an exclusive flock on the reconcile lock file,
+// giving up with ErrLockBusy once ctx is done so a contended acquire fails fast
+// instead of blocking on a wedged holder.
+func WithLock(ctx context.Context, fn func() error) error {
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -275,8 +288,9 @@ func WithLock(fn func() error) error {
 		return fmt.Errorf("create state dir %s: %w", dir, err)
 	}
 	lock := flock.New(filepath.Join(dir, lockFile))
-	if err := lock.Lock(); err != nil {
-		return fmt.Errorf("acquire reconcile lock: %w", err)
+	locked, err := lock.TryLockContext(ctx, lockRetryDelay)
+	if !locked {
+		return fmt.Errorf("%w: %w", ErrLockBusy, err)
 	}
 	defer func() { _ = lock.Unlock() }()
 	return fn()

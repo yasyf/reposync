@@ -26,7 +26,7 @@ type RepoSelection struct {
 // those results. Disabling removes a repo from tracking only — its on-disk
 // checkout is left in place.
 func Repos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.Result, error) {
-	st, err := state.Update(func(s *state.State) error {
+	st, err := state.Update(ctx, func(s *state.State) error {
 		for _, c := range sel.Enable {
 			s.UpsertRepo(state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})
 		}
@@ -39,7 +39,11 @@ func Repos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.R
 		return nil, fmt.Errorf("apply repo selection: %w", err)
 	}
 
-	results, err := reconcile.Reconcile(ctx, st)
+	enabled := make([]state.Repo, 0, len(sel.Enable))
+	for _, c := range sel.Enable {
+		enabled = append(enabled, state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})
+	}
+	results, err := reconcile.ReconcileRepos(ctx, st, enabled)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile after apply: %w", err)
 	}

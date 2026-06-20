@@ -466,7 +466,9 @@ func verifyHostCmd(r host.Runner, target string) tea.Cmd {
 
 func removeHostCmd(target string) tea.Cmd {
 	return func() tea.Msg {
-		return hostRemovedMsg{target: target, err: host.RemoveHost(target)}
+		ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+		defer cancel()
+		return hostRemovedMsg{target: target, err: host.RemoveHost(ctx, target)}
 	}
 }
 

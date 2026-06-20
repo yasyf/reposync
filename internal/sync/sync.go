@@ -40,6 +40,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 	}
 
 	idle := time.Duration(st.Settings.IdleThreshold)
+	repoOpTimeout := time.Duration(st.Settings.RepoOpTimeout)
 	results := make([]Result, len(targets))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -49,7 +50,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 		go func(i int, repo state.Repo) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle)
+			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle, repoOpTimeout)
 		}(i, repo)
 	}
 	wg.Wait()
@@ -72,7 +73,10 @@ func selectRepos(st *state.State, dl, repoFilter string) ([]state.Repo, error) {
 	return nil, fmt.Errorf("repo not registered: %s", repoFilter)
 }
 
-func syncOne(ctx context.Context, repo state.Repo, abspath string, idle time.Duration) Result {
+func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, repoOpTimeout time.Duration) Result {
+	ctx, cancel := context.WithTimeout(ctx, repoOpTimeout)
+	defer cancel()
+
 	res := Result{Relpath: repo.Relpath}
 
 	r, err := vcs.Open(abspath, repo.Trunk)

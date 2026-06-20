@@ -89,6 +89,7 @@ func (h *harness) seedState(repos ...state.Repo) {
 		Repos:           repos,
 		Settings: state.Settings{
 			IdleThreshold: state.Duration(time.Nanosecond),
+			RepoOpTimeout: state.Duration(time.Minute),
 		},
 	}
 	if err := st.Save(); err != nil {
@@ -225,7 +226,7 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(func(s *state.State) error {
+	if _, err := state.Update(context.Background(), func(s *state.State) error {
 		s.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
@@ -263,7 +264,7 @@ func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
 func TestApplyReposLocalOnlyNotPropagated(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(func(s *state.State) error {
+	if _, err := state.Update(context.Background(), func(s *state.State) error {
 		s.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
@@ -323,10 +324,50 @@ func TestApplyReposDisableUntracksButKeepsCheckout(t *testing.T) {
 	}
 }
 
+func TestApplyReposReconcilesOnlyEnabledSubset(t *testing.T) {
+	h := newHarness(t)
+	// Pre-track a repo and bring it on disk so it would surface as "present" if
+	// apply reconciled the whole registered set instead of just the new repo.
+	h.seedState(state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"})
+	st, err := state.Load()
+	if err != nil {
+		t.Fatalf("load seeded state: %v", err)
+	}
+	if _, err := reconcile.Reconcile(context.Background(), st); err != nil {
+		t.Fatalf("seed reconcile of pre-tracked repo: %v", err)
+	}
+	if !h.exists(filepath.Join(h.dataLoc, "beta", ".jj")) {
+		t.Fatal("precondition: pre-tracked beta not present on disk")
+	}
+
+	sel := RepoSelection{
+		Enable: []discover.Candidate{
+			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
+		},
+	}
+	results, err := Repos(context.Background(), &fakeRunner{}, sel)
+	if err != nil {
+		t.Fatalf("ApplyRepos: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want exactly one (the enabled repo)", results)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil || res.Action != reconcile.ActionCloned {
+		t.Fatalf("alpha result = %+v, want cloned without error", res)
+	}
+	for _, r := range results {
+		if r.Relpath == "beta" {
+			t.Fatalf("apply reconciled the pre-tracked beta repo: %+v", results)
+		}
+	}
+}
+
 func TestApplyReposPropagateFailureKeepsResults(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(func(s *state.State) error {
+	if _, err := state.Update(context.Background(), func(s *state.State) error {
 		s.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {

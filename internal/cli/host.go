@@ -63,8 +63,8 @@ func newHostRmCmd() *cobra.Command {
 		Use:   "rm <user@node>",
 		Short: "Unregister a peer host.",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if err := host.RemoveHost(args[0]); err != nil {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := host.RemoveHost(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			fmt.Printf("unregistered host %s\n", args[0])

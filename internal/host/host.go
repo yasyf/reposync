@@ -80,7 +80,7 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 		self = detected // "" when detection fails on the no-recurse path
 	}
 
-	if _, err := state.Update(func(s *state.State) error {
+	if _, err := state.Update(ctx, func(s *state.State) error {
 		s.UpsertHost(target)
 		if self != "" {
 			s.Self = self
@@ -140,8 +140,8 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 }
 
 // RemoveHost unregisters target as a peer and persists the change.
-func RemoveHost(target string) error {
-	if _, err := state.Update(func(s *state.State) error {
+func RemoveHost(ctx context.Context, target string) error {
+	if _, err := state.Update(ctx, func(s *state.State) error {
 		s.RemoveHost(target)
 		return nil
 	}); err != nil {

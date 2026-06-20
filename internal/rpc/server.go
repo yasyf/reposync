@@ -18,6 +18,11 @@ import (
 // line, so a peer that connects and never writes cannot park a handler goroutine.
 const requestReadTimeout = 30 * time.Second
 
+// dispatchTimeout caps how long a single dispatched method may run. The handler
+// ctx inherits the daemon's lifetime, which has no deadline, so without this the
+// bounded reconcile flock could still wait forever.
+const dispatchTimeout = 10 * time.Minute
+
 // Server handles RPC requests against the host's reposync state. It serializes
 // dispatch with a mutex so the per-host flock is acquired by at most one in-flight
 // request at a time, never nested.
@@ -73,6 +78,9 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	ctx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+	defer cancel()
+
 	st, err := s.load()
 	if err != nil {
 		return Response{Err: err.Error()}
@@ -81,7 +89,7 @@ func (s *Server) dispatch(ctx context.Context, req Request) Response {
 	switch req.Method {
 	case MethodSync:
 		var res []syncpkg.Result
-		err := state.WithLock(func() error {
+		err := state.WithLock(ctx, func() error {
 			r, err := syncpkg.Sync(ctx, st, req.Relpath, req.Origin)
 			res = r
 			return err

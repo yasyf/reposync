@@ -128,8 +128,8 @@ func newRepoAddRemoteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add-remote",
 		Short: "Idempotently upsert a repo by origin (used for peer propagation).",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			_, err := state.Update(func(s *state.State) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, err := state.Update(cmd.Context(), func(s *state.State) error {
 				s.UpsertRepo(state.Repo{Relpath: relpath, Origin: origin, Trunk: trunk})
 				return nil
 			})
@@ -149,7 +149,7 @@ func newRepoRmCmd() *cobra.Command {
 		Use:   "rm <path>",
 		Short: "Unregister a repo (does not delete the checkout).",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			st, err := state.Load()
 			if err != nil {
 				return err
@@ -158,7 +158,7 @@ func newRepoRmCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := state.Update(func(s *state.State) error {
+			if _, err := state.Update(cmd.Context(), func(s *state.State) error {
 				s.RemoveRepo(relpath)
 				return nil
 			}); err != nil {

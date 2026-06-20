@@ -2,7 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -16,6 +18,10 @@ import (
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
 )
+
+// applyTimeout bounds a TUI apply so a wedged reconcile holder surfaces as
+// ErrLockBusy rather than parking the UI.
+const applyTimeout = 10 * time.Minute
 
 // confirmState is an open yes/no dialog awaiting the selection it guards.
 type confirmState struct {
@@ -327,9 +333,13 @@ func discoverReposCmd() tea.Cmd {
 	}
 }
 
+// applyReposCmd runs the apply under a bounded ctx so a wedged reconcile holder
+// cannot park the TUI forever; the bounded WithLock surfaces ErrLockBusy instead.
 func applyReposCmd(r host.Runner, sel apply.RepoSelection) tea.Cmd {
 	return func() tea.Msg {
-		results, err := apply.Repos(context.Background(), r, sel)
+		ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
+		defer cancel()
+		results, err := apply.Repos(ctx, r, sel)
 		return reposAppliedMsg{results: results, err: err}
 	}
 }
@@ -347,6 +357,9 @@ func scanDir() string {
 }
 
 func applySummary(results []reconcile.Result, err error) string {
+	if errors.Is(err, state.ErrLockBusy) {
+		return statusErr.Render("reconcile in progress, try again")
+	}
 	var cloned, present, errs int
 	for _, r := range results {
 		switch {

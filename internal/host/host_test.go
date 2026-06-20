@@ -382,7 +382,7 @@ func TestRemoveHost(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	if err := RemoveHost("a@host"); err != nil {
+	if err := RemoveHost(context.Background(), "a@host"); err != nil {
 		t.Fatalf("RemoveHost: %v", err)
 	}
 

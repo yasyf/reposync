@@ -2,6 +2,8 @@ package reconcile
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,6 +85,7 @@ func (h *harness) state(repos ...state.Repo) *state.State {
 		Repos:           repos,
 		Settings: state.Settings{
 			IdleThreshold: state.Duration(time.Nanosecond),
+			RepoOpTimeout: state.Duration(time.Minute),
 		},
 	}
 }
@@ -323,6 +326,83 @@ func TestReconcileIdempotent(t *testing.T) {
 	}
 	if res.Action != ActionPresent {
 		t.Fatalf("second action = %q, want present", res.Action)
+	}
+}
+
+// blackHole opens a loopback listener that accepts connections and holds them
+// open without ever writing, so a clone over an ssh:// origin pointed at it hangs
+// at the protocol handshake until the per-op deadline kills it. The accept
+// goroutine owns every connection; cleanup closes the listener (unblocking
+// Accept) and waits for the goroutine to drop the parked conns.
+func blackHole(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen black-hole: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var conns []net.Conn
+		defer func() {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+		}()
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns = append(conns, c) // park it; never read or write
+		}
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	return ln.Addr().String()
+}
+
+func TestReconcileReposTimesOutAndReleasesLock(t *testing.T) {
+	h := newHarness(t)
+	addr := blackHole(t)
+	origin := fmt.Sprintf("ssh://git@%s/blackhole.git", addr)
+
+	st := h.state(state.Repo{Relpath: "wedged", Origin: origin, Trunk: "main"})
+	st.Settings.RepoOpTimeout = state.Duration(500 * time.Millisecond)
+
+	done := make(chan []Result, 1)
+	go func() {
+		res, err := ReconcileRepos(context.Background(), st, st.Repos)
+		if err != nil {
+			t.Errorf("ReconcileRepos returned a top-level error: %v", err)
+		}
+		done <- res
+	}()
+
+	select {
+	case results := <-done:
+		res := resultFor(t, results, "wedged")
+		if res.Err == nil {
+			t.Fatal("wedged clone: want a deadline error, got nil")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("ReconcileRepos did not honor RepoOpTimeout on a black-hole origin")
+	}
+
+	// The per-op deadline must have released the flock: a fresh acquire is immediate.
+	acquired := make(chan error, 1)
+	go func() {
+		acquired <- state.WithLock(context.Background(), func() error { return nil })
+	}()
+	select {
+	case err := <-acquired:
+		if err != nil {
+			t.Fatalf("WithLock after timed-out reconcile: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("flock not released after a timed-out reconcile")
 	}
 }
 

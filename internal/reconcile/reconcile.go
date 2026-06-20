@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/sync"
@@ -43,8 +44,15 @@ type Result struct {
 // Reconcile clones every absent registered repo and idle-syncs every present
 // one, holding the per-host reconcile flock for the whole pass.
 func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
+	return ReconcileRepos(ctx, st, st.Repos)
+}
+
+// ReconcileRepos clones every absent repo and idle-syncs every present one among
+// the given repos (a subset of st.Repos), holding the per-host reconcile flock
+// for the whole pass.
+func ReconcileRepos(ctx context.Context, st *state.State, repos []state.Repo) ([]Result, error) {
 	var results []Result
-	err := state.WithLock(func() error {
+	err := state.WithLock(ctx, func() error {
 		dl, err := st.DefaultLocationExpanded()
 		if err != nil {
 			return err
@@ -52,8 +60,8 @@ func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
 		tmpRoot := filepath.Join(dl, TmpDirName)
 		defer func() { _ = os.RemoveAll(tmpRoot) }()
 
-		results = make([]Result, len(st.Repos))
-		for i, repo := range st.Repos {
+		results = make([]Result, len(repos))
+		for i, repo := range repos {
 			results[i] = reconcileOne(ctx, st, repo, dl, tmpRoot)
 		}
 		return nil
@@ -65,6 +73,9 @@ func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
 }
 
 func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmpRoot string) Result {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(st.Settings.RepoOpTimeout))
+	defer cancel()
+
 	abspath := repo.AbsPath(dl)
 	if present(abspath) {
 		return Result{Relpath: repo.Relpath, Action: ActionPresent, Err: idleSync(ctx, st, abspath)}
