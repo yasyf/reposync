@@ -43,7 +43,7 @@ func Repos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.R
 	for _, c := range sel.Enable {
 		enabled = append(enabled, state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})
 	}
-	results, err := reconcile.ReconcileRepos(ctx, st, enabled)
+	results, err := reconcile.Repos(ctx, st, enabled)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile after apply: %w", err)
 	}

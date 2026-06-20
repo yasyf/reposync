@@ -364,7 +364,7 @@ func blackHole(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-func TestReconcileReposTimesOutAndReleasesLock(t *testing.T) {
+func TestReposTimesOutAndReleasesLock(t *testing.T) {
 	h := newHarness(t)
 	addr := blackHole(t)
 	origin := fmt.Sprintf("ssh://git@%s/blackhole.git", addr)
@@ -374,9 +374,9 @@ func TestReconcileReposTimesOutAndReleasesLock(t *testing.T) {
 
 	done := make(chan []Result, 1)
 	go func() {
-		res, err := ReconcileRepos(context.Background(), st, st.Repos)
+		res, err := Repos(context.Background(), st, st.Repos)
 		if err != nil {
-			t.Errorf("ReconcileRepos returned a top-level error: %v", err)
+			t.Errorf("Repos returned a top-level error: %v", err)
 		}
 		done <- res
 	}()
@@ -388,7 +388,7 @@ func TestReconcileReposTimesOutAndReleasesLock(t *testing.T) {
 			t.Fatal("wedged clone: want a deadline error, got nil")
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("ReconcileRepos did not honor RepoOpTimeout on a black-hole origin")
+		t.Fatal("Repos did not honor RepoOpTimeout on a black-hole origin")
 	}
 
 	// The per-op deadline must have released the flock: a fresh acquire is immediate.

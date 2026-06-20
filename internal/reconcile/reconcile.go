@@ -44,13 +44,13 @@ type Result struct {
 // Reconcile clones every absent registered repo and idle-syncs every present
 // one, holding the per-host reconcile flock for the whole pass.
 func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
-	return ReconcileRepos(ctx, st, st.Repos)
+	return Repos(ctx, st, st.Repos)
 }
 
-// ReconcileRepos clones every absent repo and idle-syncs every present one among
+// Repos clones every absent repo and idle-syncs every present one among
 // the given repos (a subset of st.Repos), holding the per-host reconcile flock
 // for the whole pass.
-func ReconcileRepos(ctx context.Context, st *state.State, repos []state.Repo) ([]Result, error) {
+func Repos(ctx context.Context, st *state.State, repos []state.Repo) ([]Result, error) {
 	var results []Result
 	err := state.WithLock(ctx, func() error {
 		dl, err := st.DefaultLocationExpanded()
