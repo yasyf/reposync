@@ -140,6 +140,16 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 		if !moved {
 			return OutcomeUpToDate, nil
 		}
+		// An empty @ is only safe to advance when its parent is already on trunk.
+		// Sitting atop unpushed local work, jj new <trunk> would reparent the
+		// working copy onto trunk and strand that work — leave it untouched.
+		safe, err := r.ancestrySafe(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !safe {
+			return OutcomeNotDisposable, nil
+		}
 		if _, err := r.jj(ctx, "new", r.trunk); err != nil {
 			return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
 		}

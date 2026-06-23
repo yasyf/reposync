@@ -599,6 +599,89 @@ func TestJJAdvanceGeneratedAtopUnpushedCommitNotDisposable(t *testing.T) {
 	}
 }
 
+// TestJJAdvanceEmptyAtopUnpushedCommitNotDisposable proves the ancestry safety gate
+// for an EMPTY working copy: an empty, undescribed, unbookmarked @ sitting on top of
+// an UNPUSHED described commit must not be advanced onto a moved trunk. `jj new
+// <trunk>` would reparent the working copy onto trunk and strand the local commit,
+// reverting the working copy to trunk content. Advance returns not-disposable, @
+// stays put, the unpushed commit remains an ancestor of @, and its file is intact.
+// This is the empty-@ sibling of TestJJAdvanceGeneratedAtopUnpushedCommitNotDisposable.
+func TestJJAdvanceEmptyAtopUnpushedCommitNotDisposable(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	// An unpushed local commit carrying real work; describe it, then create an empty
+	// @ on top — the common mid-branch state (committed work + fresh empty @).
+	f.writeFile(dest, "realsource.txt", "in progress real work\n")
+	f.snapshotJJ(dest)
+	f.runJJ(dest, "describe", "-m", "local unpushed work", "--ignore-working-copy")
+	unpushed := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+	f.runJJ(dest, "new", "--ignore-working-copy")
+
+	// Move trunk so Advance reaches the disposability / ancestry checks.
+	f.advanceOrigin("v2")
+	changeBefore := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable (unpushed parent is unsafe to advance)", got)
+	}
+	changeAfter := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if changeBefore != changeAfter {
+		t.Fatalf("@ moved from %q to %q, want unchanged", changeBefore, changeAfter)
+	}
+	// The unpushed described commit is still an ancestor of @.
+	ancestors := strings.TrimSpace(f.runJJ(dest, "log", "-r", unpushed+" & ::@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+	if ancestors != unpushed {
+		t.Fatalf("unpushed commit %q no longer an ancestor of @ (got %q): work stranded", unpushed, ancestors)
+	}
+	if c := f.readFile(dest, "realsource.txt"); c != "in progress real work\n" {
+		t.Fatalf("realsource.txt = %q, want local work intact (not clobbered)", c)
+	}
+}
+
+// TestJJAdvanceEmptyAtopFeatureBookmarkNotDisposable proves an empty @ whose parent
+// carries a non-trunk bookmark (a named feature branch) is not advanced: jj new
+// <trunk> would yank the working copy off the feature line. The bookmarked commit is
+// unpushed, so ancestrySafe is false and Advance declines, leaving @ on the feature.
+func TestJJAdvanceEmptyAtopFeatureBookmarkNotDisposable(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.writeFile(dest, "feature.txt", "feature work\n")
+	f.snapshotJJ(dest)
+	f.runJJ(dest, "bookmark", "create", "feature", "-r", "@", "--ignore-working-copy")
+	feature := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+	f.runJJ(dest, "new", "--ignore-working-copy")
+
+	f.advanceOrigin("v2")
+	changeBefore := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable (empty @ atop a feature bookmark)", got)
+	}
+	changeAfter := strings.TrimSpace(f.runJJ(dest, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if changeBefore != changeAfter {
+		t.Fatalf("@ moved from %q to %q, want unchanged", changeBefore, changeAfter)
+	}
+	onFeature := strings.TrimSpace(f.runJJ(dest, "log", "-r", "feature & ::@", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+	if onFeature != feature {
+		t.Fatalf("feature commit %q no longer an ancestor of @ (got %q): yanked off branch", feature, onFeature)
+	}
+	if c := f.readFile(dest, "feature.txt"); c != "feature work\n" {
+		t.Fatalf("feature.txt = %q, want feature work intact", c)
+	}
+}
+
 // TestJJAdvanceGeneratedConflictSpacedPath proves a generated path containing a SPACE
 // that conflicts with trunk is fully resolved: the `jj resolve --list` parser must
 // recover the whole path (not truncate at the first space), so after Advance the
