@@ -1,4 +1,4 @@
-package host
+package hostregistry
 
 import (
 	"bytes"
@@ -7,6 +7,14 @@ import (
 	"os/exec"
 	"strings"
 )
+
+// Runner executes commands locally and over SSH; the SSH/exec boundary tests mock.
+type Runner interface {
+	// Local runs name with args on this machine and returns its stdout.
+	Local(ctx context.Context, name string, args ...string) (string, error)
+	// SSH runs remoteCmd on target over ssh and returns its stdout.
+	SSH(ctx context.Context, target, remoteCmd string) (string, error)
+}
 
 // execRunner is the production Runner: Local shells out directly, SSH wraps the
 // remote command so it sources brew's shellenv (non-interactive ssh on macOS
@@ -37,4 +45,10 @@ func runCmd(ctx context.Context, name string, args ...string) (string, error) {
 		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+// ShellQuote single-quotes s so it survives intact as one argument to a remote
+// shell, escaping any embedded single quotes.
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

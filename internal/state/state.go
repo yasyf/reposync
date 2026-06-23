@@ -1,5 +1,10 @@
 // Package state loads and persists the reposync JSON state file that the
 // registration commands mutate and the sync, watch, and reconcile commands read.
+//
+// The host-identity slice of that file (self, hosts) and the path/lock primitives
+// live in the public github.com/yasyf/reposync/hostregistry package; this package
+// forwards to them so both writers serialize on one flock and share one on-disk
+// schema.
 package state
 
 import (
@@ -12,27 +17,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofrs/flock"
+	"github.com/yasyf/reposync/hostregistry"
 )
 
 const (
-	configSubdir = "reposync"
-	stateFile    = "state.json"
-	lockFile     = "reconcile.lock"
-	sockFile     = "rpc.sock"
-
 	defaultLocation      = "~/Code"
 	defaultInterval      = 15 * time.Minute
 	defaultIdleThreshold = 5 * time.Minute
 	defaultWatchDebounce = 3 * time.Second
 	defaultRepoOpTimeout = 2 * time.Minute
 	defaultPushAfter     = 24 * time.Hour
-
-	lockRetryDelay = 200 * time.Millisecond
 )
 
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
-var ErrLockBusy = errors.New("reconcile lock held by another process")
+var ErrLockBusy = hostregistry.ErrLockBusy
 
 // Duration is a time.Duration that marshals to and from a JSON string such as "15m".
 type Duration time.Duration
@@ -208,33 +206,17 @@ func (s *State) applyDefaults() {
 
 // Dir returns the reposync config directory under XDG_CONFIG_HOME or ~/.config.
 func Dir() (string, error) {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home dir: %w", err)
-		}
-		base = filepath.Join(home, ".config")
-	}
-	return filepath.Join(base, configSubdir), nil
+	return hostregistry.Dir()
 }
 
 // Path returns the absolute path to the state.json file.
 func Path() (string, error) {
-	dir, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, stateFile), nil
+	return hostregistry.Path()
 }
 
 // SockPath returns the absolute path to the daemon's RPC unix socket.
 func SockPath() (string, error) {
-	dir, err := Dir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, sockFile), nil
+	return hostregistry.SockPath()
 }
 
 // Load reads the state file, returning defaults when it does not yet exist.
@@ -261,7 +243,8 @@ func Load() (*State, error) {
 }
 
 // Update runs fn against a freshly loaded State under the reconcile-lock flock,
-// then atomically saves it. Serializes read-modify-write across processes.
+// then atomically saves it. Serializes read-modify-write across processes,
+// sharing the one canonical flock with hostregistry writers.
 func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 	var out *State
 	err := WithLock(ctx, func() error {
@@ -285,20 +268,7 @@ func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 // giving up with ErrLockBusy once ctx is done so a contended acquire fails fast
 // instead of blocking on a wedged holder.
 func WithLock(ctx context.Context, fn func() error) error {
-	dir, err := Dir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create state dir %s: %w", dir, err)
-	}
-	lock := flock.New(filepath.Join(dir, lockFile))
-	locked, err := lock.TryLockContext(ctx, lockRetryDelay)
-	if !locked {
-		return fmt.Errorf("%w: %w", ErrLockBusy, err)
-	}
-	defer func() { _ = lock.Unlock() }()
-	return fn()
+	return hostregistry.WithLock(ctx, fn)
 }
 
 func repoMatches(existing, incoming Repo) bool {

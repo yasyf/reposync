@@ -1,53 +1,53 @@
-// Package host handles cross-host registration and SSH bootstrap: detecting how
-// peers reach this machine, installing reposync on a remote, registering the
-// inverse host, sharing state, and driving remote reconcile/install over SSH.
+// Package host drives reposync's cross-host bootstrap: registering a peer,
+// installing reposync on it over ssh, sharing repos, and converging remote
+// reconcile/install. The repo-agnostic host-identity primitives (the Runner,
+// DetectSelf, Verify, the self/hosts registry) live in the public
+// github.com/yasyf/reposync/hostregistry package; this package aliases them and
+// layers the reposync-specific orchestration on top.
 package host
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
 )
 
-const maxConcurrentHosts = 8
-
 // Runner executes commands locally and over SSH; the SSH/exec boundary tests mock.
-type Runner interface {
-	// Local runs name with args on this machine and returns its stdout.
-	Local(ctx context.Context, name string, args ...string) (string, error)
-	// SSH runs remoteCmd on target over ssh and returns its stdout.
-	SSH(ctx context.Context, target, remoteCmd string) (string, error)
+type Runner = hostregistry.Runner
+
+// VerifyResult reports a single host's reachability and reposync install state.
+type VerifyResult = hostregistry.VerifyResult
+
+// NewExecRunner returns the default Runner that executes commands locally and over ssh.
+func NewExecRunner() Runner { return hostregistry.NewExecRunner() }
+
+// ShellQuote single-quotes s so it survives intact as one argument to a remote shell.
+func ShellQuote(s string) string { return hostregistry.ShellQuote(s) }
+
+// TailscaleNode returns the first DNS label of a tailscale DNSName.
+func TailscaleNode(dnsName string) string { return hostregistry.TailscaleNode(dnsName) }
+
+// DetectSelf returns the ssh target by which a peer reaches this machine.
+func DetectSelf(ctx context.Context, r Runner) (string, error) {
+	return hostregistry.DetectSelf(ctx, r)
 }
 
-// DetectSelf returns the ssh target by which a peer reaches this machine,
-// derived from the tailscale node name and the local user.
-func DetectSelf(ctx context.Context, r Runner) (string, error) {
-	out, err := r.Local(ctx, "tailscale", "status", "--json")
-	if err != nil {
-		return "", fmt.Errorf("detect self via tailscale (pass --self to override): %w", err)
-	}
-	var status struct {
-		Self struct {
-			DNSName string `json:"DNSName"`
-		} `json:"Self"`
-	}
-	if err := json.Unmarshal([]byte(out), &status); err != nil {
-		return "", fmt.Errorf("parse tailscale status (pass --self to override): %w", err)
-	}
-	node := TailscaleNode(status.Self.DNSName)
-	if node == "" {
-		return "", fmt.Errorf("empty tailscale node name (pass --self to override)")
-	}
-	user, err := r.Local(ctx, "id", "-un")
-	if err != nil {
-		return "", fmt.Errorf("detect local user: %w", err)
-	}
-	return strings.TrimSpace(user) + "@" + node, nil
+// Verify probes target over ssh: reachability, reposync install, and version.
+func Verify(ctx context.Context, r Runner, target string) VerifyResult {
+	return hostregistry.Verify(ctx, r, target)
+}
+
+// VerifyAll verifies every host concurrently, returning one result per host in input order.
+func VerifyAll(ctx context.Context, r Runner, hosts []string) []VerifyResult {
+	return hostregistry.VerifyAll(ctx, r, hosts)
+}
+
+// RemoveHost unregisters target as a peer and persists the change.
+func RemoveHost(ctx context.Context, target string) error {
+	return hostregistry.RemoveHost(ctx, target)
 }
 
 // AddHost registers target as a peer and, unless noRecurse, SSH-bootstraps
@@ -73,17 +73,17 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 	// (the inverse registration carries it) but best-effort on the no-recurse
 	// path, where a peer may not run tailscale.
 	if self == "" {
-		detected, err := DetectSelf(ctx, r)
+		detected, err := hostregistry.DetectSelf(ctx, r)
 		if err != nil && !noRecurse {
 			return log, err
 		}
 		self = detected // "" when detection fails on the no-recurse path
 	}
 
-	if _, err := state.Update(ctx, func(s *state.State) error {
-		s.UpsertHost(target)
+	if _, err := hostregistry.Update(ctx, func(g *hostregistry.Registry) error {
+		g.UpsertHost(target)
 		if self != "" {
-			s.Self = self
+			g.Self = self
 		}
 		return nil
 	}); err != nil {
@@ -99,7 +99,7 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 		return log, nil
 	}
 
-	if remoteInstalled(ctx, r, target) {
+	if hostregistry.RemoteInstalled(ctx, r, target) {
 		step("reposync already installed on " + target)
 	} else {
 		if err := remoteBrewInstall(ctx, r, target); err != nil {
@@ -139,17 +139,6 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 	return log, nil
 }
 
-// RemoveHost unregisters target as a peer and persists the change.
-func RemoveHost(ctx context.Context, target string) error {
-	if _, err := state.Update(ctx, func(s *state.State) error {
-		s.RemoveHost(target)
-		return nil
-	}); err != nil {
-		return fmt.Errorf("save state after removing %s: %w", target, err)
-	}
-	return nil
-}
-
 // PropagateRepo upserts repo onto every registered peer via repo add-remote,
 // skipping local-only or remoteless repos.
 func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Repo) error {
@@ -157,7 +146,7 @@ func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Re
 		return nil
 	}
 	cmd := addRemoteCmd(repo)
-	return eachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
+	return hostregistry.EachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
 		_, err := r.SSH(ctx, target, cmd)
 		return err
 	})
@@ -167,66 +156,10 @@ func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Re
 // over its RPC socket; a down host is logged into the returned error and does not
 // abort the others.
 func RemoteReconcile(ctx context.Context, st *state.State, r Runner) error {
-	return eachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
+	return hostregistry.EachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
 		_, err := r.SSH(ctx, target, "reposync rpc reconcile")
 		return err
 	})
-}
-
-// VerifyResult reports a single host's reachability and reposync install state.
-type VerifyResult struct {
-	Target       string
-	Reachable    bool
-	Bootstrapped bool
-	Version      string
-	Err          error
-}
-
-// Verify probes target over ssh: whether it is reachable, has reposync installed,
-// and its version.
-func Verify(ctx context.Context, r Runner, target string) VerifyResult {
-	res := VerifyResult{Target: target}
-	if remoteInstalled(ctx, r, target) {
-		res.Reachable = true
-		res.Bootstrapped = true
-		if out, err := r.SSH(ctx, target, "reposync --version"); err == nil {
-			res.Version = strings.TrimSpace(out)
-		}
-		return res
-	}
-	if _, err := r.SSH(ctx, target, "true"); err != nil {
-		res.Err = fmt.Errorf("probe %s: %w", target, err)
-		return res
-	}
-	res.Reachable = true
-	return res
-}
-
-// VerifyAll verifies every host concurrently, returning one result per host in
-// input order.
-func VerifyAll(ctx context.Context, r Runner, hosts []string) []VerifyResult {
-	results := make([]VerifyResult, len(hosts))
-	sem := make(chan struct{}, maxConcurrentHosts)
-	var wg sync.WaitGroup
-	for i, target := range hosts {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, target string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			results[i] = Verify(ctx, r, target)
-		}(i, target)
-	}
-	wg.Wait()
-	return results
-}
-
-func remoteInstalled(ctx context.Context, r Runner, target string) bool {
-	out, err := r.SSH(ctx, target, "command -v reposync")
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(out) != ""
 }
 
 func remoteBrewInstall(ctx context.Context, r Runner, target string) error {
@@ -243,33 +176,6 @@ func remoteBrewInstall(ctx context.Context, r Runner, target string) error {
 	return fmt.Errorf("brew install reposync on %s: %w", target, err)
 }
 
-func eachHost(ctx context.Context, hosts []string, fn func(ctx context.Context, target string) error) error {
-	sem := make(chan struct{}, maxConcurrentHosts)
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
-	)
-	for _, target := range hosts {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(target string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if err := fn(ctx, target); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("%s: %w", target, err))
-				mu.Unlock()
-			}
-		}(target)
-	}
-	wg.Wait()
-	if len(errs) == 0 {
-		return nil
-	}
-	return fmt.Errorf("%d host(s) failed: %w", len(errs), errors.Join(errs...))
-}
-
 func addRemoteCmd(repo state.Repo) string {
 	return fmt.Sprintf(
 		"reposync repo add-remote --origin %s --relpath %s --trunk %s",
@@ -277,22 +183,9 @@ func addRemoteCmd(repo state.Repo) string {
 	)
 }
 
-// TailscaleNode returns the first DNS label of a tailscale DNSName.
-func TailscaleNode(dnsName string) string {
-	trimmed := strings.TrimSuffix(dnsName, ".")
-	label, _, _ := strings.Cut(trimmed, ".")
-	return label
-}
-
 func isNoSuchCask(msg string) bool {
 	m := strings.ToLower(msg)
 	return strings.Contains(m, "no available") ||
 		strings.Contains(m, "no cask") ||
 		strings.Contains(m, "no formulae")
-}
-
-// ShellQuote single-quotes s so it survives intact as one argument to a remote
-// shell, escaping any embedded single quotes.
-func ShellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

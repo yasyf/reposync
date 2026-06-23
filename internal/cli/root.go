@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,9 +11,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/tui"
 )
+
+// statusError carries a process exit code out of a command so the remote status
+// of `host exec` propagates to reposync's own exit code. Its message is empty so
+// Execute prints nothing extra when honoring the code.
+type statusError int
+
+func (e statusError) Error() string { return "" }
 
 // Execute builds and runs the reposync root command under a context canceled on
 // SIGINT/SIGTERM, exiting non-zero on error.
@@ -21,10 +29,16 @@ func Execute(version string) {
 	defer stop()
 
 	root := newRoot(version)
-	if err := root.ExecuteContext(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "reposync: %v\n", err)
-		os.Exit(1)
+	err := root.ExecuteContext(ctx)
+	if err == nil {
+		return
 	}
+	var status statusError
+	if errors.As(err, &status) {
+		os.Exit(int(status))
+	}
+	fmt.Fprintf(os.Stderr, "reposync: %v\n", err)
+	os.Exit(1)
 }
 
 func newRoot(version string) *cobra.Command {
@@ -39,12 +53,13 @@ func newRoot(version string) *cobra.Command {
 			if !isInteractive() {
 				return cmd.Help()
 			}
-			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: host.NewExecRunner()})
+			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: hostregistry.NewExecRunner()})
 		},
 	}
 	root.AddCommand(
 		newRepoCmd(),
 		newHostCmd(),
+		newSelfCmd(),
 		newSyncCmd(),
 		newReconcileCmd(),
 		newRPCCmd(),

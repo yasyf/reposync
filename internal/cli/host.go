@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/service"
 	"github.com/yasyf/reposync/internal/state"
@@ -16,7 +20,7 @@ func newHostCmd() *cobra.Command {
 		Use:   "host",
 		Short: "Register, list, and unregister peer hosts.",
 	}
-	cmd.AddCommand(newHostAddCmd(), newHostRmCmd(), newHostLsCmd(), newHostVerifyCmd())
+	cmd.AddCommand(newHostAddCmd(), newHostRmCmd(), newHostLsCmd(), newHostVerifyCmd(), newHostExecCmd())
 	return cmd
 }
 
@@ -75,6 +79,7 @@ func newHostRmCmd() *cobra.Command {
 }
 
 func newHostLsCmd() *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List registered peer hosts.",
@@ -84,12 +89,42 @@ func newHostLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				hosts := st.Hosts
+				if hosts == nil {
+					hosts = []string{}
+				}
+				return writeJSON(cmd.OutOrStdout(), hostsPayload{Version: jsonVersion, Self: st.Self, Hosts: hosts})
+			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "HOST")
 			for _, h := range st.Hosts {
 				_, _ = fmt.Fprintln(w, h)
 			}
 			return w.Flush()
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit a machine-readable JSON line on stdout (identity + peers)")
+	return cmd
+}
+
+func newHostExecCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "exec <user@node> -- <cmd>...",
+		Short: "Run a command on a peer over ssh, passing its stdout/stderr and exit status through.",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out, err := hostregistry.NewExecRunner().SSH(cmd.Context(), args[0], strings.Join(args[1:], " "))
+			_, _ = cmd.OutOrStdout().Write([]byte(out))
+			if err == nil {
+				return nil
+			}
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), err)
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				return statusError(exitErr.ExitCode())
+			}
+			return statusError(1)
 		},
 	}
 	return cmd

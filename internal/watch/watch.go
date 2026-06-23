@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/rpc"
 	"github.com/yasyf/reposync/internal/state"
 )
@@ -41,7 +41,7 @@ func Watch(ctx context.Context, st *state.State) error {
 
 	eng := newEngine(
 		gitResolver{defaultLocation: location},
-		rpcNotifier{self: st.Self, runner: host.NewExecRunner()},
+		rpcNotifier{self: st.Self, runner: hostregistry.NewExecRunner()},
 		time.Duration(st.Settings.WatchDebounce),
 		st.Hosts,
 	)

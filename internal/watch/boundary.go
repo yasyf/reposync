@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
@@ -25,7 +25,7 @@ func (r gitResolver) Resolve(ctx context.Context, repo state.Repo) (string, erro
 	return opened.TrunkHash(ctx)
 }
 
-// peerRunner runs a command on a peer over ssh; host.NewExecRunner satisfies it.
+// peerRunner runs a command on a peer over ssh; hostregistry.NewExecRunner satisfies it.
 type peerRunner interface {
 	SSH(ctx context.Context, target, remoteCmd string) (string, error)
 }
@@ -41,7 +41,7 @@ type rpcNotifier struct {
 }
 
 func (n rpcNotifier) Notify(ctx context.Context, peer string, repo state.Repo) error {
-	cmd := fmt.Sprintf("reposync rpc sync --relpath %s --origin %s", host.ShellQuote(repo.Relpath), host.ShellQuote(n.self))
+	cmd := fmt.Sprintf("reposync rpc sync --relpath %s --origin %s", hostregistry.ShellQuote(repo.Relpath), hostregistry.ShellQuote(n.self))
 	if _, err := n.runner.SSH(ctx, peer, cmd); err != nil {
 		return fmt.Errorf("ssh %s: %w", peer, err)
 	}

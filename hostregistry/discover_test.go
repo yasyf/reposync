@@ -1,47 +1,11 @@
-package discover
+package hostregistry
 
 import (
 	"context"
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/yasyf/reposync/internal/state"
 )
-
-// fakeReply is a scripted result for a matching Local call.
-type fakeReply struct {
-	out string
-	err error
-}
-
-// fakeRunner satisfies host.Runner with scripted Local replies keyed on the joined
-// "name args"; SSH is unused here and panics if reached.
-type fakeRunner struct {
-	localOn map[string]fakeReply
-}
-
-func newFakeRunner() *fakeRunner {
-	return &fakeRunner{localOn: map[string]fakeReply{}}
-}
-
-func (f *fakeRunner) onLocal(key, out string, err error) *fakeRunner {
-	f.localOn[key] = fakeReply{out: out, err: err}
-	return f
-}
-
-func (f *fakeRunner) Local(_ context.Context, name string, args ...string) (string, error) {
-	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
-	r, ok := f.localOn[key]
-	if !ok {
-		return "", errors.New("unscripted local: " + key)
-	}
-	return r.out, r.err
-}
-
-func (f *fakeRunner) SSH(_ context.Context, _, _ string) (string, error) {
-	panic("SSH not expected in host discovery")
-}
 
 const tailscaleStatusJSON = `{
   "Self": {"DNSName": "self.tailnet.ts.net.", "HostName": "self", "Online": true},
@@ -74,7 +38,7 @@ func hasNode(cands []HostCandidate, node string) bool {
 }
 
 func TestDiscoverTailscale(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+	r := NewMockRunner().OnLocal("tailscale status --json", tailscaleStatusJSON, nil)
 
 	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
 	if len(notes) != 0 {
@@ -105,7 +69,7 @@ func TestDiscoverTailscale(t *testing.T) {
 }
 
 func TestDiscoverTailscaleDropsMullvad(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+	r := NewMockRunner().OnLocal("tailscale status --json", tailscaleStatusJSON, nil)
 
 	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
 	if len(notes) != 0 {
@@ -117,7 +81,7 @@ func TestDiscoverTailscaleDropsMullvad(t *testing.T) {
 }
 
 func TestDiscoverTailscaleDropsEphemeral(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+	r := NewMockRunner().OnLocal("tailscale status --json", tailscaleStatusJSON, nil)
 
 	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
 	if len(notes) != 0 {
@@ -129,7 +93,7 @@ func TestDiscoverTailscaleDropsEphemeral(t *testing.T) {
 }
 
 func TestDiscoverTailscaleNoUserDegradesTarget(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", tailscaleStatusJSON, nil)
+	r := NewMockRunner().OnLocal("tailscale status --json", tailscaleStatusJSON, nil)
 
 	cands, notes := discoverTailscale(context.Background(), r, "")
 	if len(notes) != 0 {
@@ -142,7 +106,7 @@ func TestDiscoverTailscaleNoUserDegradesTarget(t *testing.T) {
 }
 
 func TestDiscoverTailscaleErrorDegrades(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
+	r := NewMockRunner().OnLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
 
 	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
 	if len(cands) != 0 {
@@ -160,7 +124,7 @@ func TestDiscoverTailscaleErrorDegrades(t *testing.T) {
 }
 
 func TestDiscoverTailscaleBadJSONDegrades(t *testing.T) {
-	r := newFakeRunner().onLocal("tailscale status --json", "{not json", nil)
+	r := NewMockRunner().OnLocal("tailscale status --json", "{not json", nil)
 
 	cands, notes := discoverTailscale(context.Background(), r, "yasyf")
 	if len(cands) != 0 {
@@ -179,9 +143,9 @@ func TestMergeHostsRegisteredAndDedupe(t *testing.T) {
 		{Node: "beta", DefaultTarget: "yasyf@beta", Source: "tailscale", Online: false},
 		{Node: "gamma", DefaultTarget: "yasyf@gamma", Source: "bonjour", Online: true},
 	}
-	st := &state.State{Hosts: []string{"yasyf@alpha", "beta"}}
+	registered := []string{"yasyf@alpha", "beta"}
 
-	merged := mergeHosts(cands, st)
+	merged := mergeHosts(cands, registered)
 
 	if len(merged) != 3 {
 		t.Fatalf("got %d merged candidates, want 3 (alpha deduped): %+v", len(merged), merged)
@@ -214,12 +178,11 @@ func TestMergeHostsNoRegisteredHosts(t *testing.T) {
 		{Node: "alpha", Source: "tailscale"},
 		{Node: "beta", Source: "tailscale"},
 	}
-	st := &state.State{}
 
-	merged := mergeHosts(cands, st)
+	merged := mergeHosts(cands, nil)
 	for _, c := range merged {
 		if c.Registered {
-			t.Fatalf("node %q Registered = true with empty state.Hosts", c.Node)
+			t.Fatalf("node %q Registered = true with no registered hosts", c.Node)
 		}
 	}
 }
@@ -240,9 +203,9 @@ func TestHostNode(t *testing.T) {
 }
 
 func TestHostsTailscaleErrorStillSucceeds(t *testing.T) {
-	r := newFakeRunner().
-		onLocal("id -un", "yasyf\n", nil).
-		onLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
+	r := NewMockRunner().
+		OnLocal("id -un", "yasyf\n", nil).
+		OnLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
 
 	// An already-cancelled context makes discoverBonjour's LookupType return
 	// immediately with context.Canceled (normal completion), so this exercises the
@@ -250,7 +213,7 @@ func TestHostsTailscaleErrorStillSucceeds(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res, err := Hosts(ctx, r, &state.State{})
+	res, err := Hosts(ctx, r, nil)
 	if err != nil {
 		t.Fatalf("Hosts must never error on a missing source, got: %v", err)
 	}

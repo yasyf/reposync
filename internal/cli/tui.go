@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/tui"
 )
 
@@ -23,7 +23,7 @@ func newTUICmd(version string) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: host.NewExecRunner()})
+			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: hostregistry.NewExecRunner()})
 		},
 	}
 }

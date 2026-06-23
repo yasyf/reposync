@@ -4,112 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 
+	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
 )
-
-// call is one recorded invocation against the fake Runner.
-type call struct {
-	kind   string // "local" or "ssh"
-	target string // ssh target, or "" for local
-	cmd    string // ssh remote command, or "name arg arg" for local
-}
-
-// reply is a scripted result returned for a matching call.
-type reply struct {
-	out string
-	err error
-}
-
-// fakeRunner records every Local/SSH call in order and returns scripted replies.
-// Local replies key on the joined "name args"; SSH replies key on the remote
-// command substring so a test can script by intent (e.g. "command -v reposync").
-type fakeRunner struct {
-	mu       sync.Mutex
-	calls    []call
-	localOn  map[string]reply
-	sshOn    []sshRule
-	sshDef   reply
-	hasSSHDe bool
-}
-
-type sshRule struct {
-	contains string
-	reply    reply
-}
-
-func newFakeRunner() *fakeRunner {
-	return &fakeRunner{localOn: map[string]reply{}}
-}
-
-func (f *fakeRunner) onLocal(key string, out string, err error) *fakeRunner {
-	f.localOn[key] = reply{out: out, err: err}
-	return f
-}
-
-func (f *fakeRunner) onSSH(contains, out string, err error) *fakeRunner {
-	f.sshOn = append(f.sshOn, sshRule{contains: contains, reply: reply{out: out, err: err}})
-	return f
-}
-
-func (f *fakeRunner) defaultSSH(out string, err error) *fakeRunner {
-	f.sshDef = reply{out: out, err: err}
-	f.hasSSHDe = true
-	return f
-}
-
-func (f *fakeRunner) Local(_ context.Context, name string, args ...string) (string, error) {
-	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
-	f.mu.Lock()
-	f.calls = append(f.calls, call{kind: "local", cmd: key})
-	r, ok := f.localOn[key]
-	f.mu.Unlock()
-	if !ok {
-		return "", errors.New("unscripted local: " + key)
-	}
-	return r.out, r.err
-}
-
-func (f *fakeRunner) SSH(_ context.Context, target, remoteCmd string) (string, error) {
-	f.mu.Lock()
-	f.calls = append(f.calls, call{kind: "ssh", target: target, cmd: remoteCmd})
-	f.mu.Unlock()
-	for _, rule := range f.sshOn {
-		if strings.Contains(remoteCmd, rule.contains) {
-			return rule.reply.out, rule.reply.err
-		}
-	}
-	if f.hasSSHDe {
-		return f.sshDef.out, f.sshDef.err
-	}
-	return "", errors.New("unscripted ssh: " + remoteCmd)
-}
-
-func (f *fakeRunner) sshCmds(target string) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for _, c := range f.calls {
-		if c.kind == "ssh" && c.target == target {
-			out = append(out, c.cmd)
-		}
-	}
-	return out
-}
-
-func (f *fakeRunner) sshCmdsAll() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for _, c := range f.calls {
-		if c.kind == "ssh" {
-			out = append(out, c.cmd)
-		}
-	}
-	return out
-}
 
 func emptyState(t *testing.T) *state.State {
 	t.Helper()
@@ -121,35 +20,6 @@ func emptyState(t *testing.T) *state.State {
 	return st
 }
 
-const tailscaleJSON = `{"Self":{"DNSName":"yasyf.tail71af5d.ts.net.","HostName":"yBook Pro"}}`
-
-func TestDetectSelf(t *testing.T) {
-	r := newFakeRunner().
-		onLocal("tailscale status --json", tailscaleJSON, nil).
-		onLocal("id -un", "yasyf\n", nil)
-
-	self, err := DetectSelf(context.Background(), r)
-	if err != nil {
-		t.Fatalf("DetectSelf: %v", err)
-	}
-	if self != "yasyf@yasyf" {
-		t.Fatalf("self = %q, want %q", self, "yasyf@yasyf")
-	}
-}
-
-func TestDetectSelfTailscaleError(t *testing.T) {
-	r := newFakeRunner().
-		onLocal("tailscale status --json", "", errors.New("exec: tailscale: not found"))
-
-	_, err := DetectSelf(context.Background(), r)
-	if err == nil {
-		t.Fatal("expected error when tailscale is absent")
-	}
-	if !strings.Contains(err.Error(), "--self") {
-		t.Fatalf("error %q should mention --self override", err)
-	}
-}
-
 func TestAddHostForwardNotInstalled(t *testing.T) {
 	st := emptyState(t)
 	st.Repos = []state.Repo{
@@ -157,16 +27,16 @@ func TestAddHostForwardNotInstalled(t *testing.T) {
 		{Relpath: "notes", Origin: "", Trunk: "main", LocalOnly: true},
 	}
 
-	r := newFakeRunner().
-		onSSH("command -v reposync", "", errors.New("exit status 1")).
-		defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().
+		OnSSH("command -v reposync", "", errors.New("exit status 1")).
+		DefaultSSH("", nil)
 
 	_, err := AddHost(context.Background(), st, r, "yasyf@yasyf-home", "yasyf@yasyf", false)
 	if err != nil {
 		t.Fatalf("AddHost: %v", err)
 	}
 
-	got := r.sshCmds("yasyf@yasyf-home")
+	got := r.SSHCmds("yasyf@yasyf-home")
 	want := []string{
 		"command -v reposync",
 		"brew tap yasyf/tap && brew trust yasyf/tap && brew install --cask yasyf/tap/reposync",
@@ -199,16 +69,16 @@ func TestAddHostForwardAlreadyInstalled(t *testing.T) {
 		{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"},
 	}
 
-	r := newFakeRunner().
-		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-		defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().
+		OnSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		DefaultSSH("", nil)
 
 	_, err := AddHost(context.Background(), st, r, "yasyf@yasyf-home", "yasyf@yasyf", false)
 	if err != nil {
 		t.Fatalf("AddHost: %v", err)
 	}
 
-	got := r.sshCmds("yasyf@yasyf-home")
+	got := r.SSHCmds("yasyf@yasyf-home")
 	want := []string{
 		"command -v reposync",
 		"reposync host add yasyf@yasyf --no-recurse",
@@ -231,14 +101,14 @@ func TestAddHostNoRecurse(t *testing.T) {
 		{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"},
 	}
 
-	r := newFakeRunner() // no SSH scripted: any ssh call would error/record.
+	r := hostregistry.NewMockRunner() // no SSH scripted: any ssh call would error/record.
 
 	_, err := AddHost(context.Background(), st, r, "yasyf@yasyf", "yasyf@yasyf-home", true)
 	if err != nil {
 		t.Fatalf("AddHost no-recurse: %v", err)
 	}
 
-	if cmds := r.sshCmdsAll(); len(cmds) != 0 {
+	if cmds := r.SSHCmdsAll(); len(cmds) != 0 {
 		t.Fatalf("no-recurse must make zero ssh calls, got %v", cmds)
 	}
 	persisted, err := state.Load()
@@ -256,18 +126,18 @@ func TestAddHostNoRecurse(t *testing.T) {
 func TestAddHostDetectsAndPersistsSelf(t *testing.T) {
 	st := emptyState(t)
 
-	r := newFakeRunner().
-		onLocal("tailscale status --json", tailscaleJSON, nil).
-		onLocal("id -un", "yasyf\n", nil).
-		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-		defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().
+		OnLocal("tailscale status --json", tailscaleJSON, nil).
+		OnLocal("id -un", "yasyf\n", nil).
+		OnSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		DefaultSSH("", nil)
 
 	// self == "" forces tailscale auto-detection, resolving to yasyf@yasyf.
 	if _, err := AddHost(context.Background(), st, r, "yasyf@yasyf-home", "", false); err != nil {
 		t.Fatalf("AddHost: %v", err)
 	}
 
-	got := r.sshCmds("yasyf@yasyf-home")
+	got := r.SSHCmds("yasyf@yasyf-home")
 	if countContains(got, "reposync host add yasyf@yasyf --no-recurse") != 1 {
 		t.Fatalf("inverse registration must carry the detected self, got %v", got)
 	}
@@ -283,7 +153,7 @@ func TestAddHostDetectsAndPersistsSelf(t *testing.T) {
 
 func TestAddHostIdempotent(t *testing.T) {
 	st := emptyState(t)
-	r := newFakeRunner()
+	r := hostregistry.NewMockRunner()
 
 	for i := 0; i < 2; i++ {
 		if _, err := AddHost(context.Background(), st, r, "yasyf@yasyf", "yasyf@yasyf-home", true); err != nil {
@@ -301,9 +171,9 @@ func TestAddHostIdempotent(t *testing.T) {
 
 func TestAddHostBrewNoCask(t *testing.T) {
 	st := emptyState(t)
-	r := newFakeRunner().
-		onSSH("command -v reposync", "", errors.New("exit status 1")).
-		onSSH("brew install", "Error: No available formula or cask with the name \"yasyf/tap/reposync\".", errors.New("exit status 1"))
+	r := hostregistry.NewMockRunner().
+		OnSSH("command -v reposync", "", errors.New("exit status 1")).
+		OnSSH("brew install", "Error: No available formula or cask with the name \"yasyf/tap/reposync\".", errors.New("exit status 1"))
 
 	_, err := AddHost(context.Background(), st, r, "yasyf@yasyf-home", "yasyf@yasyf", false)
 	if err == nil {
@@ -318,7 +188,7 @@ func TestPropagateRepo(t *testing.T) {
 	st := emptyState(t)
 	st.Hosts = []string{"yasyf@yasyf-home", "yasyf@yasyf-laptop"}
 
-	r := newFakeRunner().defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().DefaultSSH("", nil)
 
 	repo := state.Repo{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"}
 	if err := PropagateRepo(context.Background(), st, r, repo); err != nil {
@@ -326,7 +196,7 @@ func TestPropagateRepo(t *testing.T) {
 	}
 
 	for _, h := range st.Hosts {
-		cmds := r.sshCmds(h)
+		cmds := r.SSHCmds(h)
 		if len(cmds) != 1 || !strings.Contains(cmds[0], "add-remote") {
 			t.Fatalf("host %s got %v, want a single add-remote", h, cmds)
 		}
@@ -336,7 +206,7 @@ func TestPropagateRepo(t *testing.T) {
 func TestPropagateRepoSkipsLocalOnly(t *testing.T) {
 	st := emptyState(t)
 	st.Hosts = []string{"yasyf@yasyf-home"}
-	r := newFakeRunner().defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().DefaultSSH("", nil)
 
 	cases := []state.Repo{
 		{Relpath: "notes", Origin: "", Trunk: "main", LocalOnly: true},
@@ -347,7 +217,7 @@ func TestPropagateRepoSkipsLocalOnly(t *testing.T) {
 			t.Fatalf("PropagateRepo %s: %v", repo.Relpath, err)
 		}
 	}
-	if cmds := r.sshCmdsAll(); len(cmds) != 0 {
+	if cmds := r.SSHCmdsAll(); len(cmds) != 0 {
 		t.Fatalf("local_only/remoteless repos must not propagate, got %v", cmds)
 	}
 }
@@ -356,8 +226,8 @@ func TestRemoteReconcileDownHostContinues(t *testing.T) {
 	st := emptyState(t)
 	st.Hosts = []string{"up@host", "down@host"}
 
-	r := newFakeRunner().
-		onSSH("reposync rpc reconcile", "", nil)
+	r := hostregistry.NewMockRunner().
+		OnSSH("reposync rpc reconcile", "", nil)
 	// scripted by substring match above returns nil for both; override down host
 	// by routing through a wrapper that fails one target.
 	wrapped := &targetFailingRunner{Runner: r, failTarget: "down@host"}
@@ -370,7 +240,7 @@ func TestRemoteReconcileDownHostContinues(t *testing.T) {
 		t.Fatalf("error %q should name the down host", err)
 	}
 	// the up host was still reconciled (not aborted by the down one).
-	if cmds := r.sshCmds("up@host"); len(cmds) != 1 {
+	if cmds := r.SSHCmds("up@host"); len(cmds) != 1 {
 		t.Fatalf("up host should have been reconciled, got %v", cmds)
 	}
 }
@@ -398,121 +268,15 @@ func TestRemoveHost(t *testing.T) {
 	}
 }
 
-func TestVerify(t *testing.T) {
-	cases := []struct {
-		name             string
-		runner           *fakeRunner
-		wantReachable    bool
-		wantBootstrapped bool
-		wantVersion      string
-		wantErr          bool
-	}{
-		{
-			name: "bootstrapped",
-			runner: newFakeRunner().
-				onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-				onSSH("reposync --version", "reposync 1.2.3\n", nil),
-			wantReachable:    true,
-			wantBootstrapped: true,
-			wantVersion:      "reposync 1.2.3",
-		},
-		{
-			name: "reachable but not installed",
-			runner: newFakeRunner().
-				onSSH("command -v reposync", "", errors.New("exit status 1")).
-				onSSH("true", "", nil),
-			wantReachable:    true,
-			wantBootstrapped: false,
-		},
-		{
-			name: "unreachable",
-			runner: newFakeRunner().
-				onSSH("command -v reposync", "", errors.New("exit status 1")).
-				onSSH("true", "", errors.New("connection refused")),
-			wantReachable:    false,
-			wantBootstrapped: false,
-			wantErr:          true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			res := Verify(context.Background(), tc.runner, "yasyf@host")
-			if res.Target != "yasyf@host" {
-				t.Fatalf("Target = %q, want %q", res.Target, "yasyf@host")
-			}
-			if res.Reachable != tc.wantReachable {
-				t.Fatalf("Reachable = %v, want %v", res.Reachable, tc.wantReachable)
-			}
-			if res.Bootstrapped != tc.wantBootstrapped {
-				t.Fatalf("Bootstrapped = %v, want %v", res.Bootstrapped, tc.wantBootstrapped)
-			}
-			if res.Version != tc.wantVersion {
-				t.Fatalf("Version = %q, want %q", res.Version, tc.wantVersion)
-			}
-			if tc.wantErr && res.Err == nil {
-				t.Fatal("expected Err to be set")
-			}
-			if !tc.wantErr && res.Err != nil {
-				t.Fatalf("unexpected Err: %v", res.Err)
-			}
-		})
-	}
-}
-
-func TestVerifyVersionProbeError(t *testing.T) {
-	r := newFakeRunner().
-		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-		onSSH("reposync --version", "", errors.New("exit status 2"))
-
-	res := Verify(context.Background(), r, "yasyf@host")
-	if !res.Reachable || !res.Bootstrapped {
-		t.Fatalf("install succeeded, want reachable+bootstrapped, got %+v", res)
-	}
-	if res.Version != "" {
-		t.Fatalf("Version = %q, want empty on probe error", res.Version)
-	}
-	if res.Err != nil {
-		t.Fatalf("version probe error must not surface: %v", res.Err)
-	}
-}
-
-func TestVerifyAll(t *testing.T) {
-	hosts := []string{"up@one", "down@two", "up@three"}
-
-	r := newFakeRunner().
-		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-		onSSH("reposync --version", "reposync 1.0.0\n", nil)
-	wrapped := &targetFailingRunner{Runner: r, failTarget: "down@two"}
-
-	got := VerifyAll(context.Background(), wrapped, hosts)
-	if len(got) != len(hosts) {
-		t.Fatalf("got %d results, want %d", len(got), len(hosts))
-	}
-	for i, h := range hosts {
-		if got[i].Target != h {
-			t.Fatalf("result[%d].Target = %q, want %q (order not preserved)", i, got[i].Target, h)
-		}
-	}
-	if !got[0].Reachable || !got[0].Bootstrapped {
-		t.Fatalf("up@one should be green, got %+v", got[0])
-	}
-	if !got[2].Reachable || !got[2].Bootstrapped {
-		t.Fatalf("up@three should be green, got %+v", got[2])
-	}
-	if got[1].Reachable || got[1].Bootstrapped || got[1].Err == nil {
-		t.Fatalf("down@two should be red with Err set, got %+v", got[1])
-	}
-}
-
 func TestAddHostStreamEmitsEveryStep(t *testing.T) {
 	st := emptyState(t)
 	st.Repos = []state.Repo{
 		{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"},
 	}
 
-	r := newFakeRunner().
-		onSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
-		defaultSSH("", nil)
+	r := hostregistry.NewMockRunner().
+		OnSSH("command -v reposync", "/opt/homebrew/bin/reposync\n", nil).
+		DefaultSSH("", nil)
 
 	var streamed []string
 	log, err := AddHostStream(context.Background(), st, r, "yasyf@yasyf-home", "yasyf@yasyf", false, func(msg string) {
@@ -524,10 +288,12 @@ func TestAddHostStreamEmitsEveryStep(t *testing.T) {
 	assertSeq(t, streamed, log)
 }
 
-// targetFailingRunner wraps a Runner and and forces SSH to one target to fail,
+const tailscaleJSON = `{"Self":{"DNSName":"yasyf.tail71af5d.ts.net.","HostName":"yBook Pro"}}`
+
+// targetFailingRunner wraps a Runner and forces SSH to one target to fail,
 // exercising the down-host-continues path without ordering assumptions.
 type targetFailingRunner struct {
-	Runner
+	hostregistry.Runner
 	failTarget string
 }
 
