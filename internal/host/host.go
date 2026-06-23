@@ -2,8 +2,9 @@
 // installing reposync on it over ssh, sharing repos, and converging remote
 // reconcile/install. The repo-agnostic host-identity primitives (the Runner,
 // DetectSelf, Verify, the self/hosts registry) live in the public
-// github.com/yasyf/reposync/hostregistry package; this package aliases them and
-// layers the reposync-specific orchestration on top.
+// github.com/yasyf/synckit/hostregistry package; this package aliases them and
+// layers the reposync-specific orchestration on top, driving them through the
+// reposync-named state.Config.
 package host
 
 import (
@@ -11,7 +12,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yasyf/reposync/hostregistry"
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/reposync/internal/state"
 )
 
@@ -37,17 +39,17 @@ func DetectSelf(ctx context.Context, r Runner) (string, error) {
 
 // Verify probes target over ssh: reachability, reposync install, and version.
 func Verify(ctx context.Context, r Runner, target string) VerifyResult {
-	return hostregistry.Verify(ctx, r, target)
+	return state.Config.Verify(ctx, r, target)
 }
 
 // VerifyAll verifies every host concurrently, returning one result per host in input order.
 func VerifyAll(ctx context.Context, r Runner, hosts []string) []VerifyResult {
-	return hostregistry.VerifyAll(ctx, r, hosts)
+	return state.Config.VerifyAll(ctx, r, hosts)
 }
 
 // RemoveHost unregisters target as a peer and persists the change.
 func RemoveHost(ctx context.Context, target string) error {
-	return hostregistry.RemoveHost(ctx, target)
+	return state.Config.RemoveHost(ctx, target)
 }
 
 // AddHost registers target as a peer and, unless noRecurse, SSH-bootstraps
@@ -80,7 +82,7 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 		self = detected // "" when detection fails on the no-recurse path
 	}
 
-	if _, err := hostregistry.Update(ctx, func(g *hostregistry.Registry) error {
+	if _, err := state.Config.Update(ctx, func(g *hostregistry.Registry) error {
 		g.UpsertHost(target)
 		if self != "" {
 			g.Self = self
@@ -99,7 +101,7 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 		return log, nil
 	}
 
-	if hostregistry.RemoteInstalled(ctx, r, target) {
+	if state.Config.RemoteInstalled(ctx, r, target) {
 		step("reposync already installed on " + target)
 	} else {
 		if err := remoteBrewInstall(ctx, r, target); err != nil {

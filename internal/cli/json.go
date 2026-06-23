@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/hostregistry"
+	"github.com/yasyf/reposync/internal/state"
 )
 
 // jsonVersion is the literal schema version stamped on every --json payload.
@@ -44,7 +44,7 @@ func newSelfCmd() *cobra.Command {
 		Short: "Print this host's ssh identity (user@node) as peers reach it.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			reg, err := hostregistry.Load()
+			reg, err := state.Config.Load()
 			if err != nil {
 				return err
 			}

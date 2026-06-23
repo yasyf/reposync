@@ -18,9 +18,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/rpc"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // Watch blocks until ctx is canceled. It subscribes via watchman to every

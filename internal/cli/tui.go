@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/tui"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // isInteractive reports whether stdin is a terminal, gating the bare-command

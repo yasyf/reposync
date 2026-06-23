@@ -11,8 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/tui"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // statusError carries a process exit code out of a command so the remote status

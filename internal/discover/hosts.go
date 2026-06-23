@@ -3,8 +3,8 @@ package discover
 import (
 	"context"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // Hosts enumerates candidate hosts on the network from tailscale and Bonjour,

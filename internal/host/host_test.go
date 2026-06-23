@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 func emptyState(t *testing.T) *state.State {

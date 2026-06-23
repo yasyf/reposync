@@ -2,7 +2,7 @@
 // registration commands mutate and the sync, watch, and reconcile commands read.
 //
 // The host-identity slice of that file (self, hosts) and the path/lock primitives
-// live in the public github.com/yasyf/reposync/hostregistry package; this package
+// live in the public github.com/yasyf/synckit/hostregistry package; this package
 // forwards to them so both writers serialize on one flock and share one on-disk
 // schema.
 package state
@@ -17,8 +17,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yasyf/reposync/hostregistry"
+	"github.com/yasyf/synckit/hostregistry"
 )
+
+// ToolName is reposync's CLI/config identity: the single source for the
+// hostregistry Config that selects ~/.config/reposync and the verify/install
+// probes. Every reposync wrapper over hostregistry reuses Config rather than
+// re-spelling the name.
+const ToolName = "reposync"
 
 const (
 	defaultLocation      = "~/Code"
@@ -28,6 +34,10 @@ const (
 	defaultRepoOpTimeout = 2 * time.Minute
 	defaultPushAfter     = 24 * time.Hour
 )
+
+// Config is reposync's host-registry handle, naming the tool so hostregistry
+// resolves the config dir and the ssh probes. State and host both drive it.
+var Config = hostregistry.Config{Name: ToolName}
 
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
 var ErrLockBusy = hostregistry.ErrLockBusy
@@ -206,17 +216,17 @@ func (s *State) applyDefaults() {
 
 // Dir returns the reposync config directory under XDG_CONFIG_HOME or ~/.config.
 func Dir() (string, error) {
-	return hostregistry.Dir()
+	return Config.Dir()
 }
 
 // Path returns the absolute path to the state.json file.
 func Path() (string, error) {
-	return hostregistry.Path()
+	return Config.Path()
 }
 
 // SockPath returns the absolute path to the daemon's RPC unix socket.
 func SockPath() (string, error) {
-	return hostregistry.SockPath()
+	return Config.SockPath()
 }
 
 // Load reads the state file, returning defaults when it does not yet exist.
@@ -268,7 +278,7 @@ func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 // giving up with ErrLockBusy once ctx is done so a contended acquire fails fast
 // instead of blocking on a wedged holder.
 func WithLock(ctx context.Context, fn func() error) error {
-	return hostregistry.WithLock(ctx, fn)
+	return Config.WithLock(ctx, fn)
 }
 
 func repoMatches(existing, incoming Repo) bool {

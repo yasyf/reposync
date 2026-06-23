@@ -2,12 +2,12 @@
 // network for candidate hosts (Tailscale peers, Bonjour _ssh._tcp services),
 // reporting which are already tracked in state. It is read-only.
 //
-// Host discovery itself lives in the public github.com/yasyf/reposync/hostregistry
+// Host discovery itself lives in the public github.com/yasyf/synckit/hostregistry
 // package; this package aliases its types and forwards Hosts so callers keep a
 // single discover entry point.
 package discover
 
-import "github.com/yasyf/reposync/hostregistry"
+import "github.com/yasyf/synckit/hostregistry"
 
 // SkipNote records a candidate that a scan skipped, and why. Scans surface
 // these instead of aborting so one unreadable entry never hides the rest.

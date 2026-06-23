@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yasyf/reposync/hostregistry"
+	"github.com/yasyf/synckit/hostregistry"
+
+	"github.com/yasyf/reposync/internal/state"
 )
 
 // seedRegistry points the state file at a temp config dir and writes a known
@@ -15,7 +17,7 @@ import (
 func seedRegistry(t *testing.T, self string, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if _, err := hostregistry.Update(t.Context(), func(g *hostregistry.Registry) error {
+	if _, err := state.Config.Update(t.Context(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {
 			g.UpsertHost(h)
@@ -161,7 +163,7 @@ func TestStatePathUnderTempConfig(t *testing.T) {
 	// Guards the test seeding itself: state.json must land under the temp
 	// XDG_CONFIG_HOME so these tests never touch the real config.
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	path, err := hostregistry.Path()
+	path, err := state.Config.Path()
 	if err != nil {
 		t.Fatalf("Path: %v", err)
 	}

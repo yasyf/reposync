@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/yasyf/reposync/hostregistry"
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // gitResolver resolves origin/<trunk> through git rev-parse via the vcs layer,
