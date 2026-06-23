@@ -147,6 +147,7 @@ func (launchctlLoader) Bootstrap(ctx context.Context, plistPath string) error {
 }
 
 func (launchctlLoader) Bootout(ctx context.Context, label string) error {
+	//nolint:gosec // G204: label is one of reposync's own launchd label constants, not user-supplied.
 	out, err := exec.CommandContext(ctx, "launchctl", "bootout", guiDomain()+"/"+label).CombinedOutput()
 	if err == nil {
 		return nil
