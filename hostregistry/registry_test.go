@@ -214,6 +214,7 @@ func TestUpdatePreservesForeignKeys(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 
+	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatal(err)

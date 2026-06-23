@@ -63,6 +63,8 @@ func (m *MockRunner) DefaultSSH(out string, err error) *MockRunner {
 	return m
 }
 
+// Local records the call and returns the reply scripted by OnLocal for the joined
+// "name args" key, erroring if no reply was scripted.
 func (m *MockRunner) Local(_ context.Context, name string, args ...string) (string, error) {
 	key := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	m.mu.Lock()
@@ -75,6 +77,8 @@ func (m *MockRunner) Local(_ context.Context, name string, args ...string) (stri
 	return r.out, r.err
 }
 
+// SSH records the call and returns the first OnSSH rule whose substring the remote
+// command contains, falling back to DefaultSSH.
 func (m *MockRunner) SSH(_ context.Context, target, remoteCmd string) (string, error) {
 	m.mu.Lock()
 	m.calls = append(m.calls, MockCall{Kind: "ssh", Target: target, Cmd: remoteCmd})
