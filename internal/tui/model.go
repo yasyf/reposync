@@ -49,11 +49,11 @@ func newRootModel(opts Options) rootModel {
 // detectSelf reads this host's identity for the header band; an unreadable or
 // unset identity simply leaves the brand mark standing alone.
 func detectSelf() string {
-	st, err := state.Load()
+	reg, err := state.Config.Load()
 	if err != nil {
 		return ""
 	}
-	return st.Self
+	return reg.Self
 }
 
 func (m rootModel) Init() tea.Cmd {

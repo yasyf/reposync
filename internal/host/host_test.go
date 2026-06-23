@@ -111,15 +111,15 @@ func TestAddHostNoRecurse(t *testing.T) {
 	if cmds := r.SSHCmdsAll(); len(cmds) != 0 {
 		t.Fatalf("no-recurse must make zero ssh calls, got %v", cmds)
 	}
-	persisted, err := state.Load()
+	reg, err := state.Config.Load()
 	if err != nil {
-		t.Fatalf("load persisted state: %v", err)
+		t.Fatalf("load persisted registry: %v", err)
 	}
-	if !contains(persisted.Hosts, "yasyf@yasyf") {
-		t.Fatalf("host not registered in persisted state: %v", persisted.Hosts)
+	if !contains(reg.Hosts, "yasyf@yasyf") {
+		t.Fatalf("host not registered in persisted registry: %v", reg.Hosts)
 	}
-	if persisted.Self != "yasyf@yasyf-home" {
-		t.Fatalf("self not persisted: got %q, want %q", persisted.Self, "yasyf@yasyf-home")
+	if reg.Self != "yasyf@yasyf-home" {
+		t.Fatalf("self not persisted: got %q, want %q", reg.Self, "yasyf@yasyf-home")
 	}
 }
 
@@ -142,12 +142,12 @@ func TestAddHostDetectsAndPersistsSelf(t *testing.T) {
 		t.Fatalf("inverse registration must carry the detected self, got %v", got)
 	}
 
-	persisted, err := state.Load()
+	reg, err := state.Config.Load()
 	if err != nil {
-		t.Fatalf("load persisted state: %v", err)
+		t.Fatalf("load persisted registry: %v", err)
 	}
-	if persisted.Self != "yasyf@yasyf" {
-		t.Fatalf("detected self not persisted: got %q, want %q", persisted.Self, "yasyf@yasyf")
+	if reg.Self != "yasyf@yasyf" {
+		t.Fatalf("detected self not persisted: got %q, want %q", reg.Self, "yasyf@yasyf")
 	}
 }
 
@@ -160,12 +160,12 @@ func TestAddHostIdempotent(t *testing.T) {
 			t.Fatalf("AddHost iteration %d: %v", i, err)
 		}
 	}
-	persisted, err := state.Load()
+	reg, err := state.Config.Load()
 	if err != nil {
-		t.Fatalf("load persisted state: %v", err)
+		t.Fatalf("load persisted registry: %v", err)
 	}
-	if n := countEqual(persisted.Hosts, "yasyf@yasyf"); n != 1 {
-		t.Fatalf("host duplicated: %v (count %d)", persisted.Hosts, n)
+	if n := countEqual(reg.Hosts, "yasyf@yasyf"); n != 1 {
+		t.Fatalf("host duplicated: %v (count %d)", reg.Hosts, n)
 	}
 }
 
@@ -185,17 +185,18 @@ func TestAddHostBrewNoCask(t *testing.T) {
 }
 
 func TestPropagateRepo(t *testing.T) {
-	st := emptyState(t)
-	st.Hosts = []string{"yasyf@yasyf-home", "yasyf@yasyf-laptop"}
+	emptyState(t)
+	hosts := []string{"yasyf@yasyf-home", "yasyf@yasyf-laptop"}
+	seedHosts(t, hosts...)
 
 	r := hostregistry.NewMockRunner().DefaultSSH("", nil)
 
 	repo := state.Repo{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"}
-	if err := PropagateRepo(context.Background(), st, r, repo); err != nil {
+	if err := PropagateRepo(context.Background(), r, repo); err != nil {
 		t.Fatalf("PropagateRepo: %v", err)
 	}
 
-	for _, h := range st.Hosts {
+	for _, h := range hosts {
 		cmds := r.SSHCmds(h)
 		if len(cmds) != 1 || !strings.Contains(cmds[0], "add-remote") {
 			t.Fatalf("host %s got %v, want a single add-remote", h, cmds)
@@ -204,8 +205,8 @@ func TestPropagateRepo(t *testing.T) {
 }
 
 func TestPropagateRepoSkipsLocalOnly(t *testing.T) {
-	st := emptyState(t)
-	st.Hosts = []string{"yasyf@yasyf-home"}
+	emptyState(t)
+	seedHosts(t, "yasyf@yasyf-home")
 	r := hostregistry.NewMockRunner().DefaultSSH("", nil)
 
 	cases := []state.Repo{
@@ -213,7 +214,7 @@ func TestPropagateRepoSkipsLocalOnly(t *testing.T) {
 		{Relpath: "scratch", Origin: "https://github.com/yasyf/scratch.git", Trunk: "main", LocalOnly: true},
 	}
 	for _, repo := range cases {
-		if err := PropagateRepo(context.Background(), st, r, repo); err != nil {
+		if err := PropagateRepo(context.Background(), r, repo); err != nil {
 			t.Fatalf("PropagateRepo %s: %v", repo.Relpath, err)
 		}
 	}
@@ -223,8 +224,8 @@ func TestPropagateRepoSkipsLocalOnly(t *testing.T) {
 }
 
 func TestRemoteReconcileDownHostContinues(t *testing.T) {
-	st := emptyState(t)
-	st.Hosts = []string{"up@host", "down@host"}
+	emptyState(t)
+	seedHosts(t, "up@host", "down@host")
 
 	r := hostregistry.NewMockRunner().
 		OnSSH("reposync rpc reconcile", "", nil)
@@ -232,7 +233,7 @@ func TestRemoteReconcileDownHostContinues(t *testing.T) {
 	// by routing through a wrapper that fails one target.
 	wrapped := &targetFailingRunner{Runner: r, failTarget: "down@host"}
 
-	err := RemoteReconcile(context.Background(), st, wrapped)
+	err := RemoteReconcile(context.Background(), wrapped)
 	if err == nil {
 		t.Fatal("expected an aggregated error when a host is down")
 	}
@@ -246,25 +247,37 @@ func TestRemoteReconcileDownHostContinues(t *testing.T) {
 }
 
 func TestRemoveHost(t *testing.T) {
-	st := emptyState(t)
-	st.Hosts = []string{"a@host", "b@host"}
-	if err := st.Save(); err != nil {
-		t.Fatalf("seed state: %v", err)
-	}
+	emptyState(t)
+	seedHosts(t, "a@host", "b@host")
 
 	if err := RemoveHost(context.Background(), "a@host"); err != nil {
 		t.Fatalf("RemoveHost: %v", err)
 	}
 
-	persisted, err := state.Load()
+	reg, err := state.Config.Load()
 	if err != nil {
-		t.Fatalf("load persisted state: %v", err)
+		t.Fatalf("load persisted registry: %v", err)
 	}
-	if contains(persisted.Hosts, "a@host") {
-		t.Fatalf("host not removed: %v", persisted.Hosts)
+	if contains(reg.Hosts, "a@host") {
+		t.Fatalf("host not removed: %v", reg.Hosts)
 	}
-	if !contains(persisted.Hosts, "b@host") {
-		t.Fatalf("unrelated host dropped: %v", persisted.Hosts)
+	if !contains(reg.Hosts, "b@host") {
+		t.Fatalf("unrelated host dropped: %v", reg.Hosts)
+	}
+}
+
+// seedHosts registers peers in the host registry under the temp config dir an
+// emptyState/test has already set up, so PropagateRepo, RemoteReconcile, and
+// RemoveHost — which read the registry — see them.
+func seedHosts(t *testing.T, targets ...string) {
+	t.Helper()
+	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
+		for _, target := range targets {
+			g.UpsertHost(target)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed hosts: %v", err)
 	}
 }
 

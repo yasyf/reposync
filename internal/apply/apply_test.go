@@ -14,6 +14,7 @@ import (
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 const jjTestConfig = `[user]
@@ -226,8 +227,8 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(context.Background(), func(s *state.State) error {
-		s.UpsertHost("yasyf@peer")
+	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
 		t.Fatalf("register peer: %v", err)
@@ -264,8 +265,8 @@ func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
 func TestApplyReposLocalOnlyNotPropagated(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(context.Background(), func(s *state.State) error {
-		s.UpsertHost("yasyf@peer")
+	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
 		t.Fatalf("register peer: %v", err)
@@ -367,8 +368,8 @@ func TestApplyReposReconcilesOnlyEnabledSubset(t *testing.T) {
 func TestApplyReposPropagateFailureKeepsResults(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Update(context.Background(), func(s *state.State) error {
-		s.UpsertHost("yasyf@peer")
+	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
+		g.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
 		t.Fatalf("register peer: %v", err)

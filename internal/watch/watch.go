@@ -39,11 +39,16 @@ func Watch(ctx context.Context, st *state.State) error {
 		return err
 	}
 
+	reg, err := state.Config.Load()
+	if err != nil {
+		return err
+	}
+
 	eng := newEngine(
 		gitResolver{defaultLocation: location},
-		rpcNotifier{self: st.Self, runner: hostregistry.NewExecRunner()},
+		rpcNotifier{self: reg.Self, runner: hostregistry.NewExecRunner()},
 		time.Duration(st.Settings.WatchDebounce),
-		st.Hosts,
+		reg.Hosts,
 	)
 
 	wm, err := dialWatchman(ctx)

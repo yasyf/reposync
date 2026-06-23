@@ -55,13 +55,13 @@ func Repos(ctx context.Context, r host.Runner, sel RepoSelection) ([]reconcile.R
 			continue
 		}
 		repo := state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main"}
-		if err := host.PropagateRepo(ctx, st, r, repo); err != nil {
+		if err := host.PropagateRepo(ctx, r, repo); err != nil {
 			propagateErrs = append(propagateErrs, fmt.Errorf("propagate %s: %w", c.Relpath, err))
 		}
 		propagated = true
 	}
 	if propagated {
-		if err := host.RemoteReconcile(ctx, st, r); err != nil {
+		if err := host.RemoteReconcile(ctx, r); err != nil {
 			propagateErrs = append(propagateErrs, fmt.Errorf("reconcile peers: %w", err))
 		}
 	}

@@ -406,15 +406,15 @@ func listItems(l list.Model) []hostItem {
 // host that discovery did not surface.
 func discoverHostsCmd(r host.Runner) tea.Cmd {
 	return func() tea.Msg {
-		st, err := state.Load()
+		reg, err := state.Config.Load()
 		if err != nil {
-			return hostsLoadedMsg{err: fmt.Errorf("load state: %w", err)}
+			return hostsLoadedMsg{err: fmt.Errorf("load host registry: %w", err)}
 		}
-		result, err := discover.Hosts(context.Background(), r, st)
+		result, err := discover.Hosts(context.Background(), r, reg.Hosts)
 		if err != nil {
 			return hostsLoadedMsg{err: err}
 		}
-		return hostsLoadedMsg{items: mergeHostItems(result.Candidates, st.Hosts)}
+		return hostsLoadedMsg{items: mergeHostItems(result.Candidates, reg.Hosts)}
 	}
 }
 

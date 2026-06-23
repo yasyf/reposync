@@ -1,10 +1,15 @@
-// Package state loads and persists the reposync JSON state file that the
-// registration commands mutate and the sync, watch, and reconcile commands read.
+// Package state loads and persists the reposync-owned slice of the shared JSON
+// state file: the repos, settings, and default_location keys the registration
+// commands mutate and the sync, watch, and reconcile commands read.
 //
-// The host-identity slice of that file (self, hosts) and the path/lock primitives
-// live in the public github.com/yasyf/synckit/hostregistry package; this package
-// forwards to them so both writers serialize on one flock and share one on-disk
-// schema.
+// The host-identity slice of that file (self, hosts) is owned by the public
+// github.com/yasyf/synckit/hostregistry package, which reposync drives through
+// state.Config; this package never reads or writes those keys. Every write here
+// goes through hostregistry's foreign-key-preserving Config.UpdateRaw, so a
+// reposync write leaves self/hosts byte-for-byte intact and a hostregistry write
+// leaves repos/settings/default_location intact — both share one flock and one
+// on-disk schema. The path/lock primitives also live in hostregistry; this
+// package forwards to them.
 package state
 
 import (
@@ -17,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yasyf/synckit/codec"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
@@ -42,16 +48,17 @@ var Config = hostregistry.Config{Name: ToolName}
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
 var ErrLockBusy = hostregistry.ErrLockBusy
 
-// Duration is a time.Duration that marshals to and from a JSON string such as "15m".
-type Duration time.Duration
+// Duration is the canonical Go-duration string codec, re-exported from
+// github.com/yasyf/synckit/codec so callers in this module spell it state.Duration.
+type Duration = codec.Duration
 
 // Settings holds the cadence knobs read by the sync, reconcile, and watch loops.
 type Settings struct {
-	Interval      Duration `json:"interval"`
-	IdleThreshold Duration `json:"idle_threshold"`
-	WatchDebounce Duration `json:"watch_debounce"`
-	RepoOpTimeout Duration `json:"repo_op_timeout"`
-	PushAfter     Duration `json:"push_after"`
+	Interval      codec.Duration `json:"interval"`
+	IdleThreshold codec.Duration `json:"idle_threshold"`
+	WatchDebounce codec.Duration `json:"watch_debounce"`
+	RepoOpTimeout codec.Duration `json:"repo_op_timeout"`
+	PushAfter     codec.Duration `json:"push_after"`
 }
 
 // Repo is a tracked repository placed at Relpath under the host's default location.
@@ -62,32 +69,13 @@ type Repo struct {
 	LocalOnly bool   `json:"local_only"`
 }
 
-// State is the full on-disk reposync configuration for this host.
+// State is the reposync-owned slice of the shared on-disk configuration for this
+// host. The self/hosts identity keys live alongside these in the same file but
+// are owned by hostregistry; this struct neither carries nor persists them.
 type State struct {
 	DefaultLocation string   `json:"default_location"`
-	Self            string   `json:"self"`
-	Hosts           []string `json:"hosts"`
 	Repos           []Repo   `json:"repos"`
 	Settings        Settings `json:"settings"`
-}
-
-// MarshalJSON encodes the duration as a Go duration string.
-func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(time.Duration(d).String())
-}
-
-// UnmarshalJSON decodes a Go duration string, rejecting anything unparseable.
-func (d *Duration) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return fmt.Errorf("decode duration: %w", err)
-	}
-	parsed, err := time.ParseDuration(s)
-	if err != nil {
-		return fmt.Errorf("parse duration %q: %w", s, err)
-	}
-	*d = Duration(parsed)
-	return nil
 }
 
 // AbsPath joins the repo's relpath onto an already-expanded default location.
@@ -95,39 +83,31 @@ func (r Repo) AbsPath(defaultLocationExpanded string) string {
 	return filepath.Join(defaultLocationExpanded, r.Relpath)
 }
 
-// Save writes the state atomically: a temp file in the state dir renamed over the target.
+// Save persists this host's reposync-owned keys under the shared reconcile lock,
+// foreign-key-preserving the self/hosts identity that hostregistry owns. It runs
+// the one write codepath (Config.UpdateRaw) the package exposes.
 func (s *State) Save() error {
-	dir, err := Dir()
+	return Config.UpdateRaw(context.Background(), s.writeOwnedKeys)
+}
+
+// writeOwnedKeys marshals the reposync-owned keys into the shared raw state map,
+// leaving every other key (self, hosts) untouched.
+func (s *State) writeOwnedKeys(raw map[string]json.RawMessage) error {
+	location, err := json.Marshal(s.DefaultLocation)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode default_location: %w", err)
 	}
-	path, err := Path()
+	repos, err := json.Marshal(s.Repos)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode repos: %w", err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create state dir %s: %w", dir, err)
-	}
-	data, err := json.MarshalIndent(s, "", "  ")
+	settings, err := json.Marshal(s.Settings)
 	if err != nil {
-		return fmt.Errorf("encode state: %w", err)
+		return fmt.Errorf("encode settings: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, "state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp state: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp state: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename state into place: %w", err)
-	}
+	raw["default_location"] = location
+	raw["repos"] = repos
+	raw["settings"] = settings
 	return nil
 }
 
@@ -161,27 +141,6 @@ func (s *State) FindRepoByOrigin(origin string) (*Repo, bool) {
 		}
 	}
 	return nil, false
-}
-
-// UpsertHost adds a peer ssh target unless it is already registered.
-func (s *State) UpsertHost(target string) {
-	for _, h := range s.Hosts {
-		if h == target {
-			return
-		}
-	}
-	s.Hosts = append(s.Hosts, target)
-}
-
-// RemoveHost drops a peer ssh target.
-func (s *State) RemoveHost(target string) {
-	kept := make([]string, 0, len(s.Hosts))
-	for _, h := range s.Hosts {
-		if h != target {
-			kept = append(kept, h)
-		}
-	}
-	s.Hosts = kept
 }
 
 // DefaultLocationExpanded resolves the default location to an absolute path with ~ expanded.
@@ -229,7 +188,9 @@ func SockPath() (string, error) {
 	return Config.SockPath()
 }
 
-// Load reads the state file, returning defaults when it does not yet exist.
+// Load reads reposync's owned keys from the state file, returning defaults when
+// it does not yet exist. The self/hosts identity keys share the file but are
+// owned by hostregistry, so they are ignored here.
 func Load() (*State, error) {
 	path, err := Path()
 	if err != nil {
@@ -253,25 +214,49 @@ func Load() (*State, error) {
 }
 
 // Update runs fn against a freshly loaded State under the reconcile-lock flock,
-// then atomically saves it. Serializes read-modify-write across processes,
-// sharing the one canonical flock with hostregistry writers.
+// then persists only reposync's owned keys, leaving the self/hosts identity that
+// hostregistry owns byte-for-byte intact. It serializes read-modify-write across
+// processes through the one canonical flock that hostregistry writers also hold.
 func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 	var out *State
-	err := WithLock(ctx, func() error {
-		st, err := Load()
+	err := Config.UpdateRaw(ctx, func(raw map[string]json.RawMessage) error {
+		st, err := stateFromRaw(raw)
 		if err != nil {
 			return err
 		}
 		if err := fn(st); err != nil {
 			return err
 		}
-		if err := st.Save(); err != nil {
+		if err := st.writeOwnedKeys(raw); err != nil {
 			return err
 		}
 		out = st
 		return nil
 	})
 	return out, err
+}
+
+// stateFromRaw decodes reposync's owned keys out of the shared raw state map and
+// applies defaults, leaving self/hosts to hostregistry.
+func stateFromRaw(raw map[string]json.RawMessage) (*State, error) {
+	s := &State{}
+	if v, ok := raw["default_location"]; ok {
+		if err := json.Unmarshal(v, &s.DefaultLocation); err != nil {
+			return nil, fmt.Errorf("parse default_location: %w", err)
+		}
+	}
+	if v, ok := raw["repos"]; ok {
+		if err := json.Unmarshal(v, &s.Repos); err != nil {
+			return nil, fmt.Errorf("parse repos: %w", err)
+		}
+	}
+	if v, ok := raw["settings"]; ok {
+		if err := json.Unmarshal(v, &s.Settings); err != nil {
+			return nil, fmt.Errorf("parse settings: %w", err)
+		}
+	}
+	s.applyDefaults()
+	return s, nil
 }
 
 // WithLock runs fn while holding an exclusive flock on the reconcile lock file,

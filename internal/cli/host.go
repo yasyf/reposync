@@ -85,20 +85,20 @@ func newHostLsCmd() *cobra.Command {
 		Short: "List registered peer hosts.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			st, err := state.Load()
+			reg, err := state.Config.Load()
 			if err != nil {
 				return err
 			}
 			if asJSON {
-				hosts := st.Hosts
+				hosts := reg.Hosts
 				if hosts == nil {
 					hosts = []string{}
 				}
-				return writeJSON(cmd.OutOrStdout(), hostsPayload{Version: jsonVersion, Self: st.Self, Hosts: hosts})
+				return writeJSON(cmd.OutOrStdout(), hostsPayload{Version: jsonVersion, Self: reg.Self, Hosts: hosts})
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "HOST")
-			for _, h := range st.Hosts {
+			for _, h := range reg.Hosts {
 				_, _ = fmt.Fprintln(w, h)
 			}
 			return w.Flush()
@@ -136,11 +136,11 @@ func newHostVerifyCmd() *cobra.Command {
 		Short: "Probe each registered host for ssh reachability, reposync install, and version.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			st, err := state.Load()
+			reg, err := state.Config.Load()
 			if err != nil {
 				return err
 			}
-			results := host.VerifyAll(cmd.Context(), host.NewExecRunner(), st.Hosts)
+			results := host.VerifyAll(cmd.Context(), host.NewExecRunner(), reg.Hosts)
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "HOST\tREACHABLE\tBOOTSTRAPPED\tVERSION")
 			for _, v := range results {

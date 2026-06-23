@@ -143,12 +143,16 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 
 // PropagateRepo upserts repo onto every registered peer via repo add-remote,
 // skipping local-only or remoteless repos.
-func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Repo) error {
+func PropagateRepo(ctx context.Context, r Runner, repo state.Repo) error {
 	if repo.LocalOnly || repo.Origin == "" {
 		return nil
 	}
+	reg, err := state.Config.Load()
+	if err != nil {
+		return err
+	}
 	cmd := addRemoteCmd(repo)
-	return hostregistry.EachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
+	return hostregistry.EachHost(ctx, reg.Hosts, func(ctx context.Context, target string) error {
 		_, err := r.SSH(ctx, target, cmd)
 		return err
 	})
@@ -157,8 +161,12 @@ func PropagateRepo(ctx context.Context, st *state.State, r Runner, repo state.Re
 // RemoteReconcile triggers a reconcile on every registered peer's resident daemon
 // over its RPC socket; a down host is logged into the returned error and does not
 // abort the others.
-func RemoteReconcile(ctx context.Context, st *state.State, r Runner) error {
-	return hostregistry.EachHost(ctx, st.Hosts, func(ctx context.Context, target string) error {
+func RemoteReconcile(ctx context.Context, r Runner) error {
+	reg, err := state.Config.Load()
+	if err != nil {
+		return err
+	}
+	return hostregistry.EachHost(ctx, reg.Hosts, func(ctx context.Context, target string) error {
 		_, err := r.SSH(ctx, target, "reposync rpc reconcile")
 		return err
 	})
