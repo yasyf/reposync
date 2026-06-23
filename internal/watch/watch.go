@@ -67,7 +67,7 @@ func Watch(ctx context.Context, st *state.State) error {
 			_ = json.Unmarshal(raw, &name)
 		}
 		if repo, ok := subs[name]; ok {
-			eng.onEvent(ctx, repo)
+			eng.OnEvent(ctx, repo)
 		}
 	}
 
