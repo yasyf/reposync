@@ -1,7 +1,8 @@
 // Package vcs is the verified jj+git command layer that keeps a tracked repo on
-// the latest trunk without ever clobbering in-progress work and without ever
-// pushing. A repo is colocated jj when a .jj dir exists at its root, otherwise
-// plain git when .git exists.
+// the latest trunk without ever clobbering in-progress work. It also pushes local
+// trunk back to origin, but only as a clean fast-forward when the repo is quiet.
+// A repo is colocated jj when a .jj dir exists at its root, otherwise plain git
+// when .git exists.
 package vcs
 
 import (
@@ -50,6 +51,8 @@ const (
 	OutcomeNotDisposable Outcome = "not-disposable"
 	// OutcomeRebasedGenerated means the working copy held only generated edits and was advanced onto trunk, taking upstream on conflict.
 	OutcomeRebasedGenerated Outcome = "rebased-generated"
+	// OutcomePushed means local trunk was strictly ahead of origin and was fast-forward pushed.
+	OutcomePushed Outcome = "pushed"
 )
 
 // Repo is a tracked repository whose working copy can be safely advanced onto trunk.
@@ -67,6 +70,11 @@ type Repo interface {
 	HasTrunk(ctx context.Context) (bool, error)
 	// Advance fetches and safely advances the working copy onto trunk, never clobbering or pushing.
 	Advance(ctx context.Context) (Outcome, error)
+	// PushTrunk pushes local trunk to origin only as a clean fast-forward: it
+	// reports OutcomePushed when local trunk was strictly ahead of origin/<trunk>
+	// with no divergence, and OutcomeUpToDate (no error) when not ahead or diverged.
+	// It does not fetch; the caller is responsible for an up-to-date origin ref.
+	PushTrunk(ctx context.Context) (Outcome, error)
 	// TrunkHash resolves the origin trunk commit hash.
 	TrunkHash(ctx context.Context) (string, error)
 }

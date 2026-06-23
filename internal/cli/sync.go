@@ -13,7 +13,7 @@ func newSyncCmd() *cobra.Command {
 	var repoFilter, origin string
 	cmd := &cobra.Command{
 		Use:   "sync",
-		Short: "Idle-safe fetch and fast-forward of every registered repo (never pushes).",
+		Short: "Idle-safe fetch and fast-forward of every registered repo (pushes clean fast-forwards after a quiet period).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			st, err := state.Load()

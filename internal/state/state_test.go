@@ -40,6 +40,9 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
 		t.Errorf("RepoOpTimeout = %s, want 2m", got)
 	}
+	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
+		t.Errorf("PushAfter = %s, want 24h", got)
+	}
 }
 
 func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
@@ -72,6 +75,9 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 	}
 	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
 		t.Errorf("RepoOpTimeout = %s, want default 2m", got)
+	}
+	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
+		t.Errorf("PushAfter = %s, want default 24h", got)
 	}
 }
 
@@ -107,6 +113,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 			IdleThreshold: Duration(5 * time.Minute),
 			WatchDebounce: Duration(3 * time.Second),
 			RepoOpTimeout: Duration(2 * time.Minute),
+			PushAfter:     Duration(24 * time.Hour),
 		},
 	}
 	if err := want.Save(); err != nil {

@@ -249,6 +249,85 @@ func TestGitNeverPushOnAdvance(t *testing.T) {
 	}
 }
 
+// TestGitPushTrunkFastForward proves a clean fast-forward push: local main is
+// strictly ahead of an unmoved origin, so PushTrunk reports pushed and origin
+// main advances to the local commit.
+func TestGitPushTrunkFastForward(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	// Local main strictly ahead of origin; origin not moved.
+	f.writeFile(dest, "AHEAD.md", "ahead\n")
+	f.runGit(dest, "add", "AHEAD.md")
+	f.runGit(dest, "commit", "-qm", "local ahead")
+	localHead := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+
+	got, err := r.PushTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("push trunk: %v", err)
+	}
+	if got != OutcomePushed {
+		t.Fatalf("outcome = %q, want pushed", got)
+	}
+	if origin := f.originMain(); origin != localHead {
+		t.Fatalf("origin main = %q, want local head %q", origin, localHead)
+	}
+}
+
+// TestGitPushTrunkDivergedSkips proves a diverged trunk is not force-pushed: local
+// main is ahead AND origin has moved (behind > 0), so PushTrunk skips with
+// up-to-date, no error, and origin is left unchanged.
+func TestGitPushTrunkDivergedSkips(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	// Diverge: a local commit on main, then an unrelated commit on origin.
+	f.writeFile(dest, "AHEAD.md", "ahead\n")
+	f.runGit(dest, "add", "AHEAD.md")
+	f.runGit(dest, "commit", "-qm", "local ahead")
+	f.advanceOrigin("v2")
+
+	// Advance fetches origin (updating origin/main) and refuses the non-ff merge,
+	// leaving local main put; this is the prior fetch PushTrunk relies on.
+	if _, err := r.Advance(context.Background()); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+
+	originBefore := f.originMain()
+	got, err := r.PushTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("push trunk: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date (diverged, skip)", got)
+	}
+	if originBefore != f.originMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+}
+
+// TestGitPushTrunkNotAheadNoop proves a not-ahead trunk is a no-op: a fresh clone
+// sits exactly at origin, so PushTrunk reports up-to-date and origin is unchanged.
+func TestGitPushTrunkNotAheadNoop(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	originBefore := f.originMain()
+	got, err := r.PushTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("push trunk: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date (not ahead)", got)
+	}
+	if originBefore != f.originMain() {
+		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, f.originMain())
+	}
+}
+
 // TestGitInUseGeneratedOnlyNotBusy proves a working tree whose only uncommitted
 // edit is to a linguist-generated file is not busy from the dirt check. The fresh
 // clone's reflog still counts as recent activity under a normal idle window, so a

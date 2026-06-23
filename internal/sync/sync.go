@@ -1,6 +1,7 @@
 // Package sync runs the idle-safe per-repo fetch-and-advance flow over every
-// registered repo, composing internal/vcs. It never pushes and never clobbers
-// in-progress work: a busy or non-trunk repo is left untouched.
+// registered repo, composing internal/vcs. It never clobbers in-progress work: a
+// busy or non-trunk repo is left untouched. It pushes local trunk back to origin
+// only as a clean fast-forward, and only once a repo has been quiet past PushAfter.
 package sync
 
 import (
@@ -24,10 +25,11 @@ type Result struct {
 	Err     error
 }
 
-// Sync advances every registered repo onto its trunk, idle-safe and never
-// pushing. When repoFilter is non-empty only the repo whose absolute path or
-// relpath matches it is synced; an unmatched filter is an error. origin is the
-// optional anti-echo provenance tag from the watcher, currently advisory.
+// Sync advances every registered repo onto its trunk, idle-safe, and fast-forward
+// pushes local trunk back to origin once a repo has been quiet past PushAfter.
+// When repoFilter is non-empty only the repo whose absolute path or relpath
+// matches it is synced; an unmatched filter is an error. origin is the optional
+// anti-echo provenance tag from the watcher, currently advisory.
 func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
@@ -40,6 +42,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 	}
 
 	idle := time.Duration(st.Settings.IdleThreshold)
+	pushAfter := time.Duration(st.Settings.PushAfter)
 	repoOpTimeout := time.Duration(st.Settings.RepoOpTimeout)
 	results := make([]Result, len(targets))
 	sem := make(chan struct{}, concurrency)
@@ -50,7 +53,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 		go func(i int, repo state.Repo) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle, repoOpTimeout)
+			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle, pushAfter, repoOpTimeout)
 		}(i, repo)
 	}
 	wg.Wait()
@@ -73,7 +76,7 @@ func selectRepos(st *state.State, dl, repoFilter string) ([]state.Repo, error) {
 	return nil, fmt.Errorf("repo not registered: %s", repoFilter)
 }
 
-func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, repoOpTimeout time.Duration) Result {
+func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAfter, repoOpTimeout time.Duration) Result {
 	ctx, cancel := context.WithTimeout(ctx, repoOpTimeout)
 	defer cancel()
 
@@ -112,5 +115,25 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, repoOpT
 		return res
 	}
 	res.Outcome = outcome
+
+	if outcome != vcs.OutcomeUpToDate && outcome != vcs.OutcomeAdvanced {
+		return res
+	}
+	busy, _, err = r.InUse(ctx, pushAfter)
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	if busy {
+		return res
+	}
+	pushed, err := r.PushTrunk(ctx)
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	if pushed == vcs.OutcomePushed {
+		res.Outcome = vcs.OutcomePushed
+	}
 	return res
 }

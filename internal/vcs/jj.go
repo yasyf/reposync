@@ -158,6 +158,47 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	return OutcomeNotDisposable, nil
 }
 
+// PushTrunk fast-forward pushes the local <trunk> bookmark to origin. It pushes
+// only when local trunk is strictly ahead of <trunk>@origin with no divergence;
+// not-ahead or diverged returns OutcomeUpToDate without pushing. Detection is
+// bookmark-relative (never @), so an empty post-Advance @ is ignored.
+//
+// On true divergence `jj git fetch` leaves the local bookmark conflicted, and any
+// revset naming the bare bookmark errors ("Name `<trunk>` is conflicted"). That
+// is an expected non-fast-forwardable condition, treated as OutcomeUpToDate.
+func (r *jjRepo) PushTrunk(ctx context.Context) (Outcome, error) {
+	ahead, err := r.jj(ctx, "log", "-r", r.trunk+"@origin.."+r.trunk, "--no-graph", "--ignore-working-copy", "-T", `"x"`)
+	if err != nil {
+		if isConflictedBookmark(err) {
+			return OutcomeUpToDate, nil
+		}
+		return "", err
+	}
+	if strings.TrimSpace(ahead) == "" {
+		return OutcomeUpToDate, nil
+	}
+	diverged, err := r.jj(ctx, "log", "-r", r.trunk+"@origin ~ ::"+r.trunk, "--no-graph", "--ignore-working-copy", "-T", `"x"`)
+	if err != nil {
+		if isConflictedBookmark(err) {
+			return OutcomeUpToDate, nil
+		}
+		return "", err
+	}
+	if strings.TrimSpace(diverged) != "" {
+		return OutcomeUpToDate, nil
+	}
+	if _, err := r.jj(ctx, "git", "push", "--remote", "origin", "--bookmark", r.trunk, "--ignore-working-copy"); err != nil {
+		return "", fmt.Errorf("jj git push %s: %w", r.trunk, err)
+	}
+	return OutcomePushed, nil
+}
+
+// isConflictedBookmark reports whether err is jj refusing a revset that names a
+// conflicted bookmark, the expected signal that local trunk diverged from origin.
+func isConflictedBookmark(err error) bool {
+	return strings.Contains(err.Error(), "is conflicted")
+}
+
 // rebaseGenerated rebases @ (carrying only generated edits) onto trunk, then
 // resolves any conflicts by taking trunk's version of each conflicted path.
 func (r *jjRepo) rebaseGenerated(ctx context.Context) (Outcome, error) {

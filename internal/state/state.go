@@ -26,6 +26,7 @@ const (
 	defaultIdleThreshold = 5 * time.Minute
 	defaultWatchDebounce = 3 * time.Second
 	defaultRepoOpTimeout = 2 * time.Minute
+	defaultPushAfter     = 24 * time.Hour
 
 	lockRetryDelay = 200 * time.Millisecond
 )
@@ -42,6 +43,7 @@ type Settings struct {
 	IdleThreshold Duration `json:"idle_threshold"`
 	WatchDebounce Duration `json:"watch_debounce"`
 	RepoOpTimeout Duration `json:"repo_op_timeout"`
+	PushAfter     Duration `json:"push_after"`
 }
 
 // Repo is a tracked repository placed at Relpath under the host's default location.
@@ -198,6 +200,9 @@ func (s *State) applyDefaults() {
 	}
 	if s.Settings.RepoOpTimeout == 0 {
 		s.Settings.RepoOpTimeout = Duration(defaultRepoOpTimeout)
+	}
+	if s.Settings.PushAfter == 0 {
+		s.Settings.PushAfter = Duration(defaultPushAfter)
 	}
 }
 

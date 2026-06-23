@@ -324,6 +324,73 @@ func TestJJNeverPushOnAdvance(t *testing.T) {
 	}
 }
 
+// TestJJPushTrunkFastForward proves a clean fast-forward push on a colocated jj
+// clone: the local main bookmark is moved ahead onto a real described commit with
+// origin unmoved, so PushTrunk reports pushed and origin main advances to it.
+func TestJJPushTrunkFastForward(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	// Real local content on @, then point the main bookmark at it: local main is
+	// now strictly ahead of main@origin (origin not moved).
+	f.writeFile(dest, "AHEAD.md", "ahead\n")
+	f.runJJ(dest, "describe", "-m", "local ahead", "--ignore-working-copy")
+	f.runJJ(dest, "bookmark", "set", "main", "-r", "@", "--ignore-working-copy")
+	localMain := strings.TrimSpace(f.runJJ(dest, "log", "-r", "main", "--no-graph", "--ignore-working-copy", "-T", `commit_id`))
+
+	got, err := r.PushTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("push trunk: %v", err)
+	}
+	if got != OutcomePushed {
+		t.Fatalf("outcome = %q, want pushed", got)
+	}
+	if origin := f.originMain(); origin != localMain {
+		t.Fatalf("origin main = %q, want local main bookmark %q", origin, localMain)
+	}
+}
+
+// TestJJPushTrunkDivergedSkips proves a diverged trunk is not force-pushed: the
+// local main bookmark is moved ahead AND origin moves independently, so after the
+// fetch the local main bookmark is conflicted. PushTrunk must treat the
+// conflicted-bookmark revset error as a skip: up-to-date, no error, origin
+// unchanged.
+func TestJJPushTrunkDivergedSkips(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	// Diverge: move local main onto real content, then advance origin separately.
+	f.writeFile(dest, "AHEAD.md", "ahead\n")
+	f.runJJ(dest, "describe", "-m", "local ahead", "--ignore-working-copy")
+	f.runJJ(dest, "bookmark", "set", "main", "-r", "@", "--ignore-working-copy")
+	f.advanceOrigin("v2")
+
+	// Advance performs the fetch PushTrunk relies on (and then errors on the now
+	// conflicted main bookmark); the fetch is what leaves the bookmark conflicted.
+	if _, err := r.Advance(context.Background()); err == nil {
+		t.Fatal("advance: want error on diverged conflicted bookmark, got nil")
+	}
+	conflicted := strings.TrimSpace(f.runJJ(dest, "bookmark", "list", "main", "--ignore-working-copy",
+		"-T", `name ++ " conflict=" ++ conflict ++ "\n"`))
+	if !strings.Contains(conflicted, "main conflict=true") {
+		t.Fatalf("main bookmark not conflicted after diverged fetch:\n%s", conflicted)
+	}
+
+	originBefore := f.originMain()
+	got, err := r.PushTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("push trunk: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date (diverged, skip)", got)
+	}
+	if originBefore != f.originMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+}
+
 // jjGeneratedOnlyProbe renders @'s emptiness, description, and bookmarks so a test
 // can assert @ still carries only a generated edit (no description, no bookmarks).
 func (f *fixture) jjGeneratedOnlyProbe(repo string) string {

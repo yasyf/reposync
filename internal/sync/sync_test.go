@@ -78,6 +78,8 @@ func requireJJ(t *testing.T) {
 
 // state builds a *state.State pointed at this harness's default_location with a
 // short idle threshold so freshly-cloned repos are not seen as recently active.
+// PushAfter is likewise 1ns so the push gate treats a quiet repo as quiet; tests
+// that need to suppress the push override st.Settings.PushAfter directly.
 func (h *harness) state(repos ...state.Repo) *state.State {
 	h.t.Helper()
 	return &state.State{
@@ -85,6 +87,7 @@ func (h *harness) state(repos ...state.Repo) *state.State {
 		Repos:           repos,
 		Settings: state.Settings{
 			IdleThreshold: state.Duration(time.Nanosecond),
+			PushAfter:     state.Duration(time.Nanosecond),
 			RepoOpTimeout: state.Duration(time.Minute),
 		},
 	}
@@ -108,6 +111,25 @@ func (h *harness) advanceOrigin(content string) string {
 	h.runGit(h.seed, "commit", "-aqm", content)
 	h.runGit(h.seed, "push", "-q", "origin", "main")
 	return h.originMain()
+}
+
+// localAhead writes real content into dest, commits it as a non-empty trunk commit
+// with an empty @ on top, and moves the local main bookmark onto that commit,
+// leaving local main strictly ahead of origin without pushing. The empty @ keeps
+// the working copy disposable so InUse does not report it busy. It returns the
+// local main commit id.
+func (h *harness) localAhead(dest, name, content string) string {
+	h.t.Helper()
+	h.writeFile(dest, name, content)
+	h.runJJ(dest, "commit", "-m", name)
+	h.runJJ(dest, "bookmark", "set", "main", "-r", "@-", "--ignore-working-copy")
+	return h.localMain(dest)
+}
+
+// localMain resolves the local main bookmark's commit id via the colocated git ref.
+func (h *harness) localMain(dest string) string {
+	h.t.Helper()
+	return strings.TrimSpace(h.runGit(dest, "rev-parse", "main"))
 }
 
 // seedGenerated writes a .gitattributes marking *.gen as linguist-generated plus
@@ -373,20 +395,131 @@ func TestSyncRebasesGeneratedOnlyRepo(t *testing.T) {
 	}
 }
 
-func TestSyncNeverPushes(t *testing.T) {
+// TestSyncPushesQuietAheadRepo proves the positive path: a quiet repo whose local
+// trunk is strictly ahead of an unmoved origin is fast-forward pushed, and origin
+// lands exactly on the local main commit.
+func TestSyncPushesQuietAheadRepo(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
-	// Make local main ahead of origin by committing locally (no push).
-	h.runJJ(dest, "describe", "-m", "local ahead", "--ignore-working-copy")
-	h.runJJ(dest, "bookmark", "set", "main", "-r", "@", "--ignore-working-copy")
-	h.advanceOrigin("v2")
+	wantMain := h.localAhead(dest, "feature.txt", "shipped locally\n")
+	// Both gates open (IdleThreshold and PushAfter default to 1ns via h.state).
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomePushed {
+		t.Fatalf("alpha outcome = %q, want pushed", res.Outcome)
+	}
+	if got := h.originMain(); got != wantMain {
+		t.Fatalf("origin main = %q, want local main %q", got, wantMain)
+	}
+}
+
+// TestSyncNoPushWhenRecentlyActive proves the quiet gate: an ahead repo that has
+// been active within PushAfter is not pushed even though Advance succeeds.
+func TestSyncNoPushWhenRecentlyActive(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("alpha")
+	h.localAhead(dest, "feature.txt", "shipped locally\n")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	// IdleThreshold stays 1ns (Advance reaches the push check); PushAfter=1h makes
+	// the just-created clone look recently active, closing the push gate.
+	st.Settings.PushAfter = state.Duration(time.Hour)
+
+	originBefore := h.originMain()
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Outcome == vcs.OutcomePushed {
+		t.Fatalf("alpha outcome = %q, want not pushed (recently active)", res.Outcome)
+	}
+	if got := h.originMain(); got != originBefore {
+		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
+	}
+}
+
+// TestSyncNoPushWhenDiverged proves a diverged repo is never force-moved: local is
+// ahead AND origin has independently advanced. jj's conflicted-bookmark skip (and
+// git's non-FF rejection) keep origin put even with the push gate open.
+func TestSyncNoPushWhenDiverged(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("alpha")
+	h.localAhead(dest, "feature.txt", "shipped locally\n")
+	originBefore := h.advanceOrigin("v2")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// Advance erroring into res.Err on the conflicted bookmark is pre-existing; the
+	// invariant under test is that origin is not force-moved.
+	_ = resultFor(t, results, "alpha")
+	if got := h.originMain(); got != originBefore {
+		t.Fatalf("origin main moved from %q to %q on divergence, want unchanged", originBefore, got)
+	}
+}
+
+// TestSyncNoPushWhenDirty proves a busy repo short-circuits before push: a dirty
+// non-generated working copy yields OutcomeBusy and leaves origin untouched.
+func TestSyncNoPushWhenDirty(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("alpha")
+	h.localAhead(dest, "feature.txt", "shipped locally\n")
+	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy.
+	h.writeFile(dest, "WORK.txt", "in progress\n")
+	h.runJJ(dest, "status")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	st.Settings.IdleThreshold = state.Duration(time.Hour)
+
+	originBefore := h.originMain()
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeBusy {
+		t.Fatalf("alpha outcome = %q, want busy", res.Outcome)
+	}
+	if got := h.originMain(); got != originBefore {
+		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
+	}
+}
+
+// TestSyncNoPushWhenNotAhead proves an up-to-date repo with no local lead does not
+// push: local main was never moved, so PushTrunk finds nothing to send.
+func TestSyncNoPushWhenNotAhead(t *testing.T) {
+	h := newHarness(t)
+	h.jjClone("alpha")
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	originBefore := h.originMain()
-	if _, err := Sync(context.Background(), st, "", ""); err != nil {
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	if originBefore != h.originMain() {
-		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, h.originMain())
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Outcome == vcs.OutcomePushed {
+		t.Fatalf("alpha outcome = %q, want not pushed (not ahead)", res.Outcome)
+	}
+	if got := h.originMain(); got != originBefore {
+		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
 	}
 }

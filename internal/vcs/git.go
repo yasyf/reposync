@@ -68,7 +68,7 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	if _, err := r.git(ctx, "fetch", "--prune", "origin"); err != nil {
 		return "", fmt.Errorf("git fetch: %w", err)
 	}
-	behind, err := r.behindCount(ctx)
+	_, behind, err := r.aheadBehind(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -161,20 +161,47 @@ func (r *gitRepo) tracked(ctx context.Context, path string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-func (r *gitRepo) behindCount(ctx context.Context) (int, error) {
+// PushTrunk fast-forward pushes local <trunk> to origin. It pushes only when
+// local trunk is strictly ahead of origin/<trunk> with no divergence; not-ahead
+// or diverged returns OutcomeUpToDate without pushing. It operates on the local
+// <trunk> ref, so it no-ops when checked out on a feature branch.
+func (r *gitRepo) PushTrunk(ctx context.Context) (Outcome, error) {
+	ahead, behind, err := r.aheadBehind(ctx)
+	if err != nil {
+		return "", err
+	}
+	if ahead == 0 {
+		return OutcomeUpToDate, nil
+	}
+	if behind > 0 {
+		return OutcomeUpToDate, nil
+	}
+	if _, err := r.git(ctx, "push", "origin", r.trunk+":"+r.trunk); err != nil {
+		return "", fmt.Errorf("git push %s: %w", r.trunk, err)
+	}
+	return OutcomePushed, nil
+}
+
+// aheadBehind counts how many commits local <trunk> is ahead of and behind
+// origin/<trunk>, parsing the tab-separated "ahead\tbehind" rev-list output.
+func (r *gitRepo) aheadBehind(ctx context.Context) (ahead, behind int, err error) {
 	out, err := r.git(ctx, "rev-list", "--left-right", "--count", r.trunk+"...origin/"+r.trunk)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	fields := strings.Fields(strings.TrimSpace(out))
 	if len(fields) != 2 {
-		return 0, fmt.Errorf("parse rev-list count %q", out)
+		return 0, 0, fmt.Errorf("parse rev-list count %q", out)
 	}
-	behind, err := strconv.Atoi(fields[1])
+	ahead, err = strconv.Atoi(fields[0])
 	if err != nil {
-		return 0, fmt.Errorf("parse behind count %q: %w", fields[1], err)
+		return 0, 0, fmt.Errorf("parse ahead count %q: %w", fields[0], err)
 	}
-	return behind, nil
+	behind, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse behind count %q: %w", fields[1], err)
+	}
+	return ahead, behind, nil
 }
 
 func (r *gitRepo) currentBranch(ctx context.Context) (string, error) {
