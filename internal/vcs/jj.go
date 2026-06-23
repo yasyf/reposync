@@ -124,6 +124,12 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	}
 	moved, err := r.trunkMovedPastWorkingCopy(ctx)
 	if err != nil {
+		// A conflicted trunk bookmark means local trunk diverged from origin: the
+		// fetch above left it conflicted and revsets naming it now error. We cannot
+		// fast-forward, so decline quietly like the git backend does on a non-FF.
+		if isConflictedBookmark(err) {
+			return OutcomeUpToDate, nil
+		}
 		return "", err
 	}
 	disposable, err := r.disposable(ctx)

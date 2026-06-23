@@ -353,8 +353,9 @@ func TestJJPushTrunkFastForward(t *testing.T) {
 
 // TestJJPushTrunkDivergedSkips proves a diverged trunk is not force-pushed: the
 // local main bookmark is moved ahead AND origin moves independently, so after the
-// fetch the local main bookmark is conflicted. PushTrunk must treat the
-// conflicted-bookmark revset error as a skip: up-to-date, no error, origin
+// fetch the local main bookmark is conflicted. Advance declines such a divergence
+// quietly (up-to-date, no error) like the git backend, and PushTrunk likewise
+// skips on the conflicted-bookmark revset error: up-to-date, no error, origin
 // unchanged.
 func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	f := newFixture(t)
@@ -367,10 +368,15 @@ func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	f.runJJ(dest, "bookmark", "set", "main", "-r", "@", "--ignore-working-copy")
 	f.advanceOrigin("v2")
 
-	// Advance performs the fetch PushTrunk relies on (and then errors on the now
-	// conflicted main bookmark); the fetch is what leaves the bookmark conflicted.
-	if _, err := r.Advance(context.Background()); err == nil {
-		t.Fatal("advance: want error on diverged conflicted bookmark, got nil")
+	// Advance performs the fetch PushTrunk relies on; the fetch leaves the local
+	// main bookmark conflicted. Advance must decline quietly, matching git's non-FF
+	// decline rather than surfacing the conflict as an error.
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: want quiet decline on diverged bookmark, got error: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("advance outcome = %q, want up-to-date (diverged, decline)", got)
 	}
 	conflicted := strings.TrimSpace(f.runJJ(dest, "bookmark", "list", "main", "--ignore-working-copy",
 		"-T", `name ++ " conflict=" ++ conflict ++ "\n"`))
@@ -379,7 +385,7 @@ func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	}
 
 	originBefore := f.originMain()
-	got, err := r.PushTrunk(context.Background())
+	got, err = r.PushTrunk(context.Background())
 	if err != nil {
 		t.Fatalf("push trunk: %v", err)
 	}

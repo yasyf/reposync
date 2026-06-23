@@ -463,9 +463,15 @@ func TestSyncNoPushWhenDiverged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	// Advance erroring into res.Err on the conflicted bookmark is pre-existing; the
-	// invariant under test is that origin is not force-moved.
-	_ = resultFor(t, results, "alpha")
+	// jj now declines a diverged (conflicted) bookmark quietly, like git: no error,
+	// up-to-date, and crucially origin is not force-moved.
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("diverged repo: want no error (quiet decline like git), got %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date (diverged, quiet decline)", res.Outcome)
+	}
 	if got := h.originMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q on divergence, want unchanged", originBefore, got)
 	}
