@@ -7,6 +7,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,6 +39,10 @@ const (
 	watchThrottle = 10
 	plistFileMode = 0o644
 	agentsDirMode = 0o755
+
+	// notLoadedExit is launchctl bootout's exit code (ESRCH) when the target agent
+	// isn't loaded — the only tolerated bootout failure, by code, never by stderr text.
+	notLoadedExit = 3
 )
 
 var tickTemplate = template.Must(template.New("tick").Parse(`<?xml version="1.0" encoding="UTF-8"?>
@@ -108,16 +113,19 @@ var watchTemplate = template.Must(template.New("watch").Parse(`<?xml version="1.
 </plist>
 `))
 
-// Loader loads and unloads launchd jobs; the launchctl boundary tests inject.
+// Loader bootstraps and boots out launchd jobs in the user's GUI domain; the
+// launchctl boundary tests inject. Bootout tolerates a not-loaded agent so a
+// reinstall is idempotent; Bootstrap tolerates nothing, since install boots out
+// first and a nonzero bootstrap (e.g. a malformed plist) is a real error.
 type Loader interface {
-	// Load registers the job described by the plist at plistPath with launchd.
-	Load(ctx context.Context, plistPath string) error
-	// Unload deregisters the job described by the plist at plistPath.
-	Unload(ctx context.Context, plistPath string) error
+	// Bootstrap registers the job described by the plist at plistPath.
+	Bootstrap(ctx context.Context, plistPath string) error
+	// Bootout deregisters the launchd job with the given label.
+	Bootout(ctx context.Context, label string) error
 }
 
-// launchctlLoader is the production Loader: it shells out to launchctl. Unload
-// ignores the failure of a job that is not currently loaded so reload is safe.
+// launchctlLoader is the production Loader: it shells out to launchctl's modern
+// domain API (bootstrap/bootout gui/<uid>), which reports failures via exit code.
 type launchctlLoader struct{}
 
 // NewLauncher returns the default Loader backed by the launchctl CLI.
@@ -125,27 +133,31 @@ func NewLauncher() Loader {
 	return launchctlLoader{}
 }
 
-func (launchctlLoader) Load(ctx context.Context, plistPath string) error {
+func guiDomain() string {
+	return fmt.Sprintf("gui/%d", os.Getuid())
+}
+
+func (launchctlLoader) Bootstrap(ctx context.Context, plistPath string) error {
 	//nolint:gosec // G204: plistPath is reposync's own generated launchd plist path, not user-supplied.
-	cmd := exec.CommandContext(ctx, "launchctl", "load", plistPath)
+	cmd := exec.CommandContext(ctx, "launchctl", "bootstrap", guiDomain(), plistPath)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load %s: %w: %s", plistPath, err, bytes.TrimSpace(out))
+		return fmt.Errorf("launchctl bootstrap %s: %w: %s", plistPath, err, bytes.TrimSpace(out))
 	}
 	return nil
 }
 
-func (launchctlLoader) Unload(ctx context.Context, plistPath string) error {
-	//nolint:gosec // G204: plistPath is reposync's own generated launchd plist path, not user-supplied.
-	out, err := exec.CommandContext(ctx, "launchctl", "unload", plistPath).CombinedOutput()
+func (launchctlLoader) Bootout(ctx context.Context, label string) error {
+	out, err := exec.CommandContext(ctx, "launchctl", "bootout", guiDomain()+"/"+label).CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	// launchctl unload exits non-zero when the job is not currently loaded; that
-	// is expected on first install and during reload, so tolerate only that case.
-	if bytes.Contains(out, []byte("Could not find specified service")) || bytes.Contains(out, []byte("no such process")) {
+	// launchctl bootout exits 3 (ESRCH) when the agent isn't loaded — expected on a
+	// first install and during reload. Tolerate that exit code only, by code not text.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == notLoadedExit {
 		return nil
 	}
-	return fmt.Errorf("launchctl unload %s: %w: %s", plistPath, err, bytes.TrimSpace(out))
+	return fmt.Errorf("launchctl bootout %s: %w: %s", label, err, bytes.TrimSpace(out))
 }
 
 // tickPlist renders the periodic reconcile tick's plist XML for the given
@@ -181,9 +193,9 @@ func watchPlist(exe string) (string, error) {
 	})
 }
 
-// Install resolves this executable, writes the tick plist and loads it, and
-// unless tickOnly does the same for the watch plist. Each plist is unloaded
-// before loading so re-install picks up changes.
+// Install resolves this executable, writes the tick plist and bootstraps it, and
+// unless tickOnly does the same for the watch plist. Each agent is booted out
+// before bootstrap so re-install picks up changes.
 func Install(ctx context.Context, l Loader, tickOnly bool) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("install requires macOS launchd, not %s", runtime.GOOS)
@@ -212,7 +224,7 @@ func Install(ctx context.Context, l Loader, tickOnly bool) error {
 	return writeAndLoad(ctx, l, agentsDir, WatchLabel, func() (string, error) { return watchPlist(exe) })
 }
 
-// Uninstall unloads both LaunchAgents and removes their plist files; a missing
+// Uninstall boots out both LaunchAgents and removes their plist files; a missing
 // file is not an error.
 func Uninstall(ctx context.Context, l Loader) error {
 	if runtime.GOOS != "darwin" {
@@ -224,8 +236,8 @@ func Uninstall(ctx context.Context, l Loader) error {
 	}
 	for _, label := range []string{TickLabel, WatchLabel} {
 		path := filepath.Join(agentsDir, label+".plist")
-		if err := l.Unload(ctx, path); err != nil {
-			return fmt.Errorf("unload %s: %w", label, err)
+		if err := l.Bootout(ctx, label); err != nil {
+			return fmt.Errorf("bootout %s: %w", label, err)
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove plist %s: %w", path, err)
@@ -243,11 +255,11 @@ func writeAndLoad(ctx context.Context, l Loader, agentsDir, label string, render
 	if err := os.WriteFile(path, []byte(xml), plistFileMode); err != nil {
 		return fmt.Errorf("write plist %s: %w", path, err)
 	}
-	if err := l.Unload(ctx, path); err != nil {
-		return fmt.Errorf("unload %s before reload: %w", label, err)
+	if err := l.Bootout(ctx, label); err != nil {
+		return fmt.Errorf("bootout %s before reload: %w", label, err)
 	}
-	if err := l.Load(ctx, path); err != nil {
-		return fmt.Errorf("load %s: %w", label, err)
+	if err := l.Bootstrap(ctx, path); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", label, err)
 	}
 	return nil
 }

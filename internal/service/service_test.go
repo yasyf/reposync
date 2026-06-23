@@ -130,19 +130,20 @@ func TestPlistLogPathsAbsolute(t *testing.T) {
 	}
 }
 
-// fakeLoader records the plist paths passed to Load and Unload in call order.
+// fakeLoader records the plist paths passed to Bootstrap and the labels passed to
+// Bootout, in call order.
 type fakeLoader struct {
-	loaded   []string
-	unloaded []string
+	bootstrapped []string // plist paths
+	bootedOut    []string // launchd labels
 }
 
-func (f *fakeLoader) Load(_ context.Context, plistPath string) error {
-	f.loaded = append(f.loaded, plistPath)
+func (f *fakeLoader) Bootstrap(_ context.Context, plistPath string) error {
+	f.bootstrapped = append(f.bootstrapped, plistPath)
 	return nil
 }
 
-func (f *fakeLoader) Unload(_ context.Context, plistPath string) error {
-	f.unloaded = append(f.unloaded, plistPath)
+func (f *fakeLoader) Bootout(_ context.Context, label string) error {
+	f.bootedOut = append(f.bootedOut, label)
 	return nil
 }
 
@@ -190,13 +191,12 @@ func TestInstallBothAgents(t *testing.T) {
 		"<key>KeepAlive</key>\n\t<true/>",
 	)
 
-	wantLoaded := []string{tickPath, watchPath}
-	if !equalStrings(l.loaded, wantLoaded) {
-		t.Errorf("Load calls = %v, want %v", l.loaded, wantLoaded)
+	if !equalStrings(l.bootstrapped, []string{tickPath, watchPath}) {
+		t.Errorf("Bootstrap calls = %v, want %v", l.bootstrapped, []string{tickPath, watchPath})
 	}
-	// Each install unloads before loading so reload picks up changes.
-	if !equalStrings(l.unloaded, wantLoaded) {
-		t.Errorf("Unload calls = %v, want %v", l.unloaded, wantLoaded)
+	// Each install boots out before bootstrap so reload picks up changes.
+	if !equalStrings(l.bootedOut, []string{TickLabel, WatchLabel}) {
+		t.Errorf("Bootout calls = %v, want %v", l.bootedOut, []string{TickLabel, WatchLabel})
 	}
 }
 
@@ -219,9 +219,8 @@ func TestInstallTickOnly(t *testing.T) {
 	if _, err := os.Stat(watchPath); !os.IsNotExist(err) {
 		t.Errorf("watch plist should be absent, got err=%v", err)
 	}
-	wantLoaded := []string{tickPath}
-	if !equalStrings(l.loaded, wantLoaded) {
-		t.Errorf("Load calls = %v, want %v", l.loaded, wantLoaded)
+	if !equalStrings(l.bootstrapped, []string{tickPath}) {
+		t.Errorf("Bootstrap calls = %v, want %v", l.bootstrapped, []string{tickPath})
 	}
 }
 
@@ -256,13 +255,10 @@ func TestUninstall(t *testing.T) {
 		t.Fatalf("Uninstall: %v", err)
 	}
 
-	tickPath := plistPath(home, TickLabel)
-	watchPath := plistPath(home, WatchLabel)
-	wantUnloaded := []string{tickPath, watchPath}
-	if !equalStrings(l.unloaded, wantUnloaded) {
-		t.Errorf("Unload calls = %v, want %v", l.unloaded, wantUnloaded)
+	if !equalStrings(l.bootedOut, []string{TickLabel, WatchLabel}) {
+		t.Errorf("Bootout calls = %v, want %v", l.bootedOut, []string{TickLabel, WatchLabel})
 	}
-	for _, p := range wantUnloaded {
+	for _, p := range []string{plistPath(home, TickLabel), plistPath(home, WatchLabel)} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("plist %s should be removed, got err=%v", p, err)
 		}
@@ -278,8 +274,8 @@ func TestUninstallMissingFilesOK(t *testing.T) {
 	if err := Uninstall(context.Background(), l); err != nil {
 		t.Fatalf("Uninstall with no installed agents should succeed: %v", err)
 	}
-	if len(l.unloaded) != 2 {
-		t.Errorf("expected 2 Unload calls, got %d", len(l.unloaded))
+	if len(l.bootedOut) != 2 {
+		t.Errorf("expected 2 Bootout calls, got %d", len(l.bootedOut))
 	}
 }
 
