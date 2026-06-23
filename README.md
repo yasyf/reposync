@@ -7,11 +7,11 @@
 
 Keep git repos in sync across your remote hosts.
 
-reposync is a single Go binary that keeps a set of repositories **converged**
-across the machines you work on: present everywhere, and kept on the latest
-`main` — without ever clobbering work in progress. Register your hosts, register
-your repos, and reposync clones each repo onto every host that is missing it and
-fast-forwards it on a timer and on filesystem events.
+reposync is a single Go binary that keeps a set of repos converged across your
+machines: present everywhere, kept on the latest `main`, and never clobbering
+work in progress. Register your hosts and repos, and it clones each repo onto
+every host that is missing it and fast-forwards it on a timer and on filesystem
+events.
 
 ## Install
 
@@ -21,60 +21,44 @@ brew install yasyf/tap/reposync
 
 ## Quickstart
 
-Register a peer host. reposync detects how peers reach this machine (via
-Tailscale), installs itself on the peer, registers the inverse host, shares your
-repo list, and converges everything:
+Register a peer host, then a repo. reposync reaches the peer over Tailscale,
+installs itself there, shares your repo list, and clones each repo wherever it is
+missing:
 
 ```sh
 reposync host add yasyf@yasyf-home
-```
-
-Register a repo. reposync reads its origin, records it relative to your
-`default_location` (`~/Code`), propagates it to every peer, and clones it
-wherever it is missing:
-
-```sh
 reposync repo add ~/Code/cc-review
+reposync install   # launchd: a 15-minute reconcile tick + a watch daemon
 ```
 
-Sync on demand, or let the services do it:
+## Commands
 
-```sh
-reposync sync        # idle-safe fetch + fast-forward of every repo
-reposync reconcile   # clone any missing repo, then idle-sync the rest
-reposync install     # launchd: a 15-minute reconcile tick + a watch daemon
-```
+| Command | What it does |
+| --- | --- |
+| `reposync host add <user@node>` | Register a peer and converge (`--local-only` repos stay put) |
+| `reposync repo add <path>` | Track a repo relative to `default_location` (`~/Code`) and clone it on every peer |
+| `reposync sync` | Idle-safe fetch + fast-forward of every repo |
+| `reposync reconcile` | Clone any missing repo, then idle-sync the rest |
+| `reposync install` / `uninstall` | Add or remove the launchd agents |
+| `reposync repo ls` / `host ls` | Inspect what is registered |
+
+Run `reposync --help` for the full command tree and flags.
 
 ## How convergence works
 
-Each repo is tracked by its path relative to `default_location` (`~/Code`), so
-the same repo lands at the same place on every host. Registering a host or a repo
-clones it wherever it is absent. Clones run `jj git clone --colocate`, so every
-checkout has both `.git` and `.jj` whether the origin is jj or plain git; jj is
-preferred and plain git is fully supported.
-
-A sync is pull-only. It runs `jj git fetch` (or `git fetch`) plus a safe
-fast-forward, and reposync never pushes. It leaves a repo untouched when the
-working copy holds in-progress work, the trunk would not fast-forward, or the
-repo was active within the idle threshold. A dirty or busy repo is skipped, not
-overwritten.
-
-Two triggers drive the timer. A launchd tick reconciles every 15 minutes, so an
-offline peer self-heals when it comes back. Between ticks, a watchman-backed watch
-daemon notices a trunk change within seconds and notifies peers to pull that one
-repo.
-
-A repo with no origin can still be tracked on the host you add it from with
-`--local-only`; it is never propagated. Use `reposync repo ls` and
-`reposync host ls` to inspect what is registered, and `reposync uninstall` to
-remove the launchd agents.
+Each repo is tracked by its path relative to `default_location` (`~/Code`), so it
+lands at the same place on every host. Clones run `jj git clone --colocate` — jj
+is preferred, plain git fully supported. A sync is pull-only: `jj git fetch` (or
+`git fetch`) plus a safe fast-forward, never a push, and it skips any repo that is
+dirty, would not fast-forward, or was active within the idle threshold. A launchd
+tick reconciles every 15 minutes so offline peers self-heal, and a watchman-backed
+daemon notifies peers within seconds of a trunk change.
 
 ## Prerequisite for cross-host bootstrap
 
-`reposync host add` installs reposync on the peer with `brew install --cask
-yasyf/tap/reposync`, which requires a published cask. Cut a goreleaser release so
-the cask lands in `yasyf/homebrew-tap` before adding your first host; until then,
-`host add` fails fast and tells you to publish a release.
+`reposync host add` installs the peer via `brew install --cask yasyf/tap/reposync`,
+so cut a goreleaser release to `yasyf/homebrew-tap` before adding your first host;
+until then `host add` fails fast and tells you to publish one.
 
 ## License
 
