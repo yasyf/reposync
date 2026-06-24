@@ -79,14 +79,16 @@ func (h *harness) originMain() string {
 
 func (h *harness) state(repos ...state.Repo) *state.State {
 	h.t.Helper()
-	return &state.State{
-		DefaultLocation: h.dataLoc,
-		Repos:           repos,
-		Settings: state.Settings{
-			IdleThreshold: state.Duration(time.Nanosecond),
-			RepoOpTimeout: state.Duration(time.Minute),
-		},
+	st := state.New()
+	st.DefaultLocation = h.dataLoc
+	st.Settings = state.Settings{
+		IdleThreshold: state.Duration(time.Nanosecond),
+		RepoOpTimeout: state.Duration(time.Minute),
 	}
+	for _, r := range repos {
+		st.AddRepo(r)
+	}
+	return st
 }
 
 func (h *harness) configGit(dir string) {

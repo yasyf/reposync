@@ -2,19 +2,16 @@ package apply
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
-	"github.com/yasyf/synckit/hostregistry"
 )
 
 const jjTestConfig = `[user]
@@ -85,13 +82,14 @@ func requireJJ(t *testing.T) {
 // configured default_location and any pre-tracked repos.
 func (h *harness) seedState(repos ...state.Repo) {
 	h.t.Helper()
-	st := &state.State{
-		DefaultLocation: h.dataLoc,
-		Repos:           repos,
-		Settings: state.Settings{
-			IdleThreshold: state.Duration(time.Nanosecond),
-			RepoOpTimeout: state.Duration(time.Minute),
-		},
+	st := state.New()
+	st.DefaultLocation = h.dataLoc
+	st.Settings = state.Settings{
+		IdleThreshold: state.Duration(time.Nanosecond),
+		RepoOpTimeout: state.Duration(time.Minute),
+	}
+	for _, r := range repos {
+		st.AddRepo(r)
 	}
 	if err := st.Save(); err != nil {
 		h.t.Fatalf("seed state: %v", err)
@@ -129,33 +127,6 @@ func (h *harness) exists(path string) bool {
 	return err == nil
 }
 
-// fakeRunner records every Local/SSH call and returns "", nil so PropagateRepo
-// and RemoteReconcile succeed without real ssh. Copied from host_test's shape.
-type fakeRunner struct {
-	mu    sync.Mutex
-	calls []string
-}
-
-func (f *fakeRunner) Local(_ context.Context, name string, args ...string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "local "+strings.TrimSpace(name+" "+strings.Join(args, " ")))
-	return "", nil
-}
-
-func (f *fakeRunner) SSH(_ context.Context, target, remoteCmd string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "ssh "+target+": "+remoteCmd)
-	return "", nil
-}
-
-func (f *fakeRunner) recorded() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.calls...)
-}
-
 func resultFor(t *testing.T, results []reconcile.Result, relpath string) reconcile.Result {
 	t.Helper()
 	for _, res := range results {
@@ -173,7 +144,7 @@ func loadRepo(t *testing.T, relpath string) (state.Repo, bool) {
 	if err != nil {
 		t.Fatalf("load persisted state: %v", err)
 	}
-	for _, r := range st.Repos {
+	for _, r := range st.AllRepos() {
 		if r.Relpath == relpath {
 			return r, true
 		}
@@ -191,7 +162,7 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 		},
 	}
 
-	results, err := Repos(context.Background(), &fakeRunner{}, sel)
+	results, err := Repos(context.Background(), sel)
 	if err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
@@ -224,75 +195,67 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 	}
 }
 
-func TestApplyReposEnablePropagatesToPeers(t *testing.T) {
+// TestApplyReposEnableAddsPropagatingEntry proves enable adds the repo to the
+// origin-keyed convergent registry (present, not local-only) — the entry a peer
+// pull-merges. apply does no peer push; convergence is the peers' job.
+func TestApplyReposEnableAddsPropagatingEntry(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
-		g.UpsertHost("yasyf@peer")
-		return nil
-	}); err != nil {
-		t.Fatalf("register peer: %v", err)
-	}
 
-	r := &fakeRunner{}
 	sel := RepoSelection{
 		Enable: []discover.Candidate{
 			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
 		},
 	}
-	if _, err := Repos(context.Background(), r, sel); err != nil {
+	if _, err := Repos(context.Background(), sel); err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
 
-	calls := r.recorded()
-	var addRemote, rpcReconcile int
-	for _, c := range calls {
-		if strings.Contains(c, "ssh yasyf@peer:") && strings.Contains(c, "add-remote") {
-			addRemote++
-		}
-		if strings.Contains(c, "ssh yasyf@peer:") && strings.Contains(c, "rpc reconcile") {
-			rpcReconcile++
-		}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
 	}
-	if addRemote != 1 {
-		t.Fatalf("got %d add-remote calls to peer, want 1: %v", addRemote, calls)
+	entry, ok := st.Repos[h.origin]
+	if !ok {
+		t.Fatalf("enabled repo not in propagating registry keyed by origin: %v", st.Repos)
 	}
-	if rpcReconcile != 1 {
-		t.Fatalf("got %d rpc reconcile calls to peer, want 1: %v", rpcReconcile, calls)
+	if !entry.Present() {
+		t.Fatal("enabled repo entry not present (added_at must beat removed_at)")
+	}
+	if entry.Value.Relpath != "alpha" || entry.Value.LocalOnly {
+		t.Fatalf("registry payload = %+v, want relpath=alpha local_only=false", entry.Value)
 	}
 }
 
-func TestApplyReposLocalOnlyNotPropagated(t *testing.T) {
+func TestApplyReposLocalOnlyStaysLocal(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()
-	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
-		g.UpsertHost("yasyf@peer")
-		return nil
-	}); err != nil {
-		t.Fatalf("register peer: %v", err)
-	}
 
-	r := &fakeRunner{}
 	sel := RepoSelection{
 		Enable: []discover.Candidate{
 			{Relpath: "local", Origin: "", Kind: "git", LocalOnly: true},
 		},
 	}
-	if _, err := Repos(context.Background(), r, sel); err != nil {
+	if _, err := Repos(context.Background(), sel); err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
 
-	for _, c := range r.recorded() {
-		if strings.HasPrefix(c, "ssh ") {
-			t.Fatalf("local-only enable triggered a peer push: %q", c)
-		}
+	st, err := state.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
 	}
-	if _, ok := loadRepo(t, "local"); !ok {
-		t.Fatal("local-only repo not persisted")
+	// A local-only repo lives in the local registry keyed by relpath, never in the
+	// propagating one — so it is excluded from what peers pull-merge.
+	if len(st.Repos) != 0 {
+		t.Fatalf("local-only repo leaked into the propagating registry: %v", st.Repos)
+	}
+	e, ok := st.LocalRepos["local"]
+	if !ok || !e.Present() {
+		t.Fatalf("local-only repo not present in the local registry: %v", st.LocalRepos)
 	}
 }
 
-func TestApplyReposDisableUntracksButKeepsCheckout(t *testing.T) {
+func TestApplyReposDisableTombstonesAndKeepsCheckout(t *testing.T) {
 	h := newHarness(t)
 	h.seedState(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
@@ -310,12 +273,28 @@ func TestApplyReposDisableUntracksButKeepsCheckout(t *testing.T) {
 	}
 
 	sel := RepoSelection{Disable: []string{"alpha"}}
-	if _, err := Repos(context.Background(), &fakeRunner{}, sel); err != nil {
+	if _, err := Repos(context.Background(), sel); err != nil {
 		t.Fatalf("ApplyRepos disable: %v", err)
 	}
 
+	// Disable tombstones the registry entry (so the removal propagates) but keeps the
+	// entry and never touches the on-disk checkout.
 	if _, ok := loadRepo(t, "alpha"); ok {
-		t.Fatal("alpha still tracked in persisted state after disable")
+		t.Fatal("alpha still present (untombstoned) in persisted state after disable")
+	}
+	reloaded, err := state.Load()
+	if err != nil {
+		t.Fatalf("reload state: %v", err)
+	}
+	entry, ok := reloaded.Repos[h.origin]
+	if !ok {
+		t.Fatal("disable dropped the registry entry instead of tombstoning it: removal would not propagate")
+	}
+	if entry.Present() {
+		t.Fatal("disabled repo still present, want tombstoned")
+	}
+	if entry.Removed <= entry.Added {
+		t.Fatalf("tombstone not later than add: added=%d removed=%d", entry.Added, entry.Removed)
 	}
 	if !h.exists(dest) {
 		t.Fatal("disable deleted the on-disk checkout dir")
@@ -346,7 +325,7 @@ func TestApplyReposReconcilesOnlyEnabledSubset(t *testing.T) {
 			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
 		},
 	}
-	results, err := Repos(context.Background(), &fakeRunner{}, sel)
+	results, err := Repos(context.Background(), sel)
 	if err != nil {
 		t.Fatalf("ApplyRepos: %v", err)
 	}
@@ -363,43 +342,4 @@ func TestApplyReposReconcilesOnlyEnabledSubset(t *testing.T) {
 			t.Fatalf("apply reconciled the pre-tracked beta repo: %+v", results)
 		}
 	}
-}
-
-func TestApplyReposPropagateFailureKeepsResults(t *testing.T) {
-	h := newHarness(t)
-	h.seedState()
-	if _, err := state.Config.Update(context.Background(), func(g *hostregistry.Registry) error {
-		g.UpsertHost("yasyf@peer")
-		return nil
-	}); err != nil {
-		t.Fatalf("register peer: %v", err)
-	}
-
-	r := &failingRunner{}
-	sel := RepoSelection{
-		Enable: []discover.Candidate{
-			{Relpath: "alpha", Origin: h.origin, Kind: "git"},
-		},
-	}
-	results, err := Repos(context.Background(), r, sel)
-	if err == nil {
-		t.Fatal("expected a joined propagation error when the peer push fails")
-	}
-	// The reconcile results must survive a propagation failure.
-	res := resultFor(t, results, "alpha")
-	if res.Action != reconcile.ActionCloned || res.Err != nil {
-		t.Fatalf("results discarded on propagate failure: %+v", res)
-	}
-}
-
-// failingRunner fails every SSH call so the propagation/peer-reconcile error
-// path is exercised; Local is unused here.
-type failingRunner struct{}
-
-func (failingRunner) Local(_ context.Context, _ string, _ ...string) (string, error) {
-	return "", nil
-}
-
-func (failingRunner) SSH(_ context.Context, _, _ string) (string, error) {
-	return "", errors.New("connection refused")
 }

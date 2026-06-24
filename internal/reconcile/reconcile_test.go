@@ -80,14 +80,16 @@ func requireJJ(t *testing.T) {
 
 func (h *harness) state(repos ...state.Repo) *state.State {
 	h.t.Helper()
-	return &state.State{
-		DefaultLocation: h.dataLoc,
-		Repos:           repos,
-		Settings: state.Settings{
-			IdleThreshold: state.Duration(time.Nanosecond),
-			RepoOpTimeout: state.Duration(time.Minute),
-		},
+	st := state.New()
+	st.DefaultLocation = h.dataLoc
+	st.Settings = state.Settings{
+		IdleThreshold: state.Duration(time.Nanosecond),
+		RepoOpTimeout: state.Duration(time.Minute),
 	}
+	for _, r := range repos {
+		st.AddRepo(r)
+	}
+	return st
 }
 
 func (h *harness) configGit(dir string) {
@@ -374,7 +376,7 @@ func TestReposTimesOutAndReleasesLock(t *testing.T) {
 
 	done := make(chan []Result, 1)
 	go func() {
-		res, err := Repos(context.Background(), st, st.Repos)
+		res, err := Repos(context.Background(), st, st.AllRepos())
 		if err != nil {
 			t.Errorf("Repos returned a top-level error: %v", err)
 		}

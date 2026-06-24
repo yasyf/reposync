@@ -53,15 +53,16 @@ func RemoveHost(ctx context.Context, target string) error {
 }
 
 // AddHost registers target as a peer and, unless noRecurse, SSH-bootstraps
-// reposync on it: install if missing, register the inverse host, share state,
-// then reconcile and install services. It returns a human-readable step log.
-func AddHost(ctx context.Context, st *state.State, r Runner, target, self string, noRecurse bool) ([]string, error) {
-	return AddHostStream(ctx, st, r, target, self, noRecurse, nil)
+// reposync on it: install if missing, register the inverse host, then reconcile and
+// install services. Shared repos converge to the peer via its own pull-merge, so
+// there is no repo push. It returns a human-readable step log.
+func AddHost(ctx context.Context, r Runner, target, self string, noRecurse bool) ([]string, error) {
+	return AddHostStream(ctx, r, target, self, noRecurse, nil)
 }
 
 // AddHostStream is AddHost with live progress: onStep (may be nil) is called with
 // each step as it happens.
-func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self string, noRecurse bool, onStep func(string)) ([]string, error) {
+func AddHostStream(ctx context.Context, r Runner, target, self string, noRecurse bool, onStep func(string)) ([]string, error) {
 	var log []string
 	step := func(msg string) {
 		log = append(log, msg)
@@ -115,17 +116,9 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 	}
 	step("registered inverse host " + self + " on " + target)
 
-	for _, repo := range st.Repos {
-		if repo.LocalOnly || repo.Origin == "" {
-			continue
-		}
-		if _, err := r.SSH(ctx, target, addRemoteCmd(repo)); err != nil {
-			step(fmt.Sprintf("WARN share repo %s to %s: %v", repo.Relpath, target, err))
-			continue
-		}
-		step("shared repo " + repo.Relpath + " to " + target)
-	}
-
+	// No repo push here: once the peer knows this host, its reconcile pull-merges
+	// this host's propagating registry and clones every shared repo. Convergence is
+	// pull-only, so registering the peer is enough.
 	if _, err := r.SSH(ctx, target, "reposync reconcile"); err != nil {
 		step(fmt.Sprintf("WARN reconcile on %s: %v", target, err))
 	} else {
@@ -141,37 +134,6 @@ func AddHostStream(ctx context.Context, st *state.State, r Runner, target, self 
 	return log, nil
 }
 
-// PropagateRepo upserts repo onto every registered peer via repo add-remote,
-// skipping local-only or remoteless repos.
-func PropagateRepo(ctx context.Context, r Runner, repo state.Repo) error {
-	if repo.LocalOnly || repo.Origin == "" {
-		return nil
-	}
-	reg, err := state.Config.Load()
-	if err != nil {
-		return err
-	}
-	cmd := addRemoteCmd(repo)
-	return hostregistry.EachHost(ctx, reg.Hosts, func(ctx context.Context, target string) error {
-		_, err := r.SSH(ctx, target, cmd)
-		return err
-	})
-}
-
-// RemoteReconcile triggers a reconcile on every registered peer's resident daemon
-// over its RPC socket; a down host is logged into the returned error and does not
-// abort the others.
-func RemoteReconcile(ctx context.Context, r Runner) error {
-	reg, err := state.Config.Load()
-	if err != nil {
-		return err
-	}
-	return hostregistry.EachHost(ctx, reg.Hosts, func(ctx context.Context, target string) error {
-		_, err := r.SSH(ctx, target, "reposync rpc reconcile")
-		return err
-	})
-}
-
 func remoteBrewInstall(ctx context.Context, r Runner, target string) error {
 	// brew trust is required when the remote sets HOMEBREW_REQUIRE_TAP_TRUST,
 	// which blocks loading casks from third-party taps; it is idempotent and a
@@ -184,13 +146,6 @@ func remoteBrewInstall(ctx context.Context, r Runner, target string) error {
 		return fmt.Errorf("brew has no reposync cask yet on %s: publish a goreleaser release to yasyf/homebrew-tap first: %w", target, err)
 	}
 	return fmt.Errorf("brew install reposync on %s: %w", target, err)
-}
-
-func addRemoteCmd(repo state.Repo) string {
-	return fmt.Sprintf(
-		"reposync repo add-remote --origin %s --relpath %s --trunk %s",
-		ShellQuote(repo.Origin), ShellQuote(repo.Relpath), ShellQuote(repo.Trunk),
-	)
 }
 
 func isNoSuchCask(msg string) bool {

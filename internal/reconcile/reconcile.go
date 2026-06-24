@@ -41,15 +41,41 @@ type Result struct {
 	Err     error
 }
 
-// Reconcile clones every absent registered repo and idle-syncs every present
-// one, holding the per-host reconcile flock for the whole pass.
+// Reconcile converges the propagating repo registry with every peer and then brings
+// this host into line: it pull-merges each peer's registry, persists the converged
+// set, clones every absent propagating repo and idle-syncs every present one, then
+// idle-syncs the local-only repos (which never converge across hosts). The peer list
+// comes from the host registry; the whole pass is daemon-independent and self-heals
+// when a peer is unreachable.
 func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
-	return Repos(ctx, st, st.Repos)
+	reg, err := state.Config.Load()
+	if err != nil {
+		return nil, err
+	}
+	converged, err := convergeRepos(ctx, st, reg.Hosts, "")
+	if err != nil {
+		return nil, err
+	}
+	local, err := Repos(ctx, st, localRepos(st))
+	if err != nil {
+		return nil, err
+	}
+	return append(converged, local...), nil
 }
 
-// Repos clones every absent repo and idle-syncs every present one among
-// the given repos (a subset of st.Repos), holding the per-host reconcile flock
-// for the whole pass.
+// localRepos returns the present local-only repos as the flat Repo view the
+// reconcile sweep iterates.
+func localRepos(st *state.State) []state.Repo {
+	repos := make([]state.Repo, 0, len(st.LocalRepos))
+	for _, e := range st.LocalRepos.Present() {
+		repos = append(repos, state.Repo{Relpath: e.Value.Relpath, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly})
+	}
+	return repos
+}
+
+// Repos clones every absent repo and idle-syncs every present one among the given
+// repos, holding the per-host reconcile flock for the whole pass. It does not
+// pull-merge — it reconciles exactly the repos handed to it onto disk.
 func Repos(ctx context.Context, st *state.State, repos []state.Repo) ([]Result, error) {
 	var results []Result
 	err := state.WithLock(ctx, func() error {

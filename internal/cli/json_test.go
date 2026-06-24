@@ -153,6 +153,44 @@ func TestSelfPayloadMarshalsKnownRegistry(t *testing.T) {
 	}
 }
 
+func TestStateGetJSONEmitsPropagatingRegistryOnly(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := state.Update(t.Context(), func(s *state.State) error {
+		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed repos: %v", err)
+	}
+
+	stdout, stderr, err := runCLI(t, "state", "get-json")
+	if err != nil {
+		t.Fatalf("state get-json: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("state get-json wrote to stderr: %q", stderr)
+	}
+
+	var reg map[string]struct {
+		AddedAt   int64 `json:"added_at"`
+		RemovedAt int64 `json:"removed_at"`
+		Value     struct {
+			Relpath   string `json:"relpath"`
+			LocalOnly bool   `json:"local_only"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &reg); err != nil {
+		t.Fatalf("state get-json output is not a registry object: %v\n%s", err, stdout)
+	}
+	if _, ok := reg["https://example.com/cc-review.git"]; !ok {
+		t.Fatalf("propagating repo missing from get-json: %s", stdout)
+	}
+	// Local-only repos must never appear in the cross-host wire form.
+	if strings.Contains(stdout, "scratch") {
+		t.Fatalf("local-only repo leaked into state get-json: %s", stdout)
+	}
+}
+
 func TestJSONVersionIsLiteralOne(t *testing.T) {
 	if jsonVersion != 1 {
 		t.Fatalf("jsonVersion = %d, want literal 1 (a bump breaks the cross-language contract)", jsonVersion)

@@ -79,19 +79,15 @@ func classify(ctx context.Context, st *state.State, name, abs string) (Candidate
 	}, nil, true
 }
 
-// tracked reports whether st already registers this repo, matching on origin
-// when present and otherwise on relpath, mirroring state's repoMatches.
+// tracked reports whether st already registers this repo, matching on origin when
+// present and otherwise on relpath against the local-only registry.
 func tracked(st *state.State, name, origin string) bool {
 	if origin != "" {
 		_, ok := st.FindRepoByOrigin(origin)
 		return ok
 	}
-	for _, r := range st.Repos {
-		if r.Relpath == name {
-			return true
-		}
-	}
-	return false
+	e, ok := st.LocalRepos[name]
+	return ok && e.Present()
 }
 
 // isDir reports whether the entry resolves to a directory, following a symlink

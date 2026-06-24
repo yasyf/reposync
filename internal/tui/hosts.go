@@ -476,12 +476,7 @@ func removeHostCmd(target string) tea.Cmd {
 // channel when the run ends so waitForLine unblocks.
 func addHostCmd(ctx context.Context, r host.Runner, target string, lines chan string) tea.Cmd {
 	return func() tea.Msg {
-		st, err := state.Load()
-		if err != nil {
-			close(lines)
-			return hostAddDoneMsg{target: target, err: fmt.Errorf("load state: %w", err)}
-		}
-		log, err := host.AddHostStream(ctx, st, r, target, "", false, func(s string) {
+		log, err := host.AddHostStream(ctx, r, target, "", false, func(s string) {
 			lines <- s
 		})
 		// Bring this host online too: adding a peer should leave the local

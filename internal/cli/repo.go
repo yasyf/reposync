@@ -12,7 +12,6 @@ import (
 
 	"github.com/yasyf/reposync/internal/apply"
 	"github.com/yasyf/reposync/internal/discover"
-	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
@@ -22,7 +21,7 @@ func newRepoCmd() *cobra.Command {
 		Use:   "repo",
 		Short: "Register, list, and unregister tracked repositories.",
 	}
-	cmd.AddCommand(newRepoAddCmd(), newRepoAddRemoteCmd(), newRepoRmCmd(), newRepoLsCmd(), newRepoDiscoverCmd())
+	cmd.AddCommand(newRepoAddCmd(), newRepoRmCmd(), newRepoLsCmd(), newRepoDiscoverCmd())
 	return cmd
 }
 
@@ -110,38 +109,14 @@ func runRepoAdd(ctx context.Context, path string, localOnly bool) error {
 	}
 
 	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly}
-	results, applyErr := apply.Repos(ctx, host.NewExecRunner(), apply.RepoSelection{
+	results, err := apply.Repos(ctx, apply.RepoSelection{
 		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly}},
 	})
-	if results == nil {
-		return applyErr
+	if err != nil {
+		return err
 	}
 	fmt.Printf("registered %s (origin %s)\n", relpath, originLabel(repo))
-	if applyErr != nil {
-		fmt.Printf("WARN propagate/reconcile peers: %v\n", applyErr)
-	}
 	return printReconcile(results)
-}
-
-func newRepoAddRemoteCmd() *cobra.Command {
-	var origin, relpath, trunk string
-	cmd := &cobra.Command{
-		Use:   "add-remote",
-		Short: "Idempotently upsert a repo by origin (used for peer propagation).",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := state.Update(cmd.Context(), func(s *state.State) error {
-				s.UpsertRepo(state.Repo{Relpath: relpath, Origin: origin, Trunk: trunk})
-				return nil
-			})
-			return err
-		},
-	}
-	cmd.Flags().StringVar(&origin, "origin", "", "origin remote URL")
-	cmd.Flags().StringVar(&relpath, "relpath", "", "path relative to default_location")
-	cmd.Flags().StringVar(&trunk, "trunk", "main", "trunk branch")
-	_ = cmd.MarkFlagRequired("origin")
-	_ = cmd.MarkFlagRequired("relpath")
-	return cmd
 }
 
 func newRepoRmCmd() *cobra.Command {
@@ -183,7 +158,7 @@ func newRepoLsCmd() *cobra.Command {
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			_, _ = fmt.Fprintln(w, "RELPATH\tORIGIN\tTRUNK\tLOCAL_ONLY")
-			for _, r := range st.Repos {
+			for _, r := range st.AllRepos() {
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", r.Relpath, originLabel(r), r.Trunk, r.LocalOnly)
 			}
 			return w.Flush()

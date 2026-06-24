@@ -37,6 +37,40 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+func newStateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "state",
+		Short: "Inspect the on-disk reposync state.",
+	}
+	cmd.AddCommand(newStateGetJSONCmd())
+	return cmd
+}
+
+func newStateGetJSONCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "get-json",
+		Short: "Print the convergent repo registry (origin-keyed, with tombstones) as JSON.",
+		Long: "Read state.json directly — no daemon socket — and print this host's " +
+			"propagating repo registry as JSON, the form a peer pull-merges. Local-only " +
+			"repos are excluded. Daemon-independent, so a peer can read it while this " +
+			"host's daemon is down.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			st, err := state.Load()
+			if err != nil {
+				return err
+			}
+			data, err := st.EncodeRepoRegistry()
+			if err != nil {
+				return err
+			}
+			_, err = cmd.OutOrStdout().Write(append(data, '\n'))
+			return err
+		},
+	}
+	return cmd
+}
+
 func newSelfCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{

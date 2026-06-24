@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -103,20 +104,17 @@ func TestLoadMalformedJSON(t *testing.T) {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	want := &State{
-		DefaultLocation: "~/Code",
-		Repos: []Repo{
-			{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main", LocalOnly: false},
-			{Relpath: "scratch", Origin: "", Trunk: "", LocalOnly: true},
-		},
-		Settings: Settings{
-			Interval:      Duration(15 * time.Minute),
-			IdleThreshold: Duration(5 * time.Minute),
-			WatchDebounce: Duration(3 * time.Second),
-			RepoOpTimeout: Duration(2 * time.Minute),
-			PushAfter:     Duration(24 * time.Hour),
-		},
+	want := New()
+	want.DefaultLocation = "~/Code"
+	want.Settings = Settings{
+		Interval:      Duration(15 * time.Minute),
+		IdleThreshold: Duration(5 * time.Minute),
+		WatchDebounce: Duration(3 * time.Second),
+		RepoOpTimeout: Duration(2 * time.Minute),
+		PushAfter:     Duration(24 * time.Hour),
 	}
+	want.AddRepo(Repo{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"})
+	want.AddRepo(Repo{Relpath: "scratch", LocalOnly: true})
 	if err := want.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -128,14 +126,23 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if got.DefaultLocation != want.DefaultLocation {
 		t.Errorf("DefaultLocation = %q, want %q", got.DefaultLocation, want.DefaultLocation)
 	}
-	if len(got.Repos) != 2 {
-		t.Fatalf("Repos len = %d, want 2", len(got.Repos))
+	if !reflect.DeepEqual(got.Repos, want.Repos) {
+		t.Errorf("Repos = %+v, want %+v", got.Repos, want.Repos)
 	}
-	if got.Repos[0] != want.Repos[0] {
-		t.Errorf("Repos[0] = %+v, want %+v", got.Repos[0], want.Repos[0])
+	if !reflect.DeepEqual(got.LocalRepos, want.LocalRepos) {
+		t.Errorf("LocalRepos = %+v, want %+v", got.LocalRepos, want.LocalRepos)
 	}
-	if got.Repos[1] != want.Repos[1] {
-		t.Errorf("Repos[1] = %+v, want %+v", got.Repos[1], want.Repos[1])
+	// The flat view round-trips both the propagating and local-only repos.
+	all := got.AllRepos()
+	byPath := make(map[string]Repo, len(all))
+	for _, r := range all {
+		byPath[r.Relpath] = r
+	}
+	if r := byPath["cc-review"]; r.Origin != "https://github.com/yasyf/cc-review.git" || r.Trunk != "main" || r.LocalOnly {
+		t.Errorf("cc-review round-trip = %+v", r)
+	}
+	if r := byPath["scratch"]; r.Origin != "" || !r.LocalOnly {
+		t.Errorf("scratch round-trip = %+v", r)
 	}
 	if got.Settings != want.Settings {
 		t.Errorf("Settings = %+v, want %+v", got.Settings, want.Settings)
@@ -238,37 +245,88 @@ func TestSaveAtomicNoLeftoversAndPerms(t *testing.T) {
 	}
 }
 
-func TestUpsertRepoReplacesByOrigin(t *testing.T) {
-	s := &State{}
-	s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"})
-	s.UpsertRepo(Repo{Relpath: "moved/cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "master"})
-
-	if len(s.Repos) != 1 {
-		t.Fatalf("Repos len = %d, want 1 (dedup by origin)", len(s.Repos))
-	}
-	if s.Repos[0].Relpath != "moved/cc-review" || s.Repos[0].Trunk != "master" {
-		t.Errorf("Repos[0] = %+v, want replaced", s.Repos[0])
+// pinClock pins state.Now to a controllable stamp so registry adds and removes get
+// deterministic, strictly-increasing microsecond stamps in a test.
+func pinClock(t *testing.T) func() {
+	t.Helper()
+	saved := Now
+	t.Cleanup(func() { Now = saved })
+	base := time.Unix(1_700_000_000, 0)
+	step := 0
+	return func() {
+		Now = func() time.Time {
+			step++
+			return base.Add(time.Duration(step) * time.Second)
+		}
 	}
 }
 
-func TestUpsertRepoLocalOnlyDedupByRelpath(t *testing.T) {
-	s := &State{}
-	s.UpsertRepo(Repo{Relpath: "scratch", LocalOnly: true})
-	s.UpsertRepo(Repo{Relpath: "scratch", Trunk: "main", LocalOnly: true})
+func TestAddRepoKeysPropagatingByOrigin(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	s.AddRepo(Repo{Relpath: "cc-review", Origin: "https://github.com/yasyf/cc-review.git", Trunk: "main"})
 
-	if len(s.Repos) != 1 {
-		t.Fatalf("Repos len = %d, want 1 (dedup by relpath)", len(s.Repos))
+	origin := "https://github.com/yasyf/cc-review.git"
+	e, ok := s.Repos[origin]
+	if !ok {
+		t.Fatalf("repo not keyed by origin in propagating registry: %v", s.Repos)
 	}
-	if s.Repos[0].Trunk != "main" {
-		t.Errorf("Repos[0].Trunk = %q, want main", s.Repos[0].Trunk)
+	if !e.Present() || e.Value.Relpath != "cc-review" || e.Value.Trunk != "main" || e.Value.LocalOnly {
+		t.Fatalf("entry = %+v, want present cc-review/main not-local", e)
+	}
+	if len(s.LocalRepos) != 0 {
+		t.Fatalf("origin repo leaked into the local registry: %v", s.LocalRepos)
+	}
+}
+
+// TestAddRepoReaddAfterTombstoneWins proves the registry's re-add semantics: a repo
+// removed (tombstoned) then re-added with a strictly-later stamp is present again,
+// carrying the new payload — the LWW-Element-Set guarantee.
+func TestAddRepoReaddAfterTombstoneWins(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	origin := "https://github.com/yasyf/cc-review.git"
+
+	s.AddRepo(Repo{Relpath: "cc-review", Origin: origin, Trunk: "main"})
+	s.RemoveRepo("cc-review")
+	if s.Repos[origin].Present() {
+		t.Fatal("repo still present after tombstone")
+	}
+	s.AddRepo(Repo{Relpath: "moved/cc-review", Origin: origin, Trunk: "master"})
+
+	e := s.Repos[origin]
+	if !e.Present() {
+		t.Fatal("re-add after tombstone did not restore presence")
+	}
+	if e.Value.Relpath != "moved/cc-review" || e.Value.Trunk != "master" {
+		t.Fatalf("re-add value = %+v, want moved/cc-review master", e.Value)
+	}
+}
+
+func TestAddRepoLocalOnlyKeyedByRelpath(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	s.AddRepo(Repo{Relpath: "scratch", LocalOnly: true})
+	s.AddRepo(Repo{Relpath: "scratch", Trunk: "main", LocalOnly: true})
+
+	if len(s.LocalRepos) != 1 {
+		t.Fatalf("LocalRepos len = %d, want 1 (keyed by relpath)", len(s.LocalRepos))
+	}
+	e := s.LocalRepos["scratch"]
+	if !e.Present() || e.Value.Trunk != "main" {
+		t.Fatalf("local entry = %+v, want present with later trunk=main", e)
+	}
+	if len(s.Repos) != 0 {
+		t.Fatalf("local-only repo leaked into the propagating registry: %v", s.Repos)
 	}
 }
 
 func TestFindRepoByOrigin(t *testing.T) {
-	s := &State{Repos: []Repo{
-		{Relpath: "a", Origin: "https://example.com/a.git"},
-		{Relpath: "b", Origin: "https://example.com/b.git"},
-	}}
+	pinClock(t)()
+	s := New()
+	s.AddRepo(Repo{Relpath: "a", Origin: "https://example.com/a.git"})
+	s.AddRepo(Repo{Relpath: "b", Origin: "https://example.com/b.git"})
+
 	got, ok := s.FindRepoByOrigin("https://example.com/b.git")
 	if !ok {
 		t.Fatal("FindRepoByOrigin: want found")
@@ -279,20 +337,40 @@ func TestFindRepoByOrigin(t *testing.T) {
 	if _, ok := s.FindRepoByOrigin("https://example.com/missing.git"); ok {
 		t.Error("FindRepoByOrigin: want not found for missing origin")
 	}
+
+	// A tombstoned repo is not found.
+	s.RemoveRepo("a")
+	if _, ok := s.FindRepoByOrigin("https://example.com/a.git"); ok {
+		t.Error("FindRepoByOrigin: want not found for a tombstoned repo")
+	}
 }
 
-func TestRemoveRepo(t *testing.T) {
-	s := &State{Repos: []Repo{
-		{Relpath: "a"}, {Relpath: "b"}, {Relpath: "c"},
-	}}
+// TestRemoveRepoTombstonesNotDrops is the removal-fix regression: rm keeps the entry
+// and stamps removed_at later than added_at, so the entry stays in the registry to
+// propagate the removal — it is not dropped from the map.
+func TestRemoveRepoTombstonesNotDrops(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	origin := "https://example.com/b.git"
+	s.AddRepo(Repo{Relpath: "a", Origin: "https://example.com/a.git"})
+	s.AddRepo(Repo{Relpath: "b", Origin: origin})
+
 	s.RemoveRepo("b")
-	if len(s.Repos) != 2 {
-		t.Fatalf("Repos len = %d, want 2", len(s.Repos))
+
+	e, ok := s.Repos[origin]
+	if !ok {
+		t.Fatal("rm dropped the entry instead of tombstoning it: removal would not propagate")
 	}
-	for _, r := range s.Repos {
-		if r.Relpath == "b" {
-			t.Errorf("b still present: %v", s.Repos)
-		}
+	if e.Present() {
+		t.Fatal("removed repo still present")
+	}
+	if e.Removed <= e.Added {
+		t.Fatalf("tombstone stamp not later than add: added=%d removed=%d", e.Added, e.Removed)
+	}
+	// The flat present view excludes the tombstone but keeps the live repo.
+	all := s.AllRepos()
+	if len(all) != 1 || all[0].Relpath != "a" {
+		t.Fatalf("AllRepos after rm = %+v, want only [a]", all)
 	}
 }
 
@@ -353,23 +431,24 @@ func TestRepoAbsPath(t *testing.T) {
 func TestUpdatePersistsMutation(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
+	origin := "https://example.com/cc-review.git"
 	out, err := Update(context.Background(), func(s *State) error {
-		s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(Repo{Relpath: "cc-review", Origin: origin, Trunk: "main"})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if len(out.Repos) != 1 || out.Repos[0].Relpath != "cc-review" {
-		t.Fatalf("returned state Repos = %+v, want one cc-review repo", out.Repos)
+	if e, ok := out.Repos[origin]; !ok || e.Value.Relpath != "cc-review" {
+		t.Fatalf("returned state Repos = %+v, want one cc-review repo keyed by origin", out.Repos)
 	}
 
 	persisted, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(persisted.Repos) != 1 || persisted.Repos[0].Relpath != "cc-review" {
-		t.Fatalf("persisted Repos = %+v, want one cc-review repo", persisted.Repos)
+	if e, ok := persisted.Repos[origin]; !ok || !e.Present() || e.Value.Relpath != "cc-review" {
+		t.Fatalf("persisted Repos = %+v, want one present cc-review repo", persisted.Repos)
 	}
 }
 
@@ -378,7 +457,7 @@ func TestUpdateFnErrorAbortsSave(t *testing.T) {
 
 	sentinel := errors.New("boom")
 	out, err := Update(context.Background(), func(s *State) error {
-		s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -410,7 +489,7 @@ func TestUpdateConcurrentNoLostUpdates(t *testing.T) {
 			relpath := fmt.Sprintf("repo-%02d", i)
 			origin := fmt.Sprintf("https://example.com/repo-%02d.git", i)
 			_, errs[i] = Update(context.Background(), func(s *State) error {
-				s.UpsertRepo(Repo{Relpath: relpath, Origin: origin, Trunk: "main"})
+				s.AddRepo(Repo{Relpath: relpath, Origin: origin, Trunk: "main"})
 				return nil
 			})
 		}(i)
@@ -430,13 +509,9 @@ func TestUpdateConcurrentNoLostUpdates(t *testing.T) {
 	if len(persisted.Repos) != n {
 		t.Fatalf("persisted Repos count = %d, want %d (lost updates)", len(persisted.Repos), n)
 	}
-	seen := make(map[string]bool, n)
-	for _, r := range persisted.Repos {
-		seen[r.Origin] = true
-	}
 	for i := 0; i < n; i++ {
 		origin := fmt.Sprintf("https://example.com/repo-%02d.git", i)
-		if !seen[origin] {
+		if e, ok := persisted.Repos[origin]; !ok || !e.Present() {
 			t.Errorf("repo %s dropped from persisted state", origin)
 		}
 	}
@@ -460,19 +535,19 @@ func TestUpdatePreservesIdentityKeysBothDirections(t *testing.T) {
 	}
 	if _, err := Update(context.Background(), func(s *State) error {
 		s.DefaultLocation = "~/Work"
-		s.UpsertRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
 		return nil
 	}); err != nil {
 		t.Fatalf("seed reposync state: %v", err)
 	}
 
 	identityKeys := []string{"self", "hosts"}
-	domainKeys := []string{"repos", "settings", "default_location"}
+	domainKeys := []string{"repos", "local_repos", "settings", "default_location"}
 
 	// Direction 1: a reposync write mutates only its keys; self/hosts stay byte-identical.
 	before := readRawState(t)
 	if _, err := Update(context.Background(), func(s *State) error {
-		s.UpsertRepo(Repo{Relpath: "notes", Origin: "https://example.com/notes.git", Trunk: "main"})
+		s.AddRepo(Repo{Relpath: "notes", Origin: "https://example.com/notes.git", Trunk: "main"})
 		return nil
 	}); err != nil {
 		t.Fatalf("reposync Update: %v", err)

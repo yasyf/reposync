@@ -14,7 +14,6 @@ import (
 
 	"github.com/yasyf/reposync/internal/apply"
 	"github.com/yasyf/reposync/internal/discover"
-	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
 )
@@ -133,7 +132,7 @@ func (m reposModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 			sel := m.confirm.sel
 			m.confirm = nil
 			m.applying = true
-			return m, tea.Batch(m.spin.Tick, applyReposCmd(m.opts.Runner, sel))
+			return m, tea.Batch(m.spin.Tick, applyReposCmd(sel))
 		case key.Matches(msg, m.keys.No):
 			m.confirm = nil
 			return m, nil
@@ -294,7 +293,7 @@ func (m reposModel) apply() (screen, tea.Cmd) {
 		return m, nil
 	}
 	m.applying = true
-	return m, tea.Batch(m.spin.Tick, applyReposCmd(m.opts.Runner, sel))
+	return m, tea.Batch(m.spin.Tick, applyReposCmd(sel))
 }
 
 func (m reposModel) View() string {
@@ -335,11 +334,11 @@ func discoverReposCmd() tea.Cmd {
 
 // applyReposCmd runs the apply under a bounded ctx so a wedged reconcile holder
 // cannot park the TUI forever; the bounded WithLock surfaces ErrLockBusy instead.
-func applyReposCmd(r host.Runner, sel apply.RepoSelection) tea.Cmd {
+func applyReposCmd(sel apply.RepoSelection) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
 		defer cancel()
-		results, err := apply.Repos(ctx, r, sel)
+		results, err := apply.Repos(ctx, sel)
 		return reposAppliedMsg{results: results, err: err}
 	}
 }

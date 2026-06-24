@@ -71,7 +71,7 @@ func Watch(ctx context.Context, st *state.State) error {
 		}
 	}
 
-	for _, repo := range st.Repos {
+	for _, repo := range st.AllRepos() {
 		abs := repo.AbsPath(location)
 		for i, dir := range watchSet(abs) {
 			if !isDir(dir) {

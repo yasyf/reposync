@@ -74,7 +74,12 @@ func (h *reposHarness) runGit(dir string, args ...string) string {
 
 func (h *reposHarness) state(repos ...state.Repo) *state.State {
 	h.t.Helper()
-	return &state.State{DefaultLocation: h.dataLoc, Repos: repos}
+	st := state.New()
+	st.DefaultLocation = h.dataLoc
+	for _, r := range repos {
+		st.AddRepo(r)
+	}
+	return st
 }
 
 func candidateFor(t *testing.T, candidates []Candidate, relpath string) Candidate {

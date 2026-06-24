@@ -61,14 +61,15 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 }
 
 func selectRepos(st *state.State, dl, repoFilter string) ([]state.Repo, error) {
+	repos := st.AllRepos()
 	if repoFilter == "" {
-		return st.Repos, nil
+		return repos, nil
 	}
 	absFilter, err := filepath.Abs(repoFilter)
 	if err != nil {
 		return nil, err
 	}
-	for _, repo := range st.Repos {
+	for _, repo := range repos {
 		if repo.Relpath == repoFilter || repo.AbsPath(dl) == absFilter {
 			return []state.Repo{repo}, nil
 		}

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
@@ -61,21 +62,48 @@ type Settings struct {
 	PushAfter     codec.Duration `json:"push_after"`
 }
 
-// Repo is a tracked repository placed at Relpath under the host's default location.
-type Repo struct {
+// RepoMeta is the per-repo payload carried by the convergent registry: where the
+// repo lives (Relpath under the default location), its Trunk branch, and whether it
+// is local-only. The registry key carries the repo's identity — its origin for a
+// propagating repo, its relpath for a local-only one — so it is absent from this
+// payload.
+type RepoMeta struct {
 	Relpath   string `json:"relpath"`
-	Origin    string `json:"origin"`
 	Trunk     string `json:"trunk"`
 	LocalOnly bool   `json:"local_only"`
 }
 
+// Repo is a tracked repository placed at Relpath under the host's default location.
+// It is the in-memory view the sync, reconcile, and watch loops consume, rebuilt
+// from a registry [RepoMeta] plus its key; Origin is empty for a local-only repo.
+type Repo struct {
+	Relpath   string
+	Origin    string
+	Trunk     string
+	LocalOnly bool
+}
+
 // State is the reposync-owned slice of the shared on-disk configuration for this
-// host. The self/hosts identity keys live alongside these in the same file but
-// are owned by hostregistry; this struct neither carries nor persists them.
+// host. The self/hosts identity keys live alongside these in the same file but are
+// owned by hostregistry; this struct neither carries nor persists them.
+//
+// Repos is the convergent registry of propagating (origin-bearing) repos, keyed by
+// origin, that pull-merges across hosts; LocalRepos is the registry of local-only
+// repos, keyed by relpath, that stays on this host and is never sent to peers. Both
+// are LWW-Element-Set CRDTs, so add and remove converge and a removal propagates as
+// a tombstone.
 type State struct {
-	DefaultLocation string   `json:"default_location"`
-	Repos           []Repo   `json:"repos"`
-	Settings        Settings `json:"settings"`
+	DefaultLocation string
+	Repos           cregistry.Registry[RepoMeta]
+	LocalRepos      cregistry.Registry[RepoMeta]
+	Settings        Settings
+}
+
+// New returns a State with empty registries and defaults applied, ready for AddRepo.
+func New() *State {
+	s := &State{}
+	s.applyDefaults()
+	return s
 }
 
 // AbsPath joins the repo's relpath onto an already-expanded default location.
@@ -83,11 +111,120 @@ func (r Repo) AbsPath(defaultLocationExpanded string) string {
 	return filepath.Join(defaultLocationExpanded, r.Relpath)
 }
 
+// Now is the clock the registry stamps adds and removes by, indirected so tests can
+// pin time; production stamps wall-clock microseconds.
+var Now = time.Now
+
+func repo(origin string, e cregistry.Entry[RepoMeta]) Repo {
+	return Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly}
+}
+
+// AllRepos returns every tracked repo present on this host — propagating repos keyed
+// by origin plus local-only repos — as the flat [Repo] view the sync, reconcile, and
+// watch loops iterate. Tombstoned (removed) entries are excluded.
+func (s *State) AllRepos() []Repo {
+	repos := make([]Repo, 0, len(s.Repos)+len(s.LocalRepos))
+	for origin, e := range s.Repos.Present() {
+		repos = append(repos, repo(origin, e))
+	}
+	for _, e := range s.LocalRepos.Present() {
+		repos = append(repos, repo("", e))
+	}
+	return repos
+}
+
+// PropagatingRepos returns the present origin-bearing repos as the flat [Repo] view,
+// excluding local-only repos and tombstones. These are the repos that converge across
+// hosts.
+func (s *State) PropagatingRepos() []Repo {
+	repos := make([]Repo, 0, len(s.Repos))
+	for origin, e := range s.Repos.Present() {
+		repos = append(repos, repo(origin, e))
+	}
+	return repos
+}
+
+// AddRepo records r in the registry, stamping the add at the current time. A repo
+// with an origin joins the propagating registry keyed by origin; a local-only repo
+// joins the local registry keyed by relpath. A re-add after a tombstone carries a
+// strictly-later stamp, so the repo becomes present again.
+func (s *State) AddRepo(r Repo) {
+	meta := RepoMeta{Relpath: r.Relpath, Trunk: r.Trunk, LocalOnly: r.LocalOnly}
+	at := cregistry.UnixMicros(Now())
+	if r.Origin == "" {
+		s.LocalRepos.Add(r.Relpath, meta, at)
+		return
+	}
+	s.Repos.Add(r.Origin, meta, at)
+}
+
+// RemoveRepo tombstones the repo registered at relpath, stamping the removal at the
+// current time and keeping the entry, so the removal propagates via pull-merge and
+// peers converge to absent. It searches the propagating registry first (by matching
+// relpath), then the local registry (keyed by relpath).
+func (s *State) RemoveRepo(relpath string) {
+	at := cregistry.UnixMicros(Now())
+	for origin, e := range s.Repos {
+		if e.Value.Relpath == relpath {
+			s.Repos.Remove(origin, at)
+			return
+		}
+	}
+	s.LocalRepos.Remove(relpath, at)
+}
+
+// FindRepoByOrigin returns the present repo with the given origin.
+func (s *State) FindRepoByOrigin(origin string) (Repo, bool) {
+	if e, ok := s.Repos[origin]; ok && e.Present() {
+		return repo(origin, e), true
+	}
+	return Repo{}, false
+}
+
+// EncodeRepoRegistry marshals the propagating repo registry — origin-keyed entries
+// including tombstones — to JSON. This is the cross-host wire form a peer reads to
+// pull-merge; local-only repos are deliberately excluded, never leaving this host.
+func (s *State) EncodeRepoRegistry() ([]byte, error) {
+	return json.Marshal(s.Repos)
+}
+
+// DecodeRepoRegistry parses a peer's propagating repo registry from the JSON emitted
+// by EncodeRepoRegistry, for the pull-merge fetch.
+func DecodeRepoRegistry(data []byte) (cregistry.Registry[RepoMeta], error) {
+	var reg cregistry.Registry[RepoMeta]
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return nil, fmt.Errorf("decode repo registry: %w", err)
+	}
+	return reg, nil
+}
+
 // Save persists this host's reposync-owned keys under the shared reconcile lock,
 // foreign-key-preserving the self/hosts identity that hostregistry owns. It runs
 // the one write codepath (Config.UpdateRaw) the package exposes.
 func (s *State) Save() error {
 	return Config.UpdateRaw(context.Background(), s.writeOwnedKeys)
+}
+
+// SaveReposUnlocked persists the propagating and local repo registries WITHOUT
+// acquiring the reconcile lock, foreign-key-preserving every other key in the file
+// (self, hosts, settings, default_location). It is for the convergent-reconcile
+// pass, which already holds the lock around the whole pass and must not re-enter the
+// non-reentrant flock; ordinary callers use Update/Save. The flock is the caller's
+// responsibility.
+func (s *State) SaveReposUnlocked() error {
+	return Config.UpdateRawUnlocked(func(raw map[string]json.RawMessage) error {
+		repos, err := json.Marshal(s.Repos)
+		if err != nil {
+			return fmt.Errorf("encode repos: %w", err)
+		}
+		localRepos, err := json.Marshal(s.LocalRepos)
+		if err != nil {
+			return fmt.Errorf("encode local_repos: %w", err)
+		}
+		raw["repos"] = repos
+		raw["local_repos"] = localRepos
+		return nil
+	})
 }
 
 // writeOwnedKeys marshals the reposync-owned keys into the shared raw state map,
@@ -101,46 +238,19 @@ func (s *State) writeOwnedKeys(raw map[string]json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("encode repos: %w", err)
 	}
+	localRepos, err := json.Marshal(s.LocalRepos)
+	if err != nil {
+		return fmt.Errorf("encode local_repos: %w", err)
+	}
 	settings, err := json.Marshal(s.Settings)
 	if err != nil {
 		return fmt.Errorf("encode settings: %w", err)
 	}
 	raw["default_location"] = location
 	raw["repos"] = repos
+	raw["local_repos"] = localRepos
 	raw["settings"] = settings
 	return nil
-}
-
-// UpsertRepo adds or replaces a repo, keyed on origin, or on relpath when origin is empty.
-func (s *State) UpsertRepo(r Repo) {
-	for i := range s.Repos {
-		if repoMatches(s.Repos[i], r) {
-			s.Repos[i] = r
-			return
-		}
-	}
-	s.Repos = append(s.Repos, r)
-}
-
-// RemoveRepo drops the repo registered at relpath.
-func (s *State) RemoveRepo(relpath string) {
-	kept := make([]Repo, 0, len(s.Repos))
-	for _, r := range s.Repos {
-		if r.Relpath != relpath {
-			kept = append(kept, r)
-		}
-	}
-	s.Repos = kept
-}
-
-// FindRepoByOrigin returns the registered repo with the given origin.
-func (s *State) FindRepoByOrigin(origin string) (*Repo, bool) {
-	for i := range s.Repos {
-		if s.Repos[i].Origin == origin {
-			return &s.Repos[i], true
-		}
-	}
-	return nil, false
 }
 
 // DefaultLocationExpanded resolves the default location to an absolute path with ~ expanded.
@@ -153,6 +263,12 @@ func (s *State) DefaultLocationExpanded() (string, error) {
 }
 
 func (s *State) applyDefaults() {
+	if s.Repos == nil {
+		s.Repos = cregistry.New[RepoMeta]()
+	}
+	if s.LocalRepos == nil {
+		s.LocalRepos = cregistry.New[RepoMeta]()
+	}
 	if s.DefaultLocation == "" {
 		s.DefaultLocation = defaultLocation
 	}
@@ -188,9 +304,9 @@ func SockPath() (string, error) {
 	return Config.SockPath()
 }
 
-// Load reads reposync's owned keys from the state file, returning defaults when
-// it does not yet exist. The self/hosts identity keys share the file but are
-// owned by hostregistry, so they are ignored here.
+// Load reads reposync's owned keys from the state file, returning defaults when it
+// does not yet exist. It decodes through the same stateFromRaw path as Update, so
+// the self/hosts identity keys that share the file are ignored here.
 func Load() (*State, error) {
 	path, err := Path()
 	if err != nil {
@@ -198,19 +314,16 @@ func Load() (*State, error) {
 	}
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is reposync's own state file under the fixed config dir, not user-supplied.
 	if errors.Is(err, os.ErrNotExist) {
-		s := &State{}
-		s.applyDefaults()
-		return s, nil
+		return New(), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read state %s: %w", path, err)
 	}
-	var s State
-	if err := json.Unmarshal(data, &s); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse state %s: %w", path, err)
 	}
-	s.applyDefaults()
-	return &s, nil
+	return stateFromRaw(raw)
 }
 
 // Update runs fn against a freshly loaded State under the reconcile-lock flock,
@@ -250,6 +363,11 @@ func stateFromRaw(raw map[string]json.RawMessage) (*State, error) {
 			return nil, fmt.Errorf("parse repos: %w", err)
 		}
 	}
+	if v, ok := raw["local_repos"]; ok {
+		if err := json.Unmarshal(v, &s.LocalRepos); err != nil {
+			return nil, fmt.Errorf("parse local_repos: %w", err)
+		}
+	}
 	if v, ok := raw["settings"]; ok {
 		if err := json.Unmarshal(v, &s.Settings); err != nil {
 			return nil, fmt.Errorf("parse settings: %w", err)
@@ -264,13 +382,6 @@ func stateFromRaw(raw map[string]json.RawMessage) (*State, error) {
 // instead of blocking on a wedged holder.
 func WithLock(ctx context.Context, fn func() error) error {
 	return Config.WithLock(ctx, fn)
-}
-
-func repoMatches(existing, incoming Repo) bool {
-	if incoming.Origin != "" {
-		return existing.Origin == incoming.Origin
-	}
-	return existing.Relpath == incoming.Relpath
 }
 
 func expandHome(path string) (string, error) {

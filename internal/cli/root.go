@@ -60,6 +60,7 @@ func newRoot(version string) *cobra.Command {
 		newRepoCmd(),
 		newHostCmd(),
 		newSelfCmd(),
+		newStateCmd(),
 		newSyncCmd(),
 		newReconcileCmd(),
 		newRPCCmd(),

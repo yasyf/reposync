@@ -82,15 +82,17 @@ func requireJJ(t *testing.T) {
 // that need to suppress the push override st.Settings.PushAfter directly.
 func (h *harness) state(repos ...state.Repo) *state.State {
 	h.t.Helper()
-	return &state.State{
-		DefaultLocation: h.dataLoc,
-		Repos:           repos,
-		Settings: state.Settings{
-			IdleThreshold: state.Duration(time.Nanosecond),
-			PushAfter:     state.Duration(time.Nanosecond),
-			RepoOpTimeout: state.Duration(time.Minute),
-		},
+	st := state.New()
+	st.DefaultLocation = h.dataLoc
+	st.Settings = state.Settings{
+		IdleThreshold: state.Duration(time.Nanosecond),
+		PushAfter:     state.Duration(time.Nanosecond),
+		RepoOpTimeout: state.Duration(time.Minute),
 	}
+	for _, r := range repos {
+		st.AddRepo(r)
+	}
+	return st
 }
 
 // jjClone makes a colocated jj clone of the origin at <dataLoc>/<relpath>.
@@ -101,6 +103,23 @@ func (h *harness) jjClone(relpath string) string {
 		h.t.Fatalf("jj clone %s: %v", relpath, err)
 	}
 	return dest
+}
+
+// extraOrigin creates and seeds a second bare origin so a test can register two
+// repos with distinct origins (the convergent registry is keyed by origin, so two
+// tracked repos cannot share one). It returns the new bare origin path.
+func (h *harness) extraOrigin(name string) string {
+	h.t.Helper()
+	origin := filepath.Join(h.root, name+".git")
+	seed := filepath.Join(h.root, name+"-seed")
+	h.runGit(h.root, "init", "--bare", "-b", "main", origin)
+	h.runGit(h.root, "clone", origin, seed)
+	h.configGit(seed)
+	h.writeFile(seed, "README.md", "hello "+name+"\n")
+	h.runGit(seed, "add", "README.md")
+	h.runGit(seed, "commit", "-q", "-m", "init")
+	h.runGit(seed, "push", "-q", "origin", "main")
+	return origin
 }
 
 // advanceOrigin pushes a new trunk commit and returns the new origin main hash.
@@ -288,11 +307,14 @@ func TestSyncNoTrunkRepo(t *testing.T) {
 func TestSyncRepoFilterSelectsOne(t *testing.T) {
 	h := newHarness(t)
 	h.jjClone("alpha")
-	h.jjClone("beta")
+	betaOrigin := h.extraOrigin("beta")
+	if err := vcs.Clone(context.Background(), betaOrigin, filepath.Join(h.dataLoc, "beta")); err != nil {
+		t.Fatalf("clone beta: %v", err)
+	}
 	h.advanceOrigin("v2")
 	st := h.state(
 		state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"},
-		state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"},
+		state.Repo{Relpath: "beta", Origin: betaOrigin, Trunk: "main"},
 	)
 
 	t.Run("by relpath", func(t *testing.T) {
@@ -338,8 +360,9 @@ func TestSyncBrokenRepoDoesNotAbortOthers(t *testing.T) {
 	h.jjClone("alpha")
 	want := h.advanceOrigin("v2")
 	st := h.state(
-		// missing is registered but absent on disk: its Open fails.
-		state.Repo{Relpath: "missing", Origin: h.origin, Trunk: "main"},
+		// missing is registered but absent on disk: its Open fails. It carries a
+		// distinct origin so it and alpha are separate registry entries.
+		state.Repo{Relpath: "missing", Origin: h.extraOrigin("missing"), Trunk: "main"},
 		state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"},
 	)
 

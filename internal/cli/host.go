@@ -32,11 +32,7 @@ func newHostAddCmd() *cobra.Command {
 		Short: "Bootstrap reposync on a peer: install, register, share state, converge.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, err := state.Load()
-			if err != nil {
-				return err
-			}
-			log, err := host.AddHost(cmd.Context(), st, host.NewExecRunner(), args[0], self, noRecurse)
+			log, err := host.AddHost(cmd.Context(), host.NewExecRunner(), args[0], self, noRecurse)
 			for _, line := range log {
 				fmt.Println(line)
 			}
