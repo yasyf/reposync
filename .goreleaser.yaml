@@ -56,7 +56,7 @@ homebrew_casks:
   - repository:
       owner: yasyf
       name: homebrew-tap
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/yasyf/reposync
     description: Keep git repos in sync across your remote hosts.
     # The watch daemon shells out to watchman for filesystem subscriptions, and
