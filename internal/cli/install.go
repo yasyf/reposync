@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,56 +10,101 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yasyf/reposync/internal/service"
+	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/manifest"
+
 	"github.com/yasyf/reposync/internal/state"
 )
 
-func newInstallCmd() *cobra.Command {
-	var tickOnly bool
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install the launchd reconcile tick and watch daemon LaunchAgents.",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := service.Install(cmd.Context(), service.NewLauncher(), tickOnly); err != nil {
-				return err
-			}
-			return printInstalled(tickOnly)
+// manifestsDirName is the subdirectory of the shared synckit config dir where
+// consumers register their manifests for synckitd to discover.
+const manifestsDirName = "manifests"
+
+// watchDebounce is the quiet window synckitd waits after a repo's VCS metadata
+// changes before triggering a converge, coalescing a burst of fetch writes.
+const watchDebounce = 3 * time.Second
+
+// reposyncManifest is the declarative registration synckitd reads to drive reposync:
+// the list command it polls for watch items and the args-only action templates it
+// renders (synckitd prepends the reposync binary). The notify action is a converging
+// reconcile tagged with the peer, not a bare single-repo sync.
+func reposyncManifest() manifest.Manifest {
+	return manifest.Manifest{
+		Name:   state.ToolName,
+		Binary: state.ToolName,
+		Brew:   "yasyf/tap/reposync",
+		Watch: manifest.WatchSpec{
+			Backend:  "watchman",
+			Debounce: codec.Duration(watchDebounce),
+			ListCmd:  "list --json",
+		},
+		Actions: manifest.ActionSpec{
+			Reconcile: "reconcile",
+			Sync:      "reconcile --origin {{.Origin}}",
+			Fetch:     "state get-json",
+			Apply:     "state apply-json",
 		},
 	}
-	cmd.Flags().BoolVar(&tickOnly, "tick-only", false, "install only the reconcile tick, not the watch daemon")
-	return cmd
 }
 
-func newUninstallCmd() *cobra.Command {
+// manifestPath returns the absolute path reposync's manifest registers under in the
+// shared synckit config dir.
+func manifestPath() (string, error) {
+	dir, err := hostregistry.Mesh.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, manifestsDirName, state.ToolName+".json"), nil
+}
+
+func newInstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "uninstall",
-		Short: "Unload and remove the reposync LaunchAgents.",
+		Use:   "install",
+		Short: "Register reposync's synckitd manifest so the daemon drives its sync.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := service.Uninstall(cmd.Context(), service.NewLauncher()); err != nil {
+			m := reposyncManifest()
+			if err := m.Validate(); err != nil {
 				return err
 			}
-			fmt.Println("uninstalled reposync LaunchAgents")
+			data, err := json.Marshal(m)
+			if err != nil {
+				return fmt.Errorf("encode manifest: %w", err)
+			}
+			path, err := manifestPath()
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return fmt.Errorf("create manifests dir %s: %w", filepath.Dir(path), err)
+			}
+			if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+				return fmt.Errorf("write manifest %s: %w", path, err)
+			}
+			cmd.Printf("registered reposync manifest %s\n", path)
 			return nil
 		},
 	}
 	return cmd
 }
 
-func printInstalled(tickOnly bool) error {
-	st, err := state.Load()
-	if err != nil {
-		return err
+func newUninstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove reposync's synckitd manifest.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, err := manifestPath()
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove manifest %s: %w", path, err)
+			}
+			cmd.Printf("removed reposync manifest %s\n", path)
+			return nil
+		},
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("resolve home dir: %w", err)
-	}
-	agents := filepath.Join(home, "Library", "LaunchAgents")
-	fmt.Printf("installed tick %s (every %s)\n", filepath.Join(agents, service.TickLabel+".plist"), time.Duration(st.Settings.Interval))
-	if !tickOnly {
-		fmt.Printf("installed watch %s\n", filepath.Join(agents, service.WatchLabel+".plist"))
-	}
-	return nil
+	return cmd
 }

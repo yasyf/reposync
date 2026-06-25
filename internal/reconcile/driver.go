@@ -8,8 +8,8 @@ import (
 
 	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
+	"github.com/yasyf/synckit/hostregistry"
 
-	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/state"
 )
 
@@ -60,7 +60,7 @@ func repoFor(origin string, entry cregistry.Entry[state.RepoMeta]) state.Repo {
 // and parsing its JSON — READ-ONLY, the pull side of pull-merge. It never writes to
 // the peer.
 type sshFetcher struct {
-	runner host.Runner
+	runner hostregistry.Runner
 }
 
 // Fetch returns peer's propagating repo registry, read straight from the peer's
@@ -81,12 +81,12 @@ func (f sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[
 // pull-merge every peer, persist the converged registry, then clone-or-sync each
 // present repo. state.WithLock wraps the whole pass.
 func convergeRepos(ctx context.Context, st *state.State, peers []string, origin string) ([]Result, error) {
-	return convergeReposWith(ctx, st, host.NewExecRunner(), peers, origin)
+	return convergeReposWith(ctx, st, hostregistry.NewExecRunner(), peers, origin)
 }
 
 // convergeReposWith is convergeRepos with the ssh runner injected so tests can drive
 // the pull-merge against a mock peer without real ssh.
-func convergeReposWith(ctx context.Context, st *state.State, runner host.Runner, peers []string, origin string) ([]Result, error) {
+func convergeReposWith(ctx context.Context, st *state.State, runner hostregistry.Runner, peers []string, origin string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
 		return nil, err

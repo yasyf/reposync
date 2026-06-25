@@ -10,6 +10,7 @@ import (
 )
 
 func newReconcileCmd() *cobra.Command {
+	var origin string
 	cmd := &cobra.Command{
 		Use:   "reconcile",
 		Short: "Clone every missing repo and idle-sync every present one.",
@@ -19,7 +20,7 @@ func newReconcileCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			results, err := reconcile.Reconcile(cmd.Context(), st)
+			results, err := reconcile.Reconcile(cmd.Context(), st, origin)
 			if err != nil {
 				return err
 			}
@@ -29,6 +30,7 @@ func newReconcileCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&origin, "origin", "", "anti-echo provenance tag from the notifying peer")
 	return cmd
 }
 

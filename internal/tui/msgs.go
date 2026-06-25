@@ -3,8 +3,9 @@ package tui
 import (
 	"time"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/reposync/internal/discover"
-	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/reconcile"
 )
 
@@ -41,7 +42,7 @@ type hostsLoadedMsg struct {
 // hostVerifiedMsg carries one host's verify probe result.
 type hostVerifiedMsg struct {
 	target string
-	res    host.VerifyResult
+	res    hostregistry.VerifyResult
 }
 
 // hostAddProgressMsg carries one bootstrap step line as it happens.

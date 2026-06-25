@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -13,10 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/reposync/internal/discover"
-	"github.com/yasyf/reposync/internal/host"
-	"github.com/yasyf/reposync/internal/service"
-	"github.com/yasyf/reposync/internal/state"
 )
 
 const (
@@ -329,7 +330,7 @@ func (m hostsModel) startBootstrap(target string) (screen, tea.Cmd) {
 	m.lines = make(chan string, 64)
 	m.logLines = nil
 	m.logVP.SetContent("")
-	return m, tea.Batch(m.spin.Tick, addHostCmd(ctx, m.opts.Runner, target, m.lines), waitForLine(m.lines))
+	return m, tea.Batch(m.spin.Tick, addHostCmd(ctx, target, m.lines), waitForLine(m.lines))
 }
 
 func (m *hostsModel) markChecking(target string) tea.Cmd {
@@ -344,7 +345,7 @@ func (m *hostsModel) markChecking(target string) tea.Cmd {
 	return m.refreshHosts()
 }
 
-func (m *hostsModel) markVerified(target string, res host.VerifyResult) tea.Cmd {
+func (m *hostsModel) markVerified(target string, res hostregistry.VerifyResult) tea.Cmd {
 	for i, raw := range m.allItems {
 		it := raw.(hostItem)
 		if it.target == target {
@@ -404,9 +405,9 @@ func listItems(l list.Model) []hostItem {
 
 // discoverHostsCmd scans the network for hosts and merges in any registered
 // host that discovery did not surface.
-func discoverHostsCmd(r host.Runner) tea.Cmd {
+func discoverHostsCmd(r hostregistry.Runner) tea.Cmd {
 	return func() tea.Msg {
-		reg, err := state.Config.Load()
+		reg, err := hostregistry.Mesh.Load()
 		if err != nil {
 			return hostsLoadedMsg{err: fmt.Errorf("load host registry: %w", err)}
 		}
@@ -448,7 +449,7 @@ func mergeHostItems(cands []discover.HostCandidate, registered []string) []hostI
 	return items
 }
 
-func verifyAllCmd(r host.Runner, items []hostItem) tea.Cmd {
+func verifyAllCmd(r hostregistry.Runner, items []hostItem) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, it := range items {
 		if it.registered {
@@ -458,9 +459,9 @@ func verifyAllCmd(r host.Runner, items []hostItem) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func verifyHostCmd(r host.Runner, target string) tea.Cmd {
+func verifyHostCmd(r hostregistry.Runner, target string) tea.Cmd {
 	return func() tea.Msg {
-		return hostVerifiedMsg{target: target, res: host.Verify(context.Background(), r, target)}
+		return hostVerifiedMsg{target: target, res: hostregistry.Mesh.Verify(context.Background(), r, target)}
 	}
 }
 
@@ -468,28 +469,40 @@ func removeHostCmd(target string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
 		defer cancel()
-		return hostRemovedMsg{target: target, err: host.RemoveHost(ctx, target)}
+		return hostRemovedMsg{target: target, err: hostregistry.Mesh.RemoveHost(ctx, target)}
 	}
 }
 
-// addHostCmd runs the bootstrap, streaming each step onto lines and closing the
-// channel when the run ends so waitForLine unblocks.
-func addHostCmd(ctx context.Context, r host.Runner, target string, lines chan string) tea.Cmd {
+// addHostCmd bootstraps a peer by shelling synckitd, which owns the shared mesh and
+// its ssh bootstrap. Each synckitd output line is streamed onto lines and collected
+// into the run log; the channel closes when the run ends so waitForLine unblocks.
+func addHostCmd(ctx context.Context, target string, lines chan string) tea.Cmd {
 	return func() tea.Msg {
-		log, err := host.AddHostStream(ctx, r, target, "", false, func(s string) {
-			lines <- s
-		})
-		// Bring this host online too: adding a peer should leave the local
-		// reconcile tick and watch daemon running without a separate install.
-		if err == nil {
-			if ierr := service.Install(ctx, service.NewLauncher(), false); ierr != nil {
-				lines <- fmt.Sprintf("WARN install local services: %v", ierr)
-			} else {
-				lines <- "installed local services"
-			}
+		//nolint:gosec // G204: fixed argv to the synckitd binary on PATH; target is a validated user@node, not a shell string.
+		sub := exec.CommandContext(ctx, "synckitd", "host", "add", target)
+		stdout, err := sub.StdoutPipe()
+		if err != nil {
+			close(lines)
+			return hostAddDoneMsg{target: target, err: fmt.Errorf("pipe synckitd output: %w", err)}
 		}
+		sub.Stderr = sub.Stdout
+		if err := sub.Start(); err != nil {
+			close(lines)
+			return hostAddDoneMsg{target: target, err: fmt.Errorf("start synckitd host add: %w", err)}
+		}
+		var log []string
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			log = append(log, line)
+			lines <- line
+		}
+		err = sub.Wait()
 		close(lines)
-		return hostAddDoneMsg{target: target, log: log, err: err}
+		if err != nil {
+			return hostAddDoneMsg{target: target, log: log, err: fmt.Errorf("synckitd host add %s: %w", target, err)}
+		}
+		return hostAddDoneMsg{target: target, log: log}
 	}
 }
 

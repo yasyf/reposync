@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260615092313-b57e5e6d29bb
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/synckit v0.1.0
+	github.com/yasyf/synckit v0.2.0
 	golang.org/x/term v0.44.0
 )
 

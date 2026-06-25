@@ -10,9 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/sync"
@@ -45,14 +48,18 @@ type Result struct {
 // this host into line: it pull-merges each peer's registry, persists the converged
 // set, clones every absent propagating repo and idle-syncs every present one, then
 // idle-syncs the local-only repos (which never converge across hosts). The peer list
-// comes from the host registry; the whole pass is daemon-independent and self-heals
-// when a peer is unreachable.
-func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
-	reg, err := state.Config.Load()
+// comes from the shared synckit host mesh, and origin tags the notifying peer so the
+// converge pass can skip the redundant return hop; the whole pass is daemon-independent
+// and self-heals when a peer is unreachable.
+func Reconcile(ctx context.Context, st *state.State, origin string) ([]Result, error) {
+	mesh, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return nil, err
 	}
-	converged, err := convergeRepos(ctx, st, reg.Hosts, "")
+	if len(mesh.Hosts) == 0 {
+		log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to migrate this host)")
+	}
+	converged, err := convergeRepos(ctx, st, mesh.Hosts, origin)
 	if err != nil {
 		return nil, err
 	}

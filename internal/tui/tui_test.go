@@ -12,7 +12,7 @@ import (
 	"github.com/yasyf/reposync/internal/state"
 )
 
-// fakeRunner satisfies host.Runner with canned, network-free replies: Local
+// fakeRunner satisfies hostregistry.Runner with canned, network-free replies: Local
 // answers the tailscale and id probes host discovery makes; SSH always succeeds
 // silently so verify never reaches the network.
 type fakeRunner struct{}

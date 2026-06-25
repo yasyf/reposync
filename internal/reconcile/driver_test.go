@@ -72,7 +72,7 @@ func TestConvergeTombstonePropagates(t *testing.T) {
 	h := newHarness(t)
 	// Track and clone the repo locally first.
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	if _, err := Reconcile(context.Background(), st); err != nil {
+	if _, err := Reconcile(context.Background(), st, ""); err != nil {
 		t.Fatalf("seed reconcile: %v", err)
 	}
 	dest := filepath.Join(h.dataLoc, "alpha")

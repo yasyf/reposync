@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // headerLines and helpLines are the fixed chrome rows the router reserves above
@@ -49,7 +49,7 @@ func newRootModel(opts Options) rootModel {
 // detectSelf reads this host's identity for the header band; an unreadable or
 // unset identity simply leaves the brand mark standing alone.
 func detectSelf() string {
-	reg, err := state.Config.Load()
+	reg, err := hostregistry.Mesh.Load()
 	if err != nil {
 		return ""
 	}

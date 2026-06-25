@@ -264,7 +264,7 @@ func TestApplyReposDisableTombstonesAndKeepsCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	if _, err := reconcile.Reconcile(context.Background(), st); err != nil {
+	if _, err := reconcile.Reconcile(context.Background(), st, ""); err != nil {
 		t.Fatalf("seed reconcile: %v", err)
 	}
 	dest := filepath.Join(h.dataLoc, "alpha")
@@ -313,7 +313,7 @@ func TestApplyReposReconcilesOnlyEnabledSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load seeded state: %v", err)
 	}
-	if _, err := reconcile.Reconcile(context.Background(), st); err != nil {
+	if _, err := reconcile.Reconcile(context.Background(), st, ""); err != nil {
 		t.Fatalf("seed reconcile of pre-tracked repo: %v", err)
 	}
 	if !h.exists(filepath.Join(h.dataLoc, "beta", ".jj")) {

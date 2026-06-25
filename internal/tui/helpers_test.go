@@ -8,8 +8,9 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/yasyf/synckit/hostregistry"
+
 	"github.com/yasyf/reposync/internal/discover"
-	"github.com/yasyf/reposync/internal/host"
 	"github.com/yasyf/reposync/internal/reconcile"
 )
 
@@ -75,13 +76,13 @@ func TestHostNode(t *testing.T) {
 func TestClassifyVerify(t *testing.T) {
 	cases := []struct {
 		name string
-		res  host.VerifyResult
+		res  hostregistry.VerifyResult
 		want verifyState
 	}{
-		{name: "ready", res: host.VerifyResult{Reachable: true, Bootstrapped: true}, want: verifyOK},
-		{name: "reachable not installed", res: host.VerifyResult{Reachable: true}, want: verifyWarn},
-		{name: "unreachable", res: host.VerifyResult{Err: errors.New("connection refused")}, want: verifyFail},
-		{name: "unreachable but bootstrapped flag ignored", res: host.VerifyResult{Bootstrapped: true}, want: verifyFail},
+		{name: "ready", res: hostregistry.VerifyResult{Reachable: true, Bootstrapped: true}, want: verifyOK},
+		{name: "reachable not installed", res: hostregistry.VerifyResult{Reachable: true}, want: verifyWarn},
+		{name: "unreachable", res: hostregistry.VerifyResult{Err: errors.New("connection refused")}, want: verifyFail},
+		{name: "unreachable but bootstrapped flag ignored", res: hostregistry.VerifyResult{Bootstrapped: true}, want: verifyFail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

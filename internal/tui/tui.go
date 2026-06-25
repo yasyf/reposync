@@ -8,13 +8,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // Options configures a TUI run.
 type Options struct {
 	Version string
-	Runner  host.Runner
+	Runner  hostregistry.Runner
 }
 
 // Run launches the interactive TUI and blocks until the user quits or ctx is

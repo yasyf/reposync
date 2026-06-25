@@ -2,9 +2,12 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/spf13/cobra"
+
+	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/reposync/internal/state"
 )
@@ -21,15 +24,6 @@ type selfPayload struct {
 	Self    string `json:"self"`
 }
 
-// hostsPayload is the shape of `reposync host ls --json`: the schema version,
-// this host's identity, and every registered peer, so one call yields identity
-// plus peers. Hosts is never nil so it marshals to [] rather than null.
-type hostsPayload struct {
-	Version int      `json:"version"`
-	Self    string   `json:"self"`
-	Hosts   []string `json:"hosts"`
-}
-
 // writeJSON emits v as a single compact JSON line, the sole thing a --json
 // command writes to stdout; logs and warnings go to stderr.
 func writeJSON(w io.Writer, v any) error {
@@ -37,12 +31,18 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// appliedPayload is the shape of `reposync state apply-json`: the count of present
+// entries persisted from the merged registry on stdin.
+type appliedPayload struct {
+	Applied int `json:"applied"`
+}
+
 func newStateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "state",
 		Short: "Inspect the on-disk reposync state.",
 	}
-	cmd.AddCommand(newStateGetJSONCmd())
+	cmd.AddCommand(newStateGetJSONCmd(), newStateApplyJSONCmd())
 	return cmd
 }
 
@@ -71,6 +71,36 @@ func newStateGetJSONCmd() *cobra.Command {
 	return cmd
 }
 
+func newStateApplyJSONCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "apply-json",
+		Short: "Read a merged propagating repo registry from stdin and persist it as JSON.",
+		Long: "Read a merged convergent repo registry (origin-keyed, with tombstones) from " +
+			"stdin and persist it as this host's propagating registry, leaving the local-only " +
+			"repos, settings, and default location untouched. This is the write half of the " +
+			"pull-merge synckitd drives after fetching every peer's get-json.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := io.ReadAll(cmd.InOrStdin())
+			if err != nil {
+				return fmt.Errorf("read merged registry from stdin: %w", err)
+			}
+			merged, err := state.DecodeRepoRegistry(raw)
+			if err != nil {
+				return err
+			}
+			if _, err := state.Update(cmd.Context(), func(s *state.State) error {
+				s.Repos = merged
+				return nil
+			}); err != nil {
+				return err
+			}
+			return writeJSON(cmd.OutOrStdout(), appliedPayload{Applied: len(merged.Present())})
+		},
+	}
+	return cmd
+}
+
 func newSelfCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
@@ -78,7 +108,7 @@ func newSelfCmd() *cobra.Command {
 		Short: "Print this host's ssh identity (user@node) as peers reach it.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			reg, err := state.Config.Load()
+			reg, err := hostregistry.Mesh.Load()
 			if err != nil {
 				return err
 			}

@@ -8,7 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/yasyf/reposync/internal/host"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 // verifyState tracks how far a host's reachability probe has progressed.
@@ -30,7 +30,7 @@ type hostItem struct {
 	source     string
 	online     bool
 	registered bool
-	verify     host.VerifyResult
+	verify     hostregistry.VerifyResult
 	state      verifyState
 }
 
@@ -136,7 +136,7 @@ func renderHostDetail(item list.Item) string {
 }
 
 // classifyVerify maps a probe result onto a row state.
-func classifyVerify(res host.VerifyResult) verifyState {
+func classifyVerify(res hostregistry.VerifyResult) verifyState {
 	if res.Reachable && res.Bootstrapped {
 		return verifyOK
 	}

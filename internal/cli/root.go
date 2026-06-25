@@ -3,7 +3,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,13 +14,6 @@ import (
 	"github.com/yasyf/synckit/hostregistry"
 )
 
-// statusError carries a process exit code out of a command so the remote status
-// of `host exec` propagates to reposync's own exit code. Its message is empty so
-// Execute prints nothing extra when honoring the code.
-type statusError int
-
-func (e statusError) Error() string { return "" }
-
 // Execute builds and runs the reposync root command under a context canceled on
 // SIGINT/SIGTERM, exiting non-zero on error.
 func Execute(version string) {
@@ -32,10 +24,6 @@ func Execute(version string) {
 	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return
-	}
-	var status statusError
-	if errors.As(err, &status) {
-		os.Exit(int(status))
 	}
 	fmt.Fprintf(os.Stderr, "reposync: %v\n", err)
 	os.Exit(1)
@@ -61,10 +49,9 @@ func newRoot(version string) *cobra.Command {
 		newHostCmd(),
 		newSelfCmd(),
 		newStateCmd(),
+		newListCmd(),
 		newSyncCmd(),
 		newReconcileCmd(),
-		newRPCCmd(),
-		newWatchCmd(),
 		newInstallCmd(),
 		newUninstallCmd(),
 		newTUICmd(version),

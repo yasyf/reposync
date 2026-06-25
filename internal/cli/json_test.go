@@ -7,17 +7,19 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/manifest"
 
 	"github.com/yasyf/reposync/internal/state"
 )
 
 // seedRegistry points the state file at a temp config dir and writes a known
-// self+hosts identity.
+// self+hosts identity into the shared synckit mesh.
 func seedRegistry(t *testing.T, self string, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if _, err := state.Config.Update(t.Context(), func(g *hostregistry.Registry) error {
+	if _, err := hostregistry.Mesh.Update(t.Context(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {
 			g.UpsertHost(h)
@@ -32,11 +34,19 @@ func seedRegistry(t *testing.T, self string, hosts ...string) {
 // separately so the --json contract (JSON only on stdout) can be asserted.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return runCLIStdin(t, "", args...)
+}
+
+// runCLIStdin is runCLI with stdin fed from in, for commands like state apply-json
+// that read a payload from stdin.
+func runCLIStdin(t *testing.T, in string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	var out, errBuf bytes.Buffer
 	root := newRoot("test")
 	root.SetArgs(args)
 	root.SetOut(&out)
 	root.SetErr(&errBuf)
+	root.SetIn(strings.NewReader(in))
 	err = root.ExecuteContext(t.Context())
 	return out.String(), errBuf.String(), err
 }
@@ -67,62 +77,8 @@ func TestSelfJSONShape(t *testing.T) {
 	}
 }
 
-func TestHostLsJSONShape(t *testing.T) {
-	seedRegistry(t, "yasyf@laptop", "yasyf@desktop", "yasyf@server")
-
-	stdout, stderr, err := runCLI(t, "host", "ls", "--json")
-	if err != nil {
-		t.Fatalf("host ls --json: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("host ls --json wrote to stderr: %q", stderr)
-	}
-
-	want := `{"version":1,"self":"yasyf@laptop","hosts":["yasyf@desktop","yasyf@server"]}`
-	if got := strings.TrimRight(stdout, "\n"); got != want {
-		t.Fatalf("host ls --json:\n got: %s\nwant: %s", got, want)
-	}
-}
-
-func TestHostLsJSONEmptyHosts(t *testing.T) {
-	seedRegistry(t, "yasyf@laptop")
-
-	stdout, stderr, err := runCLI(t, "host", "ls", "--json")
-	if err != nil {
-		t.Fatalf("host ls --json: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("host ls --json wrote to stderr: %q", stderr)
-	}
-
-	// Empty hosts must serialize as [], never null, and never a prose message.
-	want := `{"version":1,"self":"yasyf@laptop","hosts":[]}`
-	if got := strings.TrimRight(stdout, "\n"); got != want {
-		t.Fatalf("host ls --json (empty):\n got: %s\nwant: %s", got, want)
-	}
-	if strings.Contains(stdout, "null") {
-		t.Fatalf("empty hosts serialized as null, not []: %s", stdout)
-	}
-}
-
-func TestHostLsHumanUnchanged(t *testing.T) {
-	seedRegistry(t, "yasyf@laptop", "yasyf@desktop", "yasyf@server")
-
-	stdout, _, err := runCLI(t, "host", "ls")
-	if err != nil {
-		t.Fatalf("host ls: %v", err)
-	}
-
-	// The human path is the original tabwriter listing: a HOST header then one
-	// host per line, with no self and no JSON.
-	want := "HOST\nyasyf@desktop\nyasyf@server\n"
-	if stdout != want {
-		t.Fatalf("host ls human output changed:\n got: %q\nwant: %q", stdout, want)
-	}
-}
-
 func TestSelfPayloadMarshalsKnownRegistry(t *testing.T) {
-	// Golden marshal: the Go payload types must encode to the exact bytes a
+	// Golden marshal: the Go payload type must encode to the exact bytes a
 	// cross-language consumer pins to, independent of any command plumbing.
 	selfGolden, err := json.Marshal(selfPayload{Version: jsonVersion, Self: "yasyf@laptop"})
 	if err != nil {
@@ -130,26 +86,6 @@ func TestSelfPayloadMarshalsKnownRegistry(t *testing.T) {
 	}
 	if got, want := string(selfGolden), `{"version":1,"self":"yasyf@laptop"}`; got != want {
 		t.Fatalf("selfPayload golden:\n got: %s\nwant: %s", got, want)
-	}
-
-	hostsGolden, err := json.Marshal(hostsPayload{
-		Version: jsonVersion,
-		Self:    "yasyf@laptop",
-		Hosts:   []string{"yasyf@desktop", "yasyf@server"},
-	})
-	if err != nil {
-		t.Fatalf("marshal hostsPayload: %v", err)
-	}
-	if got, want := string(hostsGolden), `{"version":1,"self":"yasyf@laptop","hosts":["yasyf@desktop","yasyf@server"]}`; got != want {
-		t.Fatalf("hostsPayload golden:\n got: %s\nwant: %s", got, want)
-	}
-
-	empty, err := json.Marshal(hostsPayload{Version: jsonVersion, Self: "yasyf@laptop", Hosts: []string{}})
-	if err != nil {
-		t.Fatalf("marshal empty hostsPayload: %v", err)
-	}
-	if got, want := string(empty), `{"version":1,"self":"yasyf@laptop","hosts":[]}`; got != want {
-		t.Fatalf("empty hostsPayload golden:\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -207,5 +143,134 @@ func TestStatePathUnderTempConfig(t *testing.T) {
 	}
 	if filepath.Base(path) != "state.json" {
 		t.Fatalf("state path = %q, want it to end in state.json", path)
+	}
+}
+
+// TestStateApplyJSONPreservesLocalReposAndSettings is the two-registry-scoping guard:
+// applying a merged propagating registry must replace ONLY the propagating Repos,
+// leaving the local-only repos, settings, and default location byte-for-byte intact.
+func TestStateApplyJSONPreservesLocalReposAndSettings(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Seed a host that already tracks a local-only repo and a non-default location.
+	if _, err := state.Update(t.Context(), func(s *state.State) error {
+		s.DefaultLocation = "~/work"
+		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed local state: %v", err)
+	}
+	before, err := state.Load()
+	if err != nil {
+		t.Fatalf("load before: %v", err)
+	}
+
+	// A merged propagating registry as synckitd would pipe in: one origin-keyed repo.
+	merged := cregistry.New[state.RepoMeta]()
+	merged.Add("https://example.com/cc-review.git", state.RepoMeta{Relpath: "cc-review", Trunk: "main"}, 100)
+	payload, err := json.Marshal(merged)
+	if err != nil {
+		t.Fatalf("marshal merged: %v", err)
+	}
+
+	stdout, stderr, err := runCLIStdin(t, string(payload), "state", "apply-json")
+	if err != nil {
+		t.Fatalf("state apply-json: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("state apply-json wrote to stderr: %q", stderr)
+	}
+	if got, want := strings.TrimRight(stdout, "\n"), `{"applied":1}`; got != want {
+		t.Fatalf("state apply-json:\n got: %s\nwant: %s", got, want)
+	}
+
+	after, err := state.Load()
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+
+	// The propagating registry was replaced with the merged payload.
+	if e, ok := after.Repos["https://example.com/cc-review.git"]; !ok || !e.Present() || e.Value.Relpath != "cc-review" {
+		t.Fatalf("propagating repo not applied: %v", after.Repos)
+	}
+	// The local-only registry, settings, and default location survived untouched.
+	if e, ok := after.LocalRepos["scratch"]; !ok || !e.Present() {
+		t.Fatalf("apply-json clobbered the local-only registry: %v", after.LocalRepos)
+	}
+	if after.DefaultLocation != "~/work" {
+		t.Fatalf("apply-json changed default_location: got %q, want ~/work", after.DefaultLocation)
+	}
+	if after.Settings != before.Settings {
+		t.Fatalf("apply-json changed settings:\n got: %+v\nwant: %+v", after.Settings, before.Settings)
+	}
+}
+
+// TestStateApplyJSONFingerprintIsApplyStable proves apply-json writes only state.json
+// metadata, never refs: applying a payload twice is idempotent and the propagating
+// registry contents (which never carry a fingerprint) round-trip unchanged.
+func TestStateApplyJSONFingerprintIsApplyStable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	merged := cregistry.New[state.RepoMeta]()
+	merged.Add("https://example.com/a.git", state.RepoMeta{Relpath: "a", Trunk: "main"}, 100)
+	payload, err := json.Marshal(merged)
+	if err != nil {
+		t.Fatalf("marshal merged: %v", err)
+	}
+
+	for i := range 2 {
+		stdout, _, err := runCLIStdin(t, string(payload), "state", "apply-json")
+		if err != nil {
+			t.Fatalf("apply-json pass %d: %v", i, err)
+		}
+		if got, want := strings.TrimRight(stdout, "\n"), `{"applied":1}`; got != want {
+			t.Fatalf("apply-json pass %d:\n got: %s\nwant: %s", i, got, want)
+		}
+	}
+}
+
+// TestListJSONCoversBothRegistries proves list --json emits one watch item per repo
+// from BOTH registries — propagating repos keyed by origin and local-only repos keyed
+// by relpath — and reports an empty (not dropped) fingerprint for an uncloned repo.
+func TestListJSONCoversBothRegistries(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := state.Update(t.Context(), func(s *state.State) error {
+		s.DefaultLocation = t.TempDir() // empty location: no repo is cloned
+		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed repos: %v", err)
+	}
+
+	stdout, _, err := runCLI(t, "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json: %v", err)
+	}
+
+	var items []manifest.WatchItem
+	if err := json.Unmarshal([]byte(stdout), &items); err != nil {
+		t.Fatalf("list --json output is not a WatchItem array: %v\n%s", err, stdout)
+	}
+	byID := map[string]manifest.WatchItem{}
+	for _, it := range items {
+		byID[it.ID] = it
+	}
+	prop, ok := byID["https://example.com/cc-review.git"]
+	if !ok {
+		t.Fatalf("propagating repo (origin id) missing from list: %s", stdout)
+	}
+	if _, ok := byID["scratch"]; !ok {
+		t.Fatalf("local-only repo (relpath id) missing from list: %s", stdout)
+	}
+	if len(items) != 2 {
+		t.Fatalf("list --json emitted %d items, want 2 (both registries): %s", len(items), stdout)
+	}
+	// An uncloned repo keeps its watch dirs but reports an empty fingerprint.
+	if prop.Fingerprint != "" {
+		t.Fatalf("uncloned repo fingerprint = %q, want empty", prop.Fingerprint)
+	}
+	if len(prop.WatchDirs) == 0 {
+		t.Fatalf("propagating repo has no watch dirs: %+v", prop)
 	}
 }
