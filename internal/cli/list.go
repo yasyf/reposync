@@ -7,50 +7,20 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
-
-	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
 
-func newListCmd() *cobra.Command {
-	var asJSON bool
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List every tracked repo as the watch items synckitd subscribes to.",
-		Long: "Emit one watch item per tracked repo — both propagating (origin-keyed) and " +
-			"local-only (relpath-keyed) — with the VCS metadata directories to watch and the " +
-			"upstream trunk hash as the change fingerprint. A repo that is not yet cloned " +
-			"reports an empty fingerprint. synckitd's watch supervisor reads this.",
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if !asJSON {
-				return cmd.Help()
-			}
-			st, err := state.Load()
-			if err != nil {
-				return err
-			}
-			dl, err := st.DefaultLocationExpanded()
-			if err != nil {
-				return err
-			}
-			items := watchItems(cmd.Context(), cmd.ErrOrStderr(), st, dl)
-			return writeJSON(cmd.OutOrStdout(), items)
-		},
-	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "emit the watch items as a machine-readable JSON line on stdout")
-	return cmd
-}
-
 // watchItems builds the per-repo watch items for both registries: propagating repos
 // keyed by origin and local-only repos keyed by relpath. It never drops a repo —
 // an uncloned or unreadable repo reports an empty fingerprint, logging the cause to
-// errw, so synckitd keeps the subscription and converges once the repo lands.
-func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string) []manifest.WatchItem {
-	items := make([]manifest.WatchItem, 0, len(st.Repos)+len(st.LocalRepos))
+// errw, so synckitd keeps the subscription and converges once the repo lands. The two
+// id namespaces (origin vs relpath) stay distinct so a propagating repo and a
+// local-only one never collide.
+func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string) []syncservice.WatchItem {
+	items := make([]syncservice.WatchItem, 0, len(st.Repos)+len(st.LocalRepos))
 	for origin, e := range st.Repos.Present() {
 		items = append(items, watchItem(ctx, errw, origin, state.Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly}, dl))
 	}
@@ -60,9 +30,9 @@ func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string)
 	return items
 }
 
-func watchItem(ctx context.Context, errw io.Writer, id string, repo state.Repo, dl string) manifest.WatchItem {
+func watchItem(ctx context.Context, errw io.Writer, id string, repo state.Repo, dl string) syncservice.WatchItem {
 	abs := repo.AbsPath(dl)
-	return manifest.WatchItem{
+	return syncservice.WatchItem{
 		ID:          id,
 		WatchDirs:   watchSet(abs),
 		Fingerprint: trunkHash(ctx, errw, abs, repo.Trunk),

@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
-	"github.com/yasyf/synckit/manifest"
+	"github.com/yasyf/synckit/rpc"
+	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/state"
 )
@@ -34,21 +38,66 @@ func seedRegistry(t *testing.T, self string, hosts ...string) {
 // separately so the --json contract (JSON only on stdout) can be asserted.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	return runCLIStdin(t, "", args...)
-}
-
-// runCLIStdin is runCLI with stdin fed from in, for commands like state apply-json
-// that read a payload from stdin.
-func runCLIStdin(t *testing.T, in string, args ...string) (stdout, stderr string, err error) {
-	t.Helper()
 	var out, errBuf bytes.Buffer
 	root := newRoot("test")
 	root.SetArgs(args)
 	root.SetOut(&out)
 	root.SetErr(&errBuf)
-	root.SetIn(strings.NewReader(in))
+	root.SetIn(strings.NewReader(""))
 	err = root.ExecuteContext(t.Context())
 	return out.String(), errBuf.String(), err
+}
+
+// pipeTransport frames typed rpc over one end of a net.Pipe so a test can drive the
+// repoConsumer through the real dispatcher + ServeConn serving path, reading responses
+// with a persistent bufio.Reader so buffered bytes survive between calls.
+type pipeTransport struct {
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+func (t *pipeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
+	line, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := t.conn.Write(append(line, '\n')); err != nil {
+		return nil, err
+	}
+	respLine, err := rpc.ReadLine(t.r, rpc.MaxLine)
+	if err != nil {
+		return nil, err
+	}
+	var resp syncservice.Response
+	if err := json.Unmarshal(respLine, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (t *pipeTransport) Close() error { return t.conn.Close() }
+
+// serveConsumer wires a repoConsumer behind a ServeConn loop over a net.Pipe and
+// returns a typed client speaking to it, the same machinery `reposync rpc-serve`
+// exposes to synckitd.
+func serveConsumer(t *testing.T) *syncservice.Client {
+	t.Helper()
+	d := rpc.NewDispatcher()
+	syncservice.RegisterConsumer(d, repoConsumer{})
+
+	server, clientConn := net.Pipe()
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
+	t.Cleanup(func() {
+		srvCancel()
+		_ = server.Close()
+		<-srvDone
+	})
+
+	c := syncservice.NewClient(&pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)})
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
 
 func TestSelfJSONShape(t *testing.T) {
@@ -89,44 +138,6 @@ func TestSelfPayloadMarshalsKnownRegistry(t *testing.T) {
 	}
 }
 
-func TestStateGetJSONEmitsPropagatingRegistryOnly(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if _, err := state.Update(t.Context(), func(s *state.State) error {
-		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
-		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed repos: %v", err)
-	}
-
-	stdout, stderr, err := runCLI(t, "state", "get-json")
-	if err != nil {
-		t.Fatalf("state get-json: %v", err)
-	}
-	if stderr != "" {
-		t.Fatalf("state get-json wrote to stderr: %q", stderr)
-	}
-
-	var reg map[string]struct {
-		AddedAt   int64 `json:"added_at"`
-		RemovedAt int64 `json:"removed_at"`
-		Value     struct {
-			Relpath   string `json:"relpath"`
-			LocalOnly bool   `json:"local_only"`
-		} `json:"value"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &reg); err != nil {
-		t.Fatalf("state get-json output is not a registry object: %v\n%s", err, stdout)
-	}
-	if _, ok := reg["https://example.com/cc-review.git"]; !ok {
-		t.Fatalf("propagating repo missing from get-json: %s", stdout)
-	}
-	// Local-only repos must never appear in the cross-host wire form.
-	if strings.Contains(stdout, "scratch") {
-		t.Fatalf("local-only repo leaked into state get-json: %s", stdout)
-	}
-}
-
 func TestJSONVersionIsLiteralOne(t *testing.T) {
 	if jsonVersion != 1 {
 		t.Fatalf("jsonVersion = %d, want literal 1 (a bump breaks the cross-language contract)", jsonVersion)
@@ -146,10 +157,111 @@ func TestStatePathUnderTempConfig(t *testing.T) {
 	}
 }
 
-// TestStateApplyJSONPreservesLocalReposAndSettings is the two-registry-scoping guard:
-// applying a merged propagating registry must replace ONLY the propagating Repos,
-// leaving the local-only repos, settings, and default location byte-for-byte intact.
-func TestStateApplyJSONPreservesLocalReposAndSettings(t *testing.T) {
+// TestConsumerGetStateEmitsPropagatingRegistryOnly proves svc.get-state, served over
+// rpc-serve, returns the propagating (origin-keyed) registry alone — the local-only
+// repos never cross hosts.
+func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := state.Update(t.Context(), func(s *state.State) error {
+		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed repos: %v", err)
+	}
+
+	raw, err := serveConsumer(t).GetState(t.Context())
+	if err != nil {
+		t.Fatalf("get-state: %v", err)
+	}
+
+	var reg map[string]struct {
+		AddedAt   int64 `json:"added_at"`
+		RemovedAt int64 `json:"removed_at"`
+		Value     struct {
+			Relpath   string `json:"relpath"`
+			LocalOnly bool   `json:"local_only"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		t.Fatalf("get-state output is not a registry object: %v\n%s", err, raw)
+	}
+	if _, ok := reg["https://example.com/cc-review.git"]; !ok {
+		t.Fatalf("propagating repo missing from get-state: %s", raw)
+	}
+	// Local-only repos must never appear in the cross-host wire form.
+	if strings.Contains(string(raw), "scratch") {
+		t.Fatalf("local-only repo leaked into get-state: %s", raw)
+	}
+}
+
+// TestConsumerListCoversBothRegistries proves svc.list emits one watch item per repo
+// from BOTH registries — propagating repos keyed by origin and local-only repos keyed
+// by relpath — and reports an empty (not dropped) fingerprint for an uncloned repo.
+func TestConsumerListCoversBothRegistries(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := state.Update(t.Context(), func(s *state.State) error {
+		s.DefaultLocation = t.TempDir() // empty location: no repo is cloned
+		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
+		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed repos: %v", err)
+	}
+
+	items, err := serveConsumer(t).List(t.Context())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	byID := map[string]syncservice.WatchItem{}
+	for _, it := range items {
+		byID[it.ID] = it
+	}
+	prop, ok := byID["https://example.com/cc-review.git"]
+	if !ok {
+		t.Fatalf("propagating repo (origin id) missing from list: %+v", items)
+	}
+	if _, ok := byID["scratch"]; !ok {
+		t.Fatalf("local-only repo (relpath id) missing from list: %+v", items)
+	}
+	if len(items) != 2 {
+		t.Fatalf("list emitted %d items, want 2 (both registries): %+v", len(items), items)
+	}
+	// An uncloned repo keeps its watch dirs but reports an empty fingerprint.
+	if prop.Fingerprint != "" {
+		t.Fatalf("uncloned repo fingerprint = %q, want empty", prop.Fingerprint)
+	}
+	if len(prop.WatchDirs) == 0 {
+		t.Fatalf("propagating repo has no watch dirs: %+v", prop)
+	}
+}
+
+// TestConsumerCapabilities proves svc.capabilities reports reposync's identity and the
+// current protocol version, the handshake synckitd checks before driving the contract.
+func TestConsumerCapabilities(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	caps, err := serveConsumer(t).Capabilities(t.Context())
+	if err != nil {
+		t.Fatalf("capabilities: %v", err)
+	}
+	if caps.Name != state.ToolName {
+		t.Fatalf("capabilities name = %q, want %q", caps.Name, state.ToolName)
+	}
+	if caps.ProtocolVersion != syncservice.ProtocolVersion {
+		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, syncservice.ProtocolVersion)
+	}
+	if strings.Join(caps.Methods, ",") != strings.Join(syncservice.AllMethods, ",") {
+		t.Fatalf("methods = %v, want %v", caps.Methods, syncservice.AllMethods)
+	}
+}
+
+// TestApplyPreservesLocalReposAndSettings is the two-registry-scoping guard for the
+// native in-process apply (repoDriver.SaveRegistry → SaveReposUnlocked): writing a
+// merged propagating registry must replace ONLY the propagating Repos, leaving the
+// local-only repos, settings, and default location byte-for-byte intact.
+func TestApplyPreservesLocalReposAndSettings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// Seed a host that already tracks a local-only repo and a non-default location.
@@ -165,23 +277,19 @@ func TestStateApplyJSONPreservesLocalReposAndSettings(t *testing.T) {
 		t.Fatalf("load before: %v", err)
 	}
 
-	// A merged propagating registry as synckitd would pipe in: one origin-keyed repo.
+	// A merged propagating registry as the converge pass would persist.
 	merged := cregistry.New[state.RepoMeta]()
 	merged.Add("https://example.com/cc-review.git", state.RepoMeta{Relpath: "cc-review", Trunk: "main"}, 100)
-	payload, err := json.Marshal(merged)
-	if err != nil {
-		t.Fatalf("marshal merged: %v", err)
-	}
 
-	stdout, stderr, err := runCLIStdin(t, string(payload), "state", "apply-json")
+	st, err := state.Load()
 	if err != nil {
-		t.Fatalf("state apply-json: %v", err)
+		t.Fatalf("load for apply: %v", err)
 	}
-	if stderr != "" {
-		t.Fatalf("state apply-json wrote to stderr: %q", stderr)
-	}
-	if got, want := strings.TrimRight(stdout, "\n"), `{"applied":1}`; got != want {
-		t.Fatalf("state apply-json:\n got: %s\nwant: %s", got, want)
+	if err := state.WithLock(t.Context(), func() error {
+		st.Repos = merged
+		return st.SaveReposUnlocked()
+	}); err != nil {
+		t.Fatalf("native apply: %v", err)
 	}
 
 	after, err := state.Load()
@@ -195,82 +303,12 @@ func TestStateApplyJSONPreservesLocalReposAndSettings(t *testing.T) {
 	}
 	// The local-only registry, settings, and default location survived untouched.
 	if e, ok := after.LocalRepos["scratch"]; !ok || !e.Present() {
-		t.Fatalf("apply-json clobbered the local-only registry: %v", after.LocalRepos)
+		t.Fatalf("apply clobbered the local-only registry: %v", after.LocalRepos)
 	}
 	if after.DefaultLocation != "~/work" {
-		t.Fatalf("apply-json changed default_location: got %q, want ~/work", after.DefaultLocation)
+		t.Fatalf("apply changed default_location: got %q, want ~/work", after.DefaultLocation)
 	}
 	if after.Settings != before.Settings {
-		t.Fatalf("apply-json changed settings:\n got: %+v\nwant: %+v", after.Settings, before.Settings)
-	}
-}
-
-// TestStateApplyJSONFingerprintIsApplyStable proves apply-json writes only state.json
-// metadata, never refs: applying a payload twice is idempotent and the propagating
-// registry contents (which never carry a fingerprint) round-trip unchanged.
-func TestStateApplyJSONFingerprintIsApplyStable(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	merged := cregistry.New[state.RepoMeta]()
-	merged.Add("https://example.com/a.git", state.RepoMeta{Relpath: "a", Trunk: "main"}, 100)
-	payload, err := json.Marshal(merged)
-	if err != nil {
-		t.Fatalf("marshal merged: %v", err)
-	}
-
-	for i := range 2 {
-		stdout, _, err := runCLIStdin(t, string(payload), "state", "apply-json")
-		if err != nil {
-			t.Fatalf("apply-json pass %d: %v", i, err)
-		}
-		if got, want := strings.TrimRight(stdout, "\n"), `{"applied":1}`; got != want {
-			t.Fatalf("apply-json pass %d:\n got: %s\nwant: %s", i, got, want)
-		}
-	}
-}
-
-// TestListJSONCoversBothRegistries proves list --json emits one watch item per repo
-// from BOTH registries — propagating repos keyed by origin and local-only repos keyed
-// by relpath — and reports an empty (not dropped) fingerprint for an uncloned repo.
-func TestListJSONCoversBothRegistries(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if _, err := state.Update(t.Context(), func(s *state.State) error {
-		s.DefaultLocation = t.TempDir() // empty location: no repo is cloned
-		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
-		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed repos: %v", err)
-	}
-
-	stdout, _, err := runCLI(t, "list", "--json")
-	if err != nil {
-		t.Fatalf("list --json: %v", err)
-	}
-
-	var items []manifest.WatchItem
-	if err := json.Unmarshal([]byte(stdout), &items); err != nil {
-		t.Fatalf("list --json output is not a WatchItem array: %v\n%s", err, stdout)
-	}
-	byID := map[string]manifest.WatchItem{}
-	for _, it := range items {
-		byID[it.ID] = it
-	}
-	prop, ok := byID["https://example.com/cc-review.git"]
-	if !ok {
-		t.Fatalf("propagating repo (origin id) missing from list: %s", stdout)
-	}
-	if _, ok := byID["scratch"]; !ok {
-		t.Fatalf("local-only repo (relpath id) missing from list: %s", stdout)
-	}
-	if len(items) != 2 {
-		t.Fatalf("list --json emitted %d items, want 2 (both registries): %s", len(items), stdout)
-	}
-	// An uncloned repo keeps its watch dirs but reports an empty fingerprint.
-	if prop.Fingerprint != "" {
-		t.Fatalf("uncloned repo fingerprint = %q, want empty", prop.Fingerprint)
-	}
-	if len(prop.WatchDirs) == 0 {
-		t.Fatalf("propagating repo has no watch dirs: %+v", prop)
+		t.Fatalf("apply changed settings:\n got: %+v\nwant: %+v", after.Settings, before.Settings)
 	}
 }

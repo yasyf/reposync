@@ -12,9 +12,28 @@ import (
 
 	"github.com/yasyf/reposync/internal/apply"
 	"github.com/yasyf/reposync/internal/discover"
+	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
+
+// printReconcile prints one line per reconciled repo and returns an error naming the
+// failure count when any repo failed, so `repo add` surfaces a partial reconcile.
+func printReconcile(results []reconcile.Result) error {
+	failed := 0
+	for _, r := range results {
+		if r.Err != nil {
+			fmt.Printf("✗ %s %s: %v\n", r.Action, r.Relpath, r.Err)
+			failed++
+			continue
+		}
+		fmt.Printf("%s %s\n", r.Action, r.Relpath)
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d repo(s) failed to reconcile", failed)
+	}
+	return nil
+}
 
 func newRepoCmd() *cobra.Command {
 	cmd := &cobra.Command{

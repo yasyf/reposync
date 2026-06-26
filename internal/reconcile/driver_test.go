@@ -6,36 +6,50 @@ import (
 	"testing"
 
 	"github.com/yasyf/synckit/cregistry"
-	"github.com/yasyf/synckit/hostregistry"
 
 	"github.com/yasyf/reposync/internal/state"
 )
 
-// peerRegistryJSON builds the JSON a peer's `state get-json` would emit for a single
-// repo registry entry, so a mock runner can serve it to the Fetcher.
-func peerRegistryJSON(t *testing.T, reg cregistry.Registry[state.RepoMeta]) string {
-	t.Helper()
-	st := state.New()
-	st.Repos = reg
-	data, err := st.EncodeRepoRegistry()
-	if err != nil {
-		t.Fatalf("encode peer registry: %v", err)
+// peerFetcher is a fake converge.Fetcher that serves a fixed propagating registry for
+// every reachable peer and records each peer it was asked for, so a test can assert
+// the pull-merge was read-only without any real ssh. A peer in fail errors, modeling
+// an offline host while another answers.
+type peerFetcher struct {
+	reg    cregistry.Registry[state.RepoMeta]
+	fail   map[string]bool
+	called []string
+}
+
+func newPeerFetcher(reg cregistry.Registry[state.RepoMeta]) *peerFetcher {
+	return &peerFetcher{reg: reg, fail: map[string]bool{}}
+}
+
+func (f *peerFetcher) Fetch(_ context.Context, peer string) (cregistry.Registry[state.RepoMeta], error) {
+	f.called = append(f.called, peer)
+	if f.fail[peer] {
+		return nil, context.DeadlineExceeded
 	}
-	return string(data)
+	return f.reg, nil
+}
+
+// peerRegistry builds the propagating registry a peer's rpc-serve get-state would emit
+// for a single repo entry, the registry the fake fetcher serves to the converge pass.
+func peerRegistry(origin string, meta state.RepoMeta, added cregistry.Micros) cregistry.Registry[state.RepoMeta] {
+	reg := cregistry.New[state.RepoMeta]()
+	reg.Add(origin, meta, added)
+	return reg
 }
 
 // TestConvergeClonesPeerAdvertisedRepo proves pull-merge: a repo this host does not
-// track, advertised present by a peer over `state get-json`, is merged into the local
+// track, advertised present by a peer over get-state, is merged into the local
 // registry and cloned onto disk — no peer push, the peer's registry is read only.
 func TestConvergeClonesPeerAdvertisedRepo(t *testing.T) {
 	h := newHarness(t)
 	st := h.state() // local host tracks nothing
 
-	peer := cregistry.New[state.RepoMeta]()
-	peer.Add(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100)
-	runner := hostregistry.NewMockRunner().OnSSH(GetJSONCmd, peerRegistryJSON(t, peer), nil)
+	f := newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
 
-	results, err := convergeReposWith(context.Background(), st, runner, []string{"yasyf@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, []string{"yasyf@peer"}, "")
 	if err != nil {
 		t.Fatalf("convergeRepos: %v", err)
 	}
@@ -55,11 +69,9 @@ func TestConvergeClonesPeerAdvertisedRepo(t *testing.T) {
 	if e, ok := st.Repos[h.origin]; !ok || !e.Present() || e.Value.Relpath != "alpha" {
 		t.Fatalf("peer repo not merged into local registry: %v", st.Repos)
 	}
-	// The fetch was read-only: the only ssh call is the get-json read.
-	for _, c := range runner.SSHCmdsAll() {
-		if c != GetJSONCmd {
-			t.Fatalf("pull-merge made a non-read ssh call %q; convergence must be pull-only", c)
-		}
+	// The fetch was read-only: the only peer interaction is the get-state read.
+	if len(f.called) != 1 || f.called[0] != "yasyf@peer" {
+		t.Fatalf("pull-merge fetched peers %v; convergence must read each peer once", f.called)
 	}
 }
 
@@ -85,9 +97,9 @@ func TestConvergeTombstonePropagates(t *testing.T) {
 	peer := cregistry.New[state.RepoMeta]()
 	peer.Add(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, localAdd)
 	peer.Remove(h.origin, localAdd+1)
-	runner := hostregistry.NewMockRunner().OnSSH(GetJSONCmd, peerRegistryJSON(t, peer), nil)
+	f := newPeerFetcher(peer)
 
-	results, err := convergeReposWith(context.Background(), st, runner, []string{"yasyf@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, []string{"yasyf@peer"}, "")
 	if err != nil {
 		t.Fatalf("convergeRepos: %v", err)
 	}
@@ -118,31 +130,16 @@ func TestConvergeOfflinePeerSelfHeals(t *testing.T) {
 	h := newHarness(t)
 	st := h.state()
 
-	peer := cregistry.New[state.RepoMeta]()
-	peer.Add(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100)
-	// up@peer answers get-json; down@peer errors on every ssh (unscripted, no default).
-	runner := hostregistry.NewMockRunner().OnSSH(GetJSONCmd, peerRegistryJSON(t, peer), nil)
-	runner2 := &targetFailingFetcher{MockRunner: runner, failTarget: "down@peer"}
+	// up@peer answers get-state; down@peer errors on every fetch, modeling an
+	// offline host.
+	f := newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
+	f.fail["down@peer"] = true
 
-	results, err := convergeReposWith(context.Background(), st, runner2, []string{"down@peer", "up@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, []string{"down@peer", "up@peer"}, "")
 	if err != nil {
 		t.Fatalf("an offline peer must not abort the pass: %v", err)
 	}
 	if res := resultFor(t, results, "alpha"); res.Err != nil || res.Action != ActionCloned {
 		t.Fatalf("reachable peer's repo did not converge: %+v", res)
 	}
-}
-
-// targetFailingFetcher forces ssh to one target to fail, modeling an offline peer
-// while another answers.
-type targetFailingFetcher struct {
-	*hostregistry.MockRunner
-	failTarget string
-}
-
-func (f *targetFailingFetcher) SSH(ctx context.Context, target, cmd string) (string, error) {
-	if target == f.failTarget {
-		return "", context.DeadlineExceeded
-	}
-	return f.MockRunner.SSH(ctx, target, cmd)
 }

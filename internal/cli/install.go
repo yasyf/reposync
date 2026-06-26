@@ -26,9 +26,10 @@ const manifestsDirName = "manifests"
 const watchDebounce = 3 * time.Second
 
 // reposyncManifest is the declarative registration synckitd reads to drive reposync:
-// the list command it polls for watch items and the args-only action templates it
-// renders (synckitd prepends the reposync binary). The notify action is a converging
-// reconcile tagged with the peer, not a bare single-repo sync.
+// the watch backend it subscribes through and the stdio service it starts to reach
+// reposync's typed sync contract. synckitd spawns `reposync rpc-serve` over stdio and
+// drives list/reconcile/sync/get-state over that typed RPC, so no argv template or
+// shell interpolation is involved. reposync has no resident helper or launchd agent.
 func reposyncManifest() manifest.Manifest {
 	return manifest.Manifest{
 		Name:   state.ToolName,
@@ -37,13 +38,10 @@ func reposyncManifest() manifest.Manifest {
 		Watch: manifest.WatchSpec{
 			Backend:  "watchman",
 			Debounce: codec.Duration(watchDebounce),
-			ListCmd:  "list --json",
 		},
-		Actions: manifest.ActionSpec{
-			Reconcile: "reconcile",
-			Sync:      "reconcile --origin {{.Origin}}",
-			Fetch:     "state get-json",
-			Apply:     "state apply-json",
+		Service: manifest.ServiceSpec{
+			Transport: "stdio",
+			ServeArgs: []string{"rpc-serve"},
 		},
 	}
 }

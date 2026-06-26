@@ -8,15 +8,10 @@ import (
 
 	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
-	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/state"
 )
-
-// GetJSONCmd is the SSH command the Fetcher runs on a peer to read its convergent
-// repo registry straight from state.json — daemon-independent, so a pass self-heals
-// while a peer's daemon is down.
-const GetJSONCmd = "reposync state get-json"
 
 // repoDriver implements synckit converge.Driver[state.RepoMeta] for the propagating
 // (origin-keyed) repo registry: it reads and writes that registry inside reposync's
@@ -56,21 +51,22 @@ func repoFor(origin string, entry cregistry.Entry[state.RepoMeta]) state.Repo {
 	return state.Repo{Relpath: entry.Value.Relpath, Origin: origin, Trunk: entry.Value.Trunk, LocalOnly: entry.Value.LocalOnly}
 }
 
-// sshFetcher reads a peer's convergent repo registry by running GetJSONCmd over ssh
-// and parsing its JSON — READ-ONLY, the pull side of pull-merge. It never writes to
-// the peer.
-type sshFetcher struct {
-	runner hostregistry.Runner
-}
+// sshFetcher reads a peer's propagating repo registry over the typed sync contract:
+// it spawns `reposync rpc-serve` on the peer over ssh and calls svc.get-state —
+// READ-ONLY, the pull side of pull-merge. It never writes to the peer. The transport
+// self-heals while a peer's daemon is down, since rpc-serve reads state.json directly.
+type sshFetcher struct{}
 
-// Fetch returns peer's propagating repo registry, read straight from the peer's
-// state.json via the daemon-independent get-json command.
-func (f sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[state.RepoMeta], error) {
-	out, err := f.runner.SSH(ctx, peer, GetJSONCmd)
+// Fetch returns peer's propagating repo registry, read over a one-shot ssh-stdio rpc
+// session to the peer's rpc-serve bridge.
+func (sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[state.RepoMeta], error) {
+	c := syncservice.NewClient(syncservice.SSHStdio(peer, "reposync rpc-serve"))
+	defer func() { _ = c.Close() }()
+	raw, err := c.GetState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetch repo registry from %s: %w", peer, err)
 	}
-	reg, err := state.DecodeRepoRegistry([]byte(out))
+	reg, err := state.DecodeRepoRegistry(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse repo registry from %s: %w", peer, err)
 	}
@@ -81,12 +77,12 @@ func (f sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[
 // pull-merge every peer, persist the converged registry, then clone-or-sync each
 // present repo. state.WithLock wraps the whole pass.
 func convergeRepos(ctx context.Context, st *state.State, peers []string, origin string) ([]Result, error) {
-	return convergeReposWith(ctx, st, hostregistry.NewExecRunner(), peers, origin)
+	return convergeReposWith(ctx, st, sshFetcher{}, peers, origin)
 }
 
-// convergeReposWith is convergeRepos with the ssh runner injected so tests can drive
+// convergeReposWith is convergeRepos with the peer fetcher injected so tests can drive
 // the pull-merge against a mock peer without real ssh.
-func convergeReposWith(ctx context.Context, st *state.State, runner hostregistry.Runner, peers []string, origin string) ([]Result, error) {
+func convergeReposWith(ctx context.Context, st *state.State, f converge.Fetcher[state.RepoMeta], peers []string, origin string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
 		return nil, err
@@ -95,7 +91,6 @@ func convergeReposWith(ctx context.Context, st *state.State, runner hostregistry
 	defer func() { _ = os.RemoveAll(tmpRoot) }()
 
 	d := &repoDriver{st: st, dl: dl, tmpRoot: tmpRoot}
-	f := sshFetcher{runner: runner}
 	items, err := converge.Reconcile(ctx, state.WithLock, d, f, peers, origin)
 	if err != nil {
 		return nil, err
