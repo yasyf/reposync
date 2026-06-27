@@ -68,7 +68,7 @@ func TestSortRepoItems(t *testing.T) {
 }
 
 func TestApplyStatusGenerationGuard(t *testing.T) {
-	m := newReposModel(Options{})
+	m := newReposModel()
 	m.generation = 5
 	m.setRepoItems([]list.Item{
 		repoItem{cand: discover.Candidate{Relpath: "a"}},
@@ -89,7 +89,7 @@ func TestApplyStatusGenerationGuard(t *testing.T) {
 }
 
 func TestApplyStatusError(t *testing.T) {
-	m := newReposModel(Options{})
+	m := newReposModel()
 	m.generation = 1
 	m.setRepoItems([]list.Item{repoItem{cand: discover.Candidate{Relpath: "a"}}})
 
@@ -102,7 +102,7 @@ func TestApplyStatusError(t *testing.T) {
 }
 
 func TestApplyStatusRefineSorts(t *testing.T) {
-	m := newReposModel(Options{})
+	m := newReposModel()
 	m.generation = 1
 	now := time.Now()
 	m.setRepoItems([]list.Item{

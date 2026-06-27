@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yasyf/reposync/internal/tui"
-	"github.com/yasyf/synckit/hostregistry"
 )
 
 // Execute builds and runs the reposync root command under a context canceled on
@@ -41,7 +40,7 @@ func newRoot(version string) *cobra.Command {
 			if !isInteractive() {
 				return cmd.Help()
 			}
-			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: hostregistry.NewExecRunner()})
+			return tui.Run(cmd.Context(), version)
 		},
 	}
 	root.AddCommand(

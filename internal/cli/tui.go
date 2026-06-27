@@ -7,7 +7,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/yasyf/reposync/internal/tui"
-	"github.com/yasyf/synckit/hostregistry"
 )
 
 // isInteractive reports whether stdin is a terminal, gating the bare-command
@@ -23,7 +22,7 @@ func newTUICmd(version string) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return tui.Run(cmd.Context(), tui.Options{Version: version, Runner: hostregistry.NewExecRunner()})
+			return tui.Run(cmd.Context(), version)
 		},
 	}
 }

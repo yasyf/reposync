@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-27
+
+### Changed
+- Adopt synckit v0.4.0's shared `tui` package. The terminal-UI shell and the Hosts tab now live in
+  synckit (so every consumer shares them); reposync keeps only its Repos content screen, refactored
+  to implement the exported `tui.Screen` on the shared primitives. The synckit host-discovery fixes
+  ride along: the local Mac no longer lists itself in Hosts, and a peer that has the daemon installed
+  reads "installed" instead of "reachable, not installed".
+
 ## [0.9.0] - 2026-06-26
 
 ### Changed
@@ -38,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/yasyf/reposync/releases/tag/v0.10.0
 [0.9.0]: https://github.com/yasyf/reposync/releases/tag/v0.9.0
 [0.8.1]: https://github.com/yasyf/reposync/releases/tag/v0.8.1
 [0.8.0]: https://github.com/yasyf/reposync/releases/tag/v0.8.0

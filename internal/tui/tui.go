@@ -1,29 +1,21 @@
-// Package tui is the interactive terminal UI launched by bare `reposync` on a
-// TTY: two discover-toggle-apply screens for enabling repos and managing hosts.
+// Package tui wires reposync's Repos content screen into the shared synckit TUI,
+// which supplies the tab router, header, and the built-in Hosts tab.
 package tui
 
 import (
 	"context"
-	"errors"
-
-	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yasyf/synckit/hostregistry"
+	synckittui "github.com/yasyf/synckit/tui"
 )
 
-// Options configures a TUI run.
-type Options struct {
-	Version string
-	Runner  hostregistry.Runner
-}
-
-// Run launches the interactive TUI and blocks until the user quits or ctx is
-// canceled. A ctx-driven teardown (ctrl-c, SIGTERM) is a clean exit.
-func Run(ctx context.Context, opts Options) error {
-	p := tea.NewProgram(newRootModel(opts), tea.WithContext(ctx), tea.WithAltScreen())
-	_, err := p.Run()
-	if errors.Is(err, tea.ErrProgramKilled) || errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
+// Run launches the interactive TUI: reposync's Repos screen plus the shared Hosts
+// tab. It blocks until the user quits or ctx is canceled.
+func Run(ctx context.Context, version string) error {
+	return synckittui.Run(ctx, synckittui.Options{
+		Brand:   "reposync",
+		Version: version,
+		Screens: []synckittui.Screen{newReposModel()},
+		Runner:  hostregistry.NewExecRunner(),
+	})
 }

@@ -12,6 +12,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	synckittui "github.com/yasyf/synckit/tui"
+
 	"github.com/yasyf/reposync/internal/apply"
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
@@ -29,10 +31,9 @@ type confirmState struct {
 }
 
 type reposModel struct {
-	opts     Options
 	list     list.Model
 	allItems []list.Item
-	filter   filterBar
+	filter   synckittui.FilterBar
 	loading  bool
 	applying bool
 	spin     spinner.Model
@@ -55,7 +56,7 @@ type reposModel struct {
 // for its status line.
 const reposReserve = 1
 
-func newReposModel(opts Options) reposModel {
+func newReposModel() reposModel {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	l := list.New(nil, repoDelegate{}, 0, 0)
 	l.SetShowTitle(false)
@@ -63,7 +64,7 @@ func newReposModel(opts Options) reposModel {
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	return reposModel{opts: opts, list: l, filter: newFilterBar(), loading: true, spin: sp, keys: newReposKeyMap()}
+	return reposModel{list: l, filter: synckittui.NewFilterBar(), loading: true, spin: sp, keys: newReposKeyMap()}
 }
 
 func (m reposModel) Title() string { return "Repos" }
@@ -75,7 +76,7 @@ func (m reposModel) Help() []key.Binding {
 	return []key.Binding{m.keys.Filter, m.keys.Toggle, m.keys.Apply, m.keys.Sort}
 }
 
-func (m reposModel) wantsKey(tea.KeyMsg) bool {
+func (m reposModel) WantsKey(tea.KeyMsg) bool {
 	return m.confirm != nil || m.filter.Focused()
 }
 
@@ -83,17 +84,17 @@ func (m reposModel) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, discoverReposCmd())
 }
 
-func (m reposModel) Update(msg tea.Msg) (screen, tea.Cmd) {
+func (m reposModel) Update(msg tea.Msg) (synckittui.Screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = splitDims(msg.Width, msg.Height-filterBarLines-reposReserve)
+		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = synckittui.SplitDims(msg.Width, msg.Height-synckittui.FilterBarLines-reposReserve)
 		m.list.SetSize(m.mdListW, m.mdHeight)
 		return m, nil
 
 	case reposLoadedMsg:
 		m.loading = false
 		if msg.err != nil {
-			m.status = statusErr.Render(msg.err.Error())
+			m.status = synckittui.StatusErr.Render(msg.err.Error())
 			return m, nil
 		}
 		m.empty = len(msg.result.Candidates) == 0
@@ -125,7 +126,7 @@ func (m reposModel) Update(msg tea.Msg) (screen, tea.Cmd) {
 	return m, cmd
 }
 
-func (m reposModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
+func (m reposModel) handleKey(msg tea.KeyMsg) (synckittui.Screen, tea.Cmd) {
 	if m.confirm != nil {
 		switch {
 		case key.Matches(msg, m.keys.Yes):
@@ -164,7 +165,7 @@ func (m reposModel) handleKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 // handleFilterKey routes keys while the filter bar holds focus: esc clears and
 // blurs, enter blurs keeping the filter, anything else edits the query and
 // re-narrows the list live.
-func (m reposModel) handleFilterKey(msg tea.KeyMsg) (screen, tea.Cmd) {
+func (m reposModel) handleFilterKey(msg tea.KeyMsg) (synckittui.Screen, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.filter.Blur()
@@ -185,7 +186,7 @@ func (m reposModel) handleFilterKey(msg tea.KeyMsg) (screen, tea.Cmd) {
 // filter and sort, keeping the cursor on the same repo.
 func (m *reposModel) refresh() tea.Cmd {
 	sel := selectedRelpath(m.list)
-	visible := filterItems(m.allItems, m.filter.Value())
+	visible := synckittui.FilterItems(m.allItems, m.filter.Value())
 	sortRepoItems(visible, m.sortMode)
 	cmd := m.list.SetItems(visible)
 	selectRelpath(&m.list, sel)
@@ -202,7 +203,7 @@ func (m *reposModel) setRepoItems(items []list.Item) {
 // loadItems sorts freshly discovered candidates by the active mode, shows them
 // immediately, and fans out an async status probe per repo stamped with the
 // current generation so a superseded scan's late results are ignored.
-func (m reposModel) loadItems(cands []discover.Candidate) (screen, tea.Cmd) {
+func (m reposModel) loadItems(cands []discover.Candidate) (synckittui.Screen, tea.Cmd) {
 	m.generation++
 	gen := m.generation
 
@@ -220,7 +221,7 @@ func (m reposModel) loadItems(cands []discover.Candidate) (screen, tea.Cmd) {
 
 // applyStatus folds one async probe result into its canonical row and re-renders
 // under the active filter and sort. Results from a superseded scan are dropped.
-func (m reposModel) applyStatus(msg repoStatusMsg) (screen, tea.Cmd) {
+func (m reposModel) applyStatus(msg repoStatusMsg) (synckittui.Screen, tea.Cmd) {
 	if msg.generation != m.generation {
 		return m, nil
 	}
@@ -246,13 +247,13 @@ func (m reposModel) applyStatus(msg repoStatusMsg) (screen, tea.Cmd) {
 
 // cycleSort advances to the next sort mode and re-renders, preserving the
 // selected repo.
-func (m reposModel) cycleSort() (screen, tea.Cmd) {
+func (m reposModel) cycleSort() (synckittui.Screen, tea.Cmd) {
 	m.sortMode = m.sortMode.next()
 	cmd := m.refresh()
 	return m, cmd
 }
 
-func (m reposModel) toggle() (screen, tea.Cmd) {
+func (m reposModel) toggle() (synckittui.Screen, tea.Cmd) {
 	it, ok := m.list.SelectedItem().(repoItem)
 	if !ok {
 		return m, nil
@@ -270,7 +271,7 @@ func (m reposModel) toggle() (screen, tea.Cmd) {
 	return m, cmd
 }
 
-func (m reposModel) apply() (screen, tea.Cmd) {
+func (m reposModel) apply() (synckittui.Screen, tea.Cmd) {
 	var sel apply.RepoSelection
 	for _, raw := range m.allItems {
 		it := raw.(repoItem)
@@ -282,7 +283,7 @@ func (m reposModel) apply() (screen, tea.Cmd) {
 		}
 	}
 	if len(sel.Enable) == 0 && len(sel.Disable) == 0 {
-		m.status = statusInfo.Render("nothing to apply")
+		m.status = synckittui.StatusInfo.Render("nothing to apply")
 		return m, nil
 	}
 	if len(sel.Disable) > 0 {
@@ -301,18 +302,18 @@ func (m reposModel) View() string {
 		return m.spin.View() + " Scanning…"
 	}
 	if m.empty {
-		return dim.Render(fmt.Sprintf("No git/jj repos found under %s.", m.scanDir))
+		return synckittui.Dim.Render(fmt.Sprintf("No git/jj repos found under %s.", m.scanDir))
 	}
 
-	split := masterDetail(m.list.View(), renderRepoDetail(m.list.SelectedItem()), m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail)
+	split := synckittui.MasterDetail(m.list.View(), renderRepoDetail(m.list.SelectedItem()), m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail)
 	body := lipgloss.JoinVertical(lipgloss.Left, m.filter.View(len(m.list.Items()), len(m.allItems)), split)
 	if m.confirm != nil {
-		body = lipgloss.JoinVertical(lipgloss.Left, body, confirmBox.Render(m.confirm.prompt))
+		body = lipgloss.JoinVertical(lipgloss.Left, body, synckittui.ConfirmBox.Render(m.confirm.prompt))
 	}
 	if m.applying {
 		body = lipgloss.JoinVertical(lipgloss.Left, body, m.spin.View()+" Applying…")
 	}
-	context := dim.Render("↕ " + m.sortMode.String())
+	context := synckittui.Dim.Render("↕ " + m.sortMode.String())
 	if m.status != "" {
 		context = m.status
 	}
@@ -357,7 +358,7 @@ func scanDir() string {
 
 func applySummary(results []reconcile.Result, err error) string {
 	if errors.Is(err, state.ErrLockBusy) {
-		return statusErr.Render("reconcile in progress, try again")
+		return synckittui.StatusErr.Render("reconcile in progress, try again")
 	}
 	var cloned, present, errs int
 	for _, r := range results {
@@ -372,10 +373,10 @@ func applySummary(results []reconcile.Result, err error) string {
 	}
 	summary := fmt.Sprintf("applied: %d cloned, %d present, %d error(s)", cloned, present, errs)
 	if err != nil {
-		return statusErr.Render(summary + ": " + err.Error())
+		return synckittui.StatusErr.Render(summary + ": " + err.Error())
 	}
 	if errs > 0 {
-		return statusErr.Render(summary)
+		return synckittui.StatusErr.Render(summary)
 	}
-	return statusOK.Render(summary)
+	return synckittui.StatusOK.Render(summary)
 }

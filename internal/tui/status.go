@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
+	synckittui "github.com/yasyf/synckit/tui"
+
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
@@ -34,15 +36,15 @@ const (
 func (s repoStatus) glyph() string {
 	switch s {
 	case statusClean:
-		return badgeClean.Render("✓")
+		return synckittui.BadgeClean.Render("✓")
 	case statusActive:
-		return badgeSync.Render("⟳")
+		return synckittui.BadgeSync.Render("⟳")
 	case statusDirty:
-		return badgeDirty.Render("●")
+		return synckittui.BadgeDirty.Render("●")
 	case statusError:
-		return glyphFail.Render("✗")
+		return synckittui.GlyphFail.Render("✗")
 	default:
-		return dim.Render("·")
+		return synckittui.Dim.Render("·")
 	}
 }
 
@@ -50,15 +52,15 @@ func (s repoStatus) glyph() string {
 func (s repoStatus) label() string {
 	switch s {
 	case statusClean:
-		return badgeClean.Render("clean")
+		return synckittui.BadgeClean.Render("clean")
 	case statusActive:
-		return badgeSync.Render("active")
+		return synckittui.BadgeSync.Render("active")
 	case statusDirty:
-		return badgeDirty.Render("dirty")
+		return synckittui.BadgeDirty.Render("dirty")
 	case statusError:
-		return glyphFail.Render("error")
+		return synckittui.GlyphFail.Render("error")
 	default:
-		return dim.Render("checking…")
+		return synckittui.Dim.Render("checking…")
 	}
 }
 
