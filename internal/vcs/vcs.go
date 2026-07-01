@@ -107,6 +107,18 @@ func Clone(ctx context.Context, origin, dest string) error {
 	return nil
 }
 
+// IsWorkingCopyContention reports whether err is jj declining a working-copy
+// update because another process raced it — transient, safe to retry next cycle.
+func IsWorkingCopyContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Concurrent checkout") ||
+		strings.Contains(s, "Concurrent working copy operation") ||
+		strings.Contains(s, "Failed to check out commit")
+}
+
 // originURL resolves the origin remote via git, which works for both jj and git repos.
 func originURL(ctx context.Context, path string) (string, error) {
 	out, err := run(ctx, path, "git", "-C", path, "remote", "get-url", "origin")

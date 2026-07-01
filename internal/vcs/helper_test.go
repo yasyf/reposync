@@ -143,6 +143,28 @@ func (f *fixture) snapshotJJ(repo string) {
 	f.runJJ(repo, "status")
 }
 
+// jjOpHead returns the current jj op log head id, for asserting a probe
+// appended no operation.
+func (f *fixture) jjOpHead(repo string) string {
+	f.t.Helper()
+	return strings.TrimSpace(f.runJJ(repo, "op", "log", "--no-graph", "--ignore-working-copy", "-n", "1", "-T", `id.short() ++ "\n"`))
+}
+
+// jjSnapshotOps counts the "snapshot working copy" operations in the op log,
+// for asserting a code path never snapshotted even when it records other ops
+// (e.g. a fetch).
+func (f *fixture) jjSnapshotOps(repo string) int {
+	f.t.Helper()
+	out := f.runJJ(repo, "op", "log", "--no-graph", "--ignore-working-copy", "-T", `description.first_line() ++ "\n"`)
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "snapshot working copy" {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fixture) configGit(dir string) {
 	f.t.Helper()
 	f.runGit(dir, "config", "user.name", "Test User")

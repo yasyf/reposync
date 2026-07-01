@@ -142,7 +142,7 @@ func TestJJInUseDirtyNoClobber(t *testing.T) {
 	f.writeFile(dest, "WORK.txt", "in progress\n")
 	f.snapshotJJ(dest)
 
-	busy, reason, err := r.InUse(context.Background(), time.Hour)
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
 		t.Fatalf("in use: %v", err)
 	}
@@ -153,6 +153,9 @@ func TestJJInUseDirtyNoClobber(t *testing.T) {
 		t.Fatalf("reason = %q, want dirty working copy", reason)
 	}
 
+	// Move trunk so Advance reaches the disposability check rather than
+	// short-circuiting on an unmoved trunk.
+	f.advanceOrigin("v2")
 	opsBefore := f.runJJ(dest, "op", "log", "--no-graph", "--ignore-working-copy", "-T", `id.short() ++ "\n"`)
 	// Advance must return not-disposable and leave the change and op log intact.
 	got, err := r.Advance(context.Background())
@@ -174,9 +177,12 @@ func TestJJInUseDirtyNoClobber(t *testing.T) {
 	}
 }
 
-// TestJJInUseUnsnapshottedDirty edits a tracked file on disk and calls InUse with
-// NO intervening jj command. The gate must snapshot the live edit into @ and report
-// busy; with --ignore-working-copy on the dirty check it would miss the edit.
+// TestJJInUseUnsnapshottedDirty edits a tracked file on disk with NO intervening
+// jj command. InUse never snapshots, so the edit is invisible to its dirty probe:
+// within the idle window the recency gate covers it (a real edit follows real jj
+// ops in practice), and past the window InUse reads not-busy without appending an
+// op. The authoritative no-clobber guard for this state is Advance's true
+// snapshot, proven by TestJJUnsnapshottedNoClobber.
 func TestJJInUseUnsnapshottedDirty(t *testing.T) {
 	f := newFixture(t)
 	dest := f.jjClone(filepath.Join(f.root, "clone"))
@@ -185,22 +191,38 @@ func TestJJInUseUnsnapshottedDirty(t *testing.T) {
 	// Modify a tracked file directly on disk; run no jj command before InUse.
 	f.writeFile(dest, "README.md", "hello\nedited but not snapshotted\n")
 
+	// Within the idle window the clone's recent real ops read as activity.
 	busy, reason, err := r.InUse(context.Background(), time.Hour)
 	if err != nil {
 		t.Fatalf("in use: %v", err)
 	}
 	if !busy {
-		t.Fatal("InUse = false, want busy on unsnapshotted on-disk edit")
+		t.Fatal("InUse = false, want busy on recent clone ops")
 	}
-	if reason != "dirty working copy" {
-		t.Fatalf("reason = %q, want dirty working copy", reason)
+	if !strings.HasPrefix(reason, "recent activity: ") {
+		t.Fatalf("reason = %q, want recent activity prefix", reason)
+	}
+
+	// Past the idle window the probe reads the last-recorded @ without
+	// snapshotting: not busy, and no op is appended.
+	head := f.jjOpHead(dest)
+	busy, reason, err = r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy: the probe must not snapshot the on-disk edit", reason)
+	}
+	if got := f.jjOpHead(dest); got != head {
+		t.Fatalf("op head moved %q -> %q: InUse snapshotted the working copy", head, got)
 	}
 }
 
 // TestJJUnsnapshottedNoClobber proves the no-clobber guarantee over the
-// unsnapshotted window: a tracked file is edited on disk (no jj command), origin
-// advances, and the sync-level InUse->skip path leaves the edit untouched on disk
-// and retained once @ is snapshotted.
+// unsnapshotted window under snapshot-free InUse: a tracked file is edited on
+// disk (no jj command), origin advances, and the op log reads idle. Advance's
+// true disposability snapshot — the authoritative guard — records the edit and
+// declines, leaving it intact on disk and retained in @.
 func TestJJUnsnapshottedNoClobber(t *testing.T) {
 	f := newFixture(t)
 	dest := f.jjClone(filepath.Join(f.root, "clone"))
@@ -210,25 +232,129 @@ func TestJJUnsnapshottedNoClobber(t *testing.T) {
 	f.writeFile(dest, "README.md", edited)
 	f.advanceOrigin("v2")
 
-	// Mirror syncOne: InUse busy => caller skips, Advance is never reached.
-	busy, reason, err := r.InUse(context.Background(), time.Hour)
+	// Snapshot-free InUse cannot see the unsnapshotted edit once the ops are idle.
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
 		t.Fatalf("in use: %v", err)
 	}
-	if !busy {
-		t.Fatal("InUse = false, want busy so the repo is skipped")
-	}
-	if reason != "dirty working copy" {
-		t.Fatalf("reason = %q, want dirty working copy", reason)
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy so Advance is the guard under test", reason)
 	}
 
-	// The edit is intact on disk and retained in @ after a snapshot.
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable (true snapshot must see the edit)", got)
+	}
+
+	// The edit is intact on disk and retained in @.
 	if got := f.readFile(dest, "README.md"); got != edited {
 		t.Fatalf("README.md on disk = %q, want %q", got, edited)
 	}
 	diff := f.runJJ(dest, "diff", "-r", "@", "--git")
 	if !strings.Contains(diff, "live edit") {
 		t.Fatalf("jj diff does not retain the live edit:\n%s", diff)
+	}
+}
+
+// TestJJInUseSnapshotFree proves InUse appends no operation on any probe path:
+// clean, recorded-dirty, and recorded generated-only working copies.
+func TestJJInUseSnapshotFree(t *testing.T) {
+	cases := []struct {
+		id         string
+		generated  bool
+		setup      func(f *fixture, dest string)
+		wantBusy   bool
+		wantReason string
+	}{
+		{"clean", false, func(*fixture, string) {}, false, ""},
+		{"recorded dirty", false, func(f *fixture, dest string) {
+			f.writeFile(dest, "WORK.txt", "in progress\n")
+			f.snapshotJJ(dest)
+		}, true, "dirty working copy"},
+		{"generated only", true, func(f *fixture, dest string) {
+			f.writeFile(dest, "build.gen", "local generated edit\n")
+			f.snapshotJJ(dest)
+		}, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			f := newFixture(t)
+			if c.generated {
+				f.seedGenerated()
+			}
+			dest := f.jjClone(filepath.Join(f.root, "clone"))
+			r := openJJ(t, dest)
+			c.setup(f, dest)
+
+			head := f.jjOpHead(dest)
+			busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+			if err != nil {
+				t.Fatalf("in use: %v", err)
+			}
+			if busy != c.wantBusy || reason != c.wantReason {
+				t.Fatalf("InUse = (%v, %q), want (%v, %q)", busy, reason, c.wantBusy, c.wantReason)
+			}
+			if got := f.jjOpHead(dest); got != head {
+				t.Fatalf("op head moved %q -> %q: InUse snapshotted the working copy", head, got)
+			}
+		})
+	}
+}
+
+// TestJJInUseRecencyGateFirst proves a fresh real op reads as busy before any
+// working-copy probe runs: no op is appended even with a live on-disk edit that
+// a snapshotting probe would have recorded.
+func TestJJInUseRecencyGateFirst(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.runJJ(dest, "describe", "-m", "real work", "--ignore-working-copy")
+	f.writeFile(dest, "WORK.txt", "live edit\n")
+
+	head := f.jjOpHead(dest)
+	busy, reason, err := r.InUse(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy on a fresh real op")
+	}
+	if !strings.HasPrefix(reason, "recent activity: ") {
+		t.Fatalf("reason = %q, want recent activity prefix", reason)
+	}
+	if got := f.jjOpHead(dest); got != head {
+		t.Fatalf("op head moved %q -> %q: InUse snapshotted the working copy", head, got)
+	}
+}
+
+// TestJJAdvanceTrunkNotMovedSnapshotFree proves the steady-state Advance path
+// never snapshots: an unmoved trunk short-circuits to up-to-date before the
+// disposability probe, leaving a live on-disk edit unrecorded and intact.
+func TestJJAdvanceTrunkNotMovedSnapshotFree(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	const edited = "hello\nlive edit\n"
+	f.writeFile(dest, "README.md", edited)
+
+	snapshots := f.jjSnapshotOps(dest)
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeUpToDate {
+		t.Fatalf("outcome = %q, want up-to-date", got)
+	}
+	if n := f.jjSnapshotOps(dest); n != snapshots {
+		t.Fatalf("snapshot ops %d -> %d: Advance snapshotted with trunk unmoved", snapshots, n)
+	}
+	if got := f.readFile(dest, "README.md"); got != edited {
+		t.Fatalf("README.md on disk = %q, want %q", got, edited)
 	}
 }
 

@@ -2,6 +2,8 @@ package sync
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,6 +218,34 @@ func (h *harness) readFile(dir, name string) string {
 	return string(data)
 }
 
+// TestFailureMapsContentionToBusy proves a working-copy contention error from a
+// repo op degrades to a busy skip retried next cycle, while any other error
+// surfaces unchanged.
+func TestFailureMapsContentionToBusy(t *testing.T) {
+	res := Result{Relpath: "alpha"}
+
+	contention := fmt.Errorf("jj new main: %w", errors.New("Internal error: Failed to check out commit 99366219: Concurrent checkout"))
+	got := failure(res, contention)
+	if got.Err != nil {
+		t.Fatalf("contention Err = %v, want nil", got.Err)
+	}
+	if got.Outcome != vcs.OutcomeBusy {
+		t.Fatalf("contention outcome = %q, want busy", got.Outcome)
+	}
+	if got.Reason != "working-copy contention" {
+		t.Fatalf("contention reason = %q, want working-copy contention", got.Reason)
+	}
+
+	plain := errors.New("network unreachable")
+	got = failure(res, plain)
+	if !errors.Is(got.Err, plain) {
+		t.Fatalf("plain Err = %v, want the original error", got.Err)
+	}
+	if got.Outcome != "" || got.Reason != "" {
+		t.Fatalf("plain outcome/reason = %q/%q, want empty", got.Outcome, got.Reason)
+	}
+}
+
 func resultFor(t *testing.T, results []Result, relpath string) Result {
 	t.Helper()
 	for _, res := range results {
@@ -255,11 +285,12 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("beta")
 	h.advanceOrigin("v2")
-	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy.
+	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy. The
+	// default 1ns idle threshold keeps the recency gate out of the way so the
+	// dirty probe is what fires.
 	h.writeFile(dest, "WORK.txt", "in progress\n")
 	h.runJJ(dest, "status")
 	st := h.state(state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"})
-	st.Settings.IdleThreshold = state.Duration(time.Hour)
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -506,11 +537,11 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
-	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy.
+	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy; the
+	// default 1ns idle threshold leaves the dirty probe as the deciding gate.
 	h.writeFile(dest, "WORK.txt", "in progress\n")
 	h.runJJ(dest, "status")
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	st.Settings.IdleThreshold = state.Duration(time.Hour)
 
 	originBefore := h.originMain()
 	results, err := Sync(context.Background(), st, "", "")

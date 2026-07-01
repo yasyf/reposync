@@ -91,8 +91,7 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 
 	busy, reason, err := r.InUse(ctx, idle)
 	if err != nil {
-		res.Err = err
-		return res
+		return failure(res, err)
 	}
 	if busy {
 		res.Outcome = vcs.OutcomeBusy
@@ -112,8 +111,7 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 
 	outcome, err := r.Advance(ctx)
 	if err != nil {
-		res.Err = err
-		return res
+		return failure(res, err)
 	}
 	res.Outcome = outcome
 
@@ -122,19 +120,31 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 	}
 	busy, _, err = r.InUse(ctx, pushAfter)
 	if err != nil {
-		res.Err = err
-		return res
+		return failure(res, err)
 	}
 	if busy {
 		return res
 	}
 	pushed, err := r.PushTrunk(ctx)
 	if err != nil {
-		res.Err = err
-		return res
+		return failure(res, err)
 	}
 	if pushed == vcs.OutcomePushed {
 		res.Outcome = vcs.OutcomePushed
 	}
+	return res
+}
+
+// failure fills res for a failed repo op, mapping working-copy contention —
+// another jj process winning the sub-second race after the idle check — to
+// OutcomeBusy with no error, so the next converge retries instead of surfacing
+// a transient hard failure.
+func failure(res Result, err error) Result {
+	if vcs.IsWorkingCopyContention(err) {
+		res.Outcome = vcs.OutcomeBusy
+		res.Reason = "working-copy contention"
+		return res
+	}
+	res.Err = err
 	return res
 }

@@ -42,26 +42,31 @@ func (r *jjRepo) TrunkHash(ctx context.Context) (string, error) {
 	return trunkHashViaGit(ctx, r.path, r.trunk)
 }
 
+// InUse never snapshots the working copy: every probe runs --ignore-working-copy
+// so a concurrent interactive jj command (e.g. a push mid-checkout) is never
+// raced into a "Concurrent checkout" failure. The recency gate runs first, and
+// the dirty read is a heuristic over the last-recorded @; the authoritative
+// stranding guards stay in Advance's true snapshots.
 func (r *jjRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, error) {
-	dirty, err := r.jj(ctx, "log", "-r", "@ ~ empty()", "--no-graph", "-T", `change_id ++ "\n"`)
-	if err != nil {
-		return false, "", err
-	}
-	if strings.TrimSpace(dirty) != "" {
-		generatedOnly, err := r.changedPathsGeneratedOnly(ctx)
-		if err != nil {
-			return false, "", err
-		}
-		if !generatedOnly {
-			return true, "dirty working copy", nil
-		}
-	}
 	started, desc, err := r.firstRealOp(ctx)
 	if err != nil {
 		return false, "", err
 	}
 	if !started.IsZero() && time.Since(started) < idle {
 		return true, "recent activity: " + desc, nil
+	}
+	dirty, err := r.jj(ctx, "log", "-r", "@ ~ empty()", "--no-graph", "--ignore-working-copy", "-T", `change_id ++ "\n"`)
+	if err != nil {
+		return false, "", err
+	}
+	if strings.TrimSpace(dirty) != "" {
+		generatedOnly, err := r.changedPathsGeneratedOnly(ctx, true)
+		if err != nil {
+			return false, "", err
+		}
+		if !generatedOnly {
+			return true, "dirty working copy", nil
+		}
 	}
 	return false, "", nil
 }
@@ -132,14 +137,16 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 		}
 		return "", err
 	}
+	// Steady state: return before disposable() snapshots @, so the daemon never
+	// touches the working copy unless an advance is actually needed.
+	if !moved {
+		return OutcomeUpToDate, nil
+	}
 	disposable, err := r.disposable(ctx)
 	if err != nil {
 		return "", err
 	}
 	if disposable {
-		if !moved {
-			return OutcomeUpToDate, nil
-		}
 		// An empty @ is only safe to advance when its parent is already on trunk.
 		// Sitting atop unpushed local work, jj new <trunk> would reparent the
 		// working copy onto trunk and strand that work — leave it untouched.
@@ -165,9 +172,6 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 			return "", err
 		}
 		if safe {
-			if !moved {
-				return OutcomeUpToDate, nil
-			}
 			return r.rebaseGenerated(ctx)
 		}
 	}
@@ -251,9 +255,15 @@ func conflictListPath(line string) string {
 }
 
 // changedPathsGeneratedOnly reports whether @ changes at least one path and every
-// changed path is marked linguist-generated.
-func (r *jjRepo) changedPathsGeneratedOnly(ctx context.Context) (bool, error) {
-	out, err := r.jj(ctx, "diff", "-r", "@", "--name-only")
+// changed path is marked linguist-generated. ignoreWorkingCopy reads the
+// last-recorded @ without snapshotting, for probes that must not touch the
+// working copy; mutation-gating callers pass false for a true snapshot.
+func (r *jjRepo) changedPathsGeneratedOnly(ctx context.Context, ignoreWorkingCopy bool) (bool, error) {
+	args := []string{"diff", "-r", "@", "--name-only"}
+	if ignoreWorkingCopy {
+		args = append(args, "--ignore-working-copy")
+	}
+	out, err := r.jj(ctx, args...)
 	if err != nil {
 		return false, fmt.Errorf("jj diff: %w", err)
 	}
@@ -294,7 +304,7 @@ func (r *jjRepo) generatedOnlyDirty(ctx context.Context) (bool, error) {
 	if state != wcGeneratedDirty {
 		return false, nil
 	}
-	return r.changedPathsGeneratedOnly(ctx)
+	return r.changedPathsGeneratedOnly(ctx, false)
 }
 
 func (r *jjRepo) disposable(ctx context.Context) (bool, error) {

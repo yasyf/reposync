@@ -32,14 +32,8 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if s.DefaultLocation != "~/Code" {
 		t.Errorf("DefaultLocation = %q, want ~/Code", s.DefaultLocation)
 	}
-	if got := time.Duration(s.Settings.Interval); got != 15*time.Minute {
-		t.Errorf("Interval = %s, want 15m", got)
-	}
 	if got := time.Duration(s.Settings.IdleThreshold); got != 5*time.Minute {
 		t.Errorf("IdleThreshold = %s, want 5m", got)
-	}
-	if got := time.Duration(s.Settings.WatchDebounce); got != 3*time.Second {
-		t.Errorf("WatchDebounce = %s, want 3s", got)
 	}
 	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
 		t.Errorf("RepoOpTimeout = %s, want 2m", got)
@@ -56,7 +50,7 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 	if err := os.MkdirAll(cfg, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw := `{"default_location":"~/Work","settings":{"interval":"30m"}}`
+	raw := `{"default_location":"~/Work","settings":{"idle_threshold":"10m"}}`
 	if err := os.WriteFile(filepath.Join(cfg, stateFile), []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -68,14 +62,8 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 	if s.DefaultLocation != "~/Work" {
 		t.Errorf("DefaultLocation = %q, want ~/Work", s.DefaultLocation)
 	}
-	if got := time.Duration(s.Settings.Interval); got != 30*time.Minute {
-		t.Errorf("Interval = %s, want 30m", got)
-	}
-	if got := time.Duration(s.Settings.IdleThreshold); got != 5*time.Minute {
-		t.Errorf("IdleThreshold = %s, want default 5m", got)
-	}
-	if got := time.Duration(s.Settings.WatchDebounce); got != 3*time.Second {
-		t.Errorf("WatchDebounce = %s, want default 3s", got)
+	if got := time.Duration(s.Settings.IdleThreshold); got != 10*time.Minute {
+		t.Errorf("IdleThreshold = %s, want explicit 10m", got)
 	}
 	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
 		t.Errorf("RepoOpTimeout = %s, want default 2m", got)
@@ -107,9 +95,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	want := New()
 	want.DefaultLocation = "~/Code"
 	want.Settings = Settings{
-		Interval:      Duration(15 * time.Minute),
 		IdleThreshold: Duration(5 * time.Minute),
-		WatchDebounce: Duration(3 * time.Second),
 		RepoOpTimeout: Duration(2 * time.Minute),
 		PushAfter:     Duration(24 * time.Hour),
 	}

@@ -22,8 +22,10 @@ import (
 const manifestsDirName = "manifests"
 
 // watchDebounce is the quiet window synckitd waits after a repo's VCS metadata
-// changes before triggering a converge, coalescing a burst of fetch writes.
-const watchDebounce = 3 * time.Second
+// changes before triggering a converge: long enough to coalesce a burst of
+// fetch writes and to outlast an interactive push, so the converge fires after
+// it instead of mid-flight.
+const watchDebounce = 15 * time.Second
 
 // reposyncManifest is the declarative registration synckitd reads to drive reposync:
 // the watch backend it subscribes through and the stdio service it starts to reach

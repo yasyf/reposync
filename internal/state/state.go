@@ -35,9 +35,7 @@ const ToolName = "reposync"
 
 const (
 	defaultLocation      = "~/Code"
-	defaultInterval      = 15 * time.Minute
 	defaultIdleThreshold = 5 * time.Minute
-	defaultWatchDebounce = 3 * time.Second
 	defaultRepoOpTimeout = 2 * time.Minute
 	defaultPushAfter     = 24 * time.Hour
 )
@@ -53,11 +51,9 @@ var ErrLockBusy = hostregistry.ErrLockBusy
 // github.com/yasyf/synckit/codec so callers in this module spell it state.Duration.
 type Duration = codec.Duration
 
-// Settings holds the cadence knobs read by the sync, reconcile, and watch loops.
+// Settings holds the cadence knobs read by the sync and reconcile loops.
 type Settings struct {
-	Interval      codec.Duration `json:"interval"`
 	IdleThreshold codec.Duration `json:"idle_threshold"`
-	WatchDebounce codec.Duration `json:"watch_debounce"`
 	RepoOpTimeout codec.Duration `json:"repo_op_timeout"`
 	PushAfter     codec.Duration `json:"push_after"`
 }
@@ -272,14 +268,8 @@ func (s *State) applyDefaults() {
 	if s.DefaultLocation == "" {
 		s.DefaultLocation = defaultLocation
 	}
-	if s.Settings.Interval == 0 {
-		s.Settings.Interval = Duration(defaultInterval)
-	}
 	if s.Settings.IdleThreshold == 0 {
 		s.Settings.IdleThreshold = Duration(defaultIdleThreshold)
-	}
-	if s.Settings.WatchDebounce == 0 {
-		s.Settings.WatchDebounce = Duration(defaultWatchDebounce)
 	}
 	if s.Settings.RepoOpTimeout == 0 {
 		s.Settings.RepoOpTimeout = Duration(defaultRepoOpTimeout)
