@@ -17,6 +17,13 @@ import (
 
 const concurrency = 8
 
+// Sync-level dispositions: outcomes sync itself assigns from the InUse and
+// HasTrunk gates, which vcs.Advance never returns.
+const (
+	OutcomeBusy    = vcs.Outcome("busy")
+	OutcomeNoTrunk = vcs.Outcome("no-trunk")
+)
+
 // Result reports what Sync did to one registered repo.
 type Result struct {
 	Relpath string
@@ -94,7 +101,7 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 		return failure(res, err)
 	}
 	if busy {
-		res.Outcome = vcs.OutcomeBusy
+		res.Outcome = OutcomeBusy
 		res.Reason = reason
 		return res
 	}
@@ -105,7 +112,7 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 		return res
 	}
 	if !hasTrunk {
-		res.Outcome = vcs.OutcomeNoTrunk
+		res.Outcome = OutcomeNoTrunk
 		return res
 	}
 
@@ -141,7 +148,7 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 // a transient hard failure.
 func failure(res Result, err error) Result {
 	if vcs.IsWorkingCopyContention(err) {
-		res.Outcome = vcs.OutcomeBusy
+		res.Outcome = OutcomeBusy
 		res.Reason = "working-copy contention"
 		return res
 	}

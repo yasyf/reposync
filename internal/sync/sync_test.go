@@ -229,7 +229,7 @@ func TestFailureMapsContentionToBusy(t *testing.T) {
 	if got.Err != nil {
 		t.Fatalf("contention Err = %v, want nil", got.Err)
 	}
-	if got.Outcome != vcs.OutcomeBusy {
+	if got.Outcome != OutcomeBusy {
 		t.Fatalf("contention outcome = %q, want busy", got.Outcome)
 	}
 	if got.Reason != "working-copy contention" {
@@ -300,7 +300,7 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("beta err: %v", res.Err)
 	}
-	if res.Outcome != vcs.OutcomeBusy {
+	if res.Outcome != OutcomeBusy {
 		t.Fatalf("beta outcome = %q, want busy", res.Outcome)
 	}
 	if res.Reason != "dirty working copy" {
@@ -338,7 +338,7 @@ func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("beta err: %v", res.Err)
 	}
-	if res.Outcome != vcs.OutcomeBusy {
+	if res.Outcome != OutcomeBusy {
 		t.Fatalf("beta outcome = %q, want busy", res.Outcome)
 	}
 	if res.Reason != "git refs locked" {
@@ -368,7 +368,7 @@ func TestSyncNoTrunkRepo(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("gamma err: %v", res.Err)
 	}
-	if res.Outcome != vcs.OutcomeNoTrunk {
+	if res.Outcome != OutcomeNoTrunk {
 		t.Fatalf("gamma outcome = %q, want no-trunk", res.Outcome)
 	}
 }
@@ -590,7 +590,7 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("alpha err: %v", res.Err)
 	}
-	if res.Outcome != vcs.OutcomeBusy {
+	if res.Outcome != OutcomeBusy {
 		t.Fatalf("alpha outcome = %q, want busy", res.Outcome)
 	}
 	if got := h.originMain(); got != originBefore {

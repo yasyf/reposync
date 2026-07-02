@@ -22,7 +22,7 @@ var ErrNoOrigin = errors.New("no origin remote")
 // ErrNotARepo is returned by Open when path is neither a colocated jj nor a git repo.
 var ErrNotARepo = errors.New("not a repo")
 
-// Outcome reports what Advance did to the working copy.
+// Outcome reports what Advance or PushTrunk did to the repo.
 type Outcome string
 
 const (
@@ -33,10 +33,6 @@ const (
 	// OutcomeDiverged means local trunk and origin both moved; the advance was
 	// declined and the repo left untouched.
 	OutcomeDiverged Outcome = "diverged"
-	// OutcomeBusy means the repo was in use and was left untouched.
-	OutcomeBusy Outcome = "busy"
-	// OutcomeNoTrunk means no tracked origin trunk exists to advance onto.
-	OutcomeNoTrunk Outcome = "no-trunk"
 	// OutcomeNotDisposable means the working copy held real work and was left untouched.
 	OutcomeNotDisposable Outcome = "not-disposable"
 	// OutcomeRebasedGenerated means the working copy held only generated edits and was advanced onto trunk, taking upstream on conflict.
