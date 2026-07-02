@@ -277,7 +277,18 @@ func (r *jjRepo) PushTrunk(ctx context.Context) (Outcome, error) {
 // isConflictedBookmark reports whether err is jj refusing a revset that names a
 // conflicted bookmark, the expected signal that local trunk diverged from origin.
 func isConflictedBookmark(err error) bool {
-	return strings.Contains(err.Error(), "is conflicted")
+	return stderrContains(err, "is conflicted")
+}
+
+// IsWorkingCopyContention reports whether err is jj declining a working-copy
+// update because another process raced it — transient, safe to retry next cycle.
+func IsWorkingCopyContention(err error) bool {
+	if err == nil {
+		return false
+	}
+	return stderrContains(err, "Concurrent checkout") ||
+		stderrContains(err, "Concurrent working copy operation") ||
+		stderrContains(err, "Failed to check out commit")
 }
 
 // rebaseGenerated rebases @ (carrying only generated edits) onto trunk, then
@@ -298,7 +309,7 @@ func (r *jjRepo) rebaseGenerated(ctx context.Context, head string) (Outcome, err
 	}
 	conflicts, err := r.jj(ctx, "resolve", "--list")
 	if err != nil {
-		if strings.Contains(err.Error(), "No conflicts found") {
+		if stderrContains(err, "No conflicts found") {
 			return OutcomeRebasedGenerated, nil
 		}
 		return "", fmt.Errorf("jj resolve --list: %w", err)
