@@ -96,11 +96,11 @@ func TestGitStableDetectsDrift(t *testing.T) {
 	r := openGit(t, dest).(*gitRepo)
 	ctx := context.Background()
 
-	head, err := r.headHash(ctx)
+	g, err := r.guardHead(ctx)
 	if err != nil {
 		t.Fatalf("head: %v", err)
 	}
-	ok, err := r.stable(ctx, head)
+	ok, err := g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestGitStableDetectsDrift(t *testing.T) {
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
-	ok, err = r.stable(ctx, head)
+	ok, err = g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable (locked): %v", err)
 	}
@@ -126,7 +126,7 @@ func TestGitStableDetectsDrift(t *testing.T) {
 	f.writeFile(dest, "raw.txt", "raw commit\n")
 	f.runGit(dest, "add", "raw.txt")
 	f.runGit(dest, "commit", "-qm", "raw user commit")
-	ok, err = r.stable(ctx, head)
+	ok, err = g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable (moved): %v", err)
 	}

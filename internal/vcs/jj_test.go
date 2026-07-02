@@ -103,11 +103,11 @@ func TestJJStableDetectsGitHeadDrift(t *testing.T) {
 	r := openJJ(t, dest).(*jjRepo)
 	ctx := context.Background()
 
-	head, err := gitHeadHash(ctx, dest)
+	g, err := r.guardHead(ctx)
 	if err != nil {
 		t.Fatalf("head: %v", err)
 	}
-	ok, err := r.stable(ctx, head)
+	ok, err := g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestJJStableDetectsGitHeadDrift(t *testing.T) {
 	if op := f.jjOpHead(dest); op != opBefore {
 		t.Fatalf("jj op head moved %q -> %q: a raw git commit must record no jj op", opBefore, op)
 	}
-	ok, err = r.stable(ctx, head)
+	ok, err = g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable (moved): %v", err)
 	}

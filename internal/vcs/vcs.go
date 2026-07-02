@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -82,10 +81,10 @@ func Open(path, trunk string) (Repo, error) {
 		return nil, fmt.Errorf("resolve repo path %s: %w", path, err)
 	}
 	if isDir(filepath.Join(abs, ".jj")) {
-		return &jjRepo{path: abs, trunk: trunk}, nil
+		return &jjRepo{repoCore: repoCore{path: abs, trunk: trunk}}, nil
 	}
 	if isDir(filepath.Join(abs, ".git")) {
-		return &gitRepo{path: abs, trunk: trunk}, nil
+		return &gitRepo{repoCore: repoCore{path: abs, trunk: trunk}}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNotARepo, abs)
 }
@@ -97,39 +96,6 @@ func Clone(ctx context.Context, origin, dest string) error {
 		return fmt.Errorf("jj git clone %s: %w", origin, err)
 	}
 	return nil
-}
-
-// originURL resolves the origin remote via git, which works for both jj and git repos.
-func originURL(ctx context.Context, path string) (string, error) {
-	out, err := run(ctx, path, "git", "-C", path, "remote", "get-url", "origin")
-	if err != nil {
-		if stderrContains(err, "No such remote") {
-			return "", ErrNoOrigin
-		}
-		return "", fmt.Errorf("get origin url: %w", err)
-	}
-	return strings.TrimSpace(out), nil
-}
-
-// gitHeadHash resolves the current git HEAD commit through the colocated or plain
-// git backing. In a colocated jj repo HEAD moves on a raw `git commit`, which
-// creates no jj operation — the drift signal jj's own op log cannot see, and the
-// anchor Advance re-checks before every mutation to abort a raced advance.
-func gitHeadHash(ctx context.Context, path string) (string, error) {
-	out, err := run(ctx, path, "git", "-C", path, "rev-parse", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("rev-parse HEAD: %w", err)
-	}
-	return strings.TrimSpace(out), nil
-}
-
-// trunkHashViaGit resolves origin/<trunk> through the colocated or plain git backing.
-func trunkHashViaGit(ctx context.Context, path, trunk string) (string, error) {
-	out, err := run(ctx, path, "git", "-C", path, "rev-parse", "refs/remotes/origin/"+trunk)
-	if err != nil {
-		return "", fmt.Errorf("rev-parse origin/%s: %w", trunk, err)
-	}
-	return strings.TrimSpace(out), nil
 }
 
 func isDir(path string) bool {

@@ -28,19 +28,10 @@ var jjOpNoise = map[string]struct{}{
 }
 
 type jjRepo struct {
-	path  string
-	trunk string
+	repoCore
 }
 
 func (r *jjRepo) Kind() string { return "jj" }
-
-func (r *jjRepo) Origin(ctx context.Context) (string, error) {
-	return originURL(ctx, r.path)
-}
-
-func (r *jjRepo) TrunkHash(ctx context.Context) (string, error) {
-	return trunkHashViaGit(ctx, r.path, r.trunk)
-}
 
 // InUse first stat-checks for a live git/jj operation (opInProgress) so a locked
 // repo short-circuits before any shell-out — jj blocks on working_copy.lock, so
@@ -144,7 +135,7 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	if _, err := r.jj(ctx, "git", "fetch", "--remote", "origin", "--ignore-working-copy"); err != nil {
 		return "", fmt.Errorf("jj git fetch: %w", err)
 	}
-	head, err := gitHeadHash(ctx, r.path)
+	g, err := r.guardHead(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -167,7 +158,7 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	// snapshot reconciles against git HEAD. A raw `git commit` between the fetch
 	// and here moved HEAD with no jj op, so snapshotting would import the diverged
 	// HEAD and jj new would strand it — abort untouched instead.
-	ok, err := r.stable(ctx, head)
+	ok, err := g.stable(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +180,7 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 		if !safe {
 			return OutcomeNotDisposable, nil
 		}
-		ok, err := r.stable(ctx, head)
+		ok, err := g.stable(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -211,32 +202,10 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 			return "", err
 		}
 		if safe {
-			return r.rebaseGenerated(ctx, head)
+			return r.rebaseGenerated(ctx, g)
 		}
 	}
 	return OutcomeNotDisposable, nil
-}
-
-// stable reports whether git HEAD still matches head and no git/jj operation is
-// now in progress — the pre-snapshot guard that aborts an advance the instant the
-// user's state drifts from what the fetch observed. In a colocated repo a raw
-// `git commit` moves HEAD with no jj op, so a jj snapshot would silently reconcile
-// @ against the diverged HEAD and jj new would strand the commit; git HEAD is the
-// drift signal jj's own op log cannot provide, and — unlike the op head — is never
-// perturbed by reposync's own snapshots, so it never false-aborts.
-func (r *jjRepo) stable(ctx context.Context, head string) (bool, error) {
-	reason, err := opInProgress(r.path)
-	if err != nil {
-		return false, err
-	}
-	if reason != "" {
-		return false, nil
-	}
-	now, err := gitHeadHash(ctx, r.path)
-	if err != nil {
-		return false, err
-	}
-	return now == head, nil
 }
 
 // PushTrunk fast-forward pushes the local <trunk> bookmark to origin. It pushes
@@ -296,8 +265,8 @@ func IsWorkingCopyContention(err error) bool {
 // guards on git HEAD once before the rebase; the follow-on restores complete
 // reposync's own rebase, which itself moves HEAD, so re-guarding there would abort
 // on our own change.
-func (r *jjRepo) rebaseGenerated(ctx context.Context, head string) (Outcome, error) {
-	ok, err := r.stable(ctx, head)
+func (r *jjRepo) rebaseGenerated(ctx context.Context, g *guard) (Outcome, error) {
+	ok, err := g.stable(ctx)
 	if err != nil {
 		return "", err
 	}

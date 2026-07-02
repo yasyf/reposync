@@ -13,19 +13,10 @@ import (
 const gitReflogTimeLayout = "2006-01-02 15:04:05 -0700"
 
 type gitRepo struct {
-	path  string
-	trunk string
+	repoCore
 }
 
 func (r *gitRepo) Kind() string { return "git" }
-
-func (r *gitRepo) Origin(ctx context.Context) (string, error) {
-	return originURL(ctx, r.path)
-}
-
-func (r *gitRepo) TrunkHash(ctx context.Context) (string, error) {
-	return trunkHashViaGit(ctx, r.path, r.trunk)
-}
 
 func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, error) {
 	reason, err := opInProgress(r.path)
@@ -82,7 +73,7 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	if _, err := r.git(ctx, "fetch", "--prune", "origin"); err != nil {
 		return "", fmt.Errorf("git fetch: %w", err)
 	}
-	head, err := r.headHash(ctx)
+	g, err := r.guardHead(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -100,9 +91,9 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 			return "", err
 		}
 		if generatedOnly {
-			return r.advanceGenerated(ctx, head, behind, generated)
+			return r.advanceGenerated(ctx, g, behind, generated)
 		}
-		ok, err := r.stable(ctx, head)
+		ok, err := g.stable(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -126,34 +117,11 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	return OutcomeUpToDate, nil
 }
 
-func (r *gitRepo) headHash(ctx context.Context) (string, error) {
-	return gitHeadHash(ctx, r.path)
-}
-
-// stable reports whether git HEAD still matches head and no git operation is now
-// in progress — the pre-mutation guard that aborts an advance the instant the
-// user's state drifts from what the fetch observed. A raw `git commit` moves HEAD;
-// a live git command drops a lock file. Either makes advancing the working copy unsafe.
-func (r *gitRepo) stable(ctx context.Context, head string) (bool, error) {
-	reason, err := opInProgress(r.path)
-	if err != nil {
-		return false, err
-	}
-	if reason != "" {
-		return false, nil
-	}
-	now, err := r.headHash(ctx)
-	if err != nil {
-		return false, err
-	}
-	return now == head, nil
-}
-
 // advanceGenerated advances an on-trunk working tree whose only uncommitted edits
 // are to generated files. Generated edits that conflict with what trunk changes
 // are dropped (upstream wins); cleanly-applying generated edits are carried
 // untouched through the fast-forward.
-func (r *gitRepo) advanceGenerated(ctx context.Context, head string, behind int, generated []string) (Outcome, error) {
+func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, behind int, generated []string) (Outcome, error) {
 	if behind == 0 {
 		return OutcomeUpToDate, nil
 	}
@@ -161,7 +129,7 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, head string, behind int,
 	if err != nil {
 		return "", err
 	}
-	ok, err := r.stable(ctx, head)
+	ok, err := g.stable(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -301,8 +269,4 @@ func parseReflogTime(line string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse reflog timestamp %q: %w", rest[:end], err)
 	}
 	return at, nil
-}
-
-func (r *gitRepo) git(ctx context.Context, args ...string) (string, error) {
-	return run(ctx, r.path, "git", append([]string{"-C", r.path}, args...)...)
 }
