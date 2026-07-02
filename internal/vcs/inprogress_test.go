@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/yasyf/reposync/internal/vcs/vcstest"
 )
 
 // TestOpInProgress proves opInProgress reports every git/jj live-operation marker
@@ -11,8 +13,8 @@ import (
 // Markers are created under a real colocated clone so the .git/.jj paths match the
 // production layout exactly.
 func TestOpInProgress(t *testing.T) {
-	f := newFixture(t)
-	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
 
 	if reason, err := opInProgress(dest); err != nil || reason != "" {
 		t.Fatalf("idle opInProgress = (%q, %v), want (\"\", nil)", reason, err)
@@ -62,8 +64,8 @@ func TestOpInProgress(t *testing.T) {
 // first marker in order wins: with both a git and a jj lock present, the git index
 // lock is reported.
 func TestOpInProgressFirstHitWins(t *testing.T) {
-	f := newFixture(t)
-	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
 
 	create(t, filepath.Join(dest, ".git", "index.lock"), false)
 	create(t, filepath.Join(dest, ".jj", "working_copy", "working_copy.lock"), false)

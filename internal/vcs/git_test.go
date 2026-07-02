@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yasyf/reposync/internal/vcs/vcstest"
 )
 
 func openGit(t *testing.T, path string) Repo {
@@ -22,29 +24,29 @@ func openGit(t *testing.T, path string) Repo {
 }
 
 func TestGitOpenAndOrigin(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	origin, err := r.Origin(context.Background())
 	if err != nil {
 		t.Fatalf("origin: %v", err)
 	}
-	if origin != f.origin {
-		t.Fatalf("origin = %q, want %q", origin, f.origin)
+	if origin != f.Origin {
+		t.Fatalf("origin = %q, want %q", origin, f.Origin)
 	}
 	hash, err := r.TrunkHash(context.Background())
 	if err != nil {
 		t.Fatalf("trunk hash: %v", err)
 	}
-	if hash != f.originMain() {
-		t.Fatalf("trunk hash = %q, want %q", hash, f.originMain())
+	if hash != f.OriginMain() {
+		t.Fatalf("trunk hash = %q, want %q", hash, f.OriginMain())
 	}
 }
 
 func TestGitHasTrunk(t *testing.T) {
-	f := newFixture(t)
-	r := openGit(t, f.gitClone(filepath.Join(f.root, "clone")))
+	f := vcstest.New(t)
+	r := openGit(t, f.GitClone(filepath.Join(f.Root, "clone")))
 	ok, err := r.HasTrunk(context.Background())
 	if err != nil {
 		t.Fatalf("has trunk: %v", err)
@@ -56,8 +58,8 @@ func TestGitHasTrunk(t *testing.T) {
 
 func TestGitAdvance(t *testing.T) {
 	t.Run("clean up-to-date returns up-to-date", func(t *testing.T) {
-		f := newFixture(t)
-		r := openGit(t, f.gitClone(filepath.Join(f.root, "clone")))
+		f := vcstest.New(t)
+		r := openGit(t, f.GitClone(filepath.Join(f.Root, "clone")))
 		got, err := r.Advance(context.Background())
 		if err != nil {
 			t.Fatalf("advance: %v", err)
@@ -68,10 +70,10 @@ func TestGitAdvance(t *testing.T) {
 	})
 
 	t.Run("on trunk behind advances via ff", func(t *testing.T) {
-		f := newFixture(t)
-		dest := f.gitClone(filepath.Join(f.root, "clone"))
+		f := vcstest.New(t)
+		dest := f.GitClone(filepath.Join(f.Root, "clone"))
 		r := openGit(t, dest)
-		want := f.advanceOrigin("v2")
+		want := f.AdvanceOrigin("v2")
 
 		got, err := r.Advance(context.Background())
 		if err != nil {
@@ -80,7 +82,7 @@ func TestGitAdvance(t *testing.T) {
 		if got != OutcomeAdvanced {
 			t.Fatalf("outcome = %q, want advanced", got)
 		}
-		localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+		localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
 		if localMain != want {
 			t.Fatalf("local main = %q, want origin %q", localMain, want)
 		}
@@ -91,8 +93,8 @@ func TestGitAdvance(t *testing.T) {
 // on a quiet repo, and reports drift the instant a live-operation lock appears or
 // git HEAD moves out from under the captured hash (a raw commit).
 func TestGitStableDetectsDrift(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest).(*gitRepo)
 	ctx := context.Background()
 
@@ -123,9 +125,9 @@ func TestGitStableDetectsDrift(t *testing.T) {
 		t.Fatalf("remove lock: %v", err)
 	}
 
-	f.writeFile(dest, "raw.txt", "raw commit\n")
-	f.runGit(dest, "add", "raw.txt")
-	f.runGit(dest, "commit", "-qm", "raw user commit")
+	f.WriteFile(dest, "raw.txt", "raw commit\n")
+	f.RunGit(dest, "add", "raw.txt")
+	f.RunGit(dest, "commit", "-qm", "raw user commit")
 	ok, err = g.stable(ctx)
 	if err != nil {
 		t.Fatalf("stable (moved): %v", err)
@@ -139,13 +141,13 @@ func TestGitStableDetectsDrift(t *testing.T) {
 // start of Advance yields OutcomeRaced without fetching or moving HEAD, even though
 // trunk moved and a clean advance would otherwise fast-forward.
 func TestGitAdvanceAbortsUnderLock(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.advanceOrigin("v2")
+	f.AdvanceOrigin("v2")
 
-	headBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
-	trackingBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "refs/remotes/origin/main"))
+	headBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD"))
+	trackingBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "refs/remotes/origin/main"))
 
 	lock := filepath.Join(dest, ".git", "index.lock")
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
@@ -162,10 +164,10 @@ func TestGitAdvanceAbortsUnderLock(t *testing.T) {
 	if err := os.Remove(lock); err != nil {
 		t.Fatalf("remove lock: %v", err)
 	}
-	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != headBefore {
+	if head := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD")); head != headBefore {
 		t.Fatalf("HEAD moved to %q, want unchanged %q", head, headBefore)
 	}
-	if tracking := strings.TrimSpace(f.runGit(dest, "rev-parse", "refs/remotes/origin/main")); tracking != trackingBefore {
+	if tracking := strings.TrimSpace(f.RunGit(dest, "rev-parse", "refs/remotes/origin/main")); tracking != trackingBefore {
 		t.Fatalf("origin/main tracking ref moved to %q, want unchanged %q (fetch must be gated)", tracking, trackingBefore)
 	}
 }
@@ -175,10 +177,10 @@ func TestGitAdvanceAbortsUnderLock(t *testing.T) {
 // activity under a normal idle window, so a tiny idle window isolates the dirt
 // classification as the asserted result.
 func TestGitInUseDirty(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.writeFile(dest, "DIRTY.txt", "uncommitted\n")
+	f.WriteFile(dest, "DIRTY.txt", "uncommitted\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -196,17 +198,17 @@ func TestGitInUseDirty(t *testing.T) {
 	if _, err := r.Advance(context.Background()); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if !f.fileExists(dest, "DIRTY.txt") {
+	if !f.FileExists(dest, "DIRTY.txt") {
 		t.Fatal("dirty file was clobbered")
 	}
-	if got := f.readFile(dest, "DIRTY.txt"); got != "uncommitted\n" {
+	if got := f.ReadFile(dest, "DIRTY.txt"); got != "uncommitted\n" {
 		t.Fatalf("dirty file content changed to %q", got)
 	}
 }
 
 func TestGitInUseRecentReflog(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	busy, reason, err := r.InUse(context.Background(), time.Hour)
@@ -231,8 +233,8 @@ func TestGitInUseRecentReflog(t *testing.T) {
 
 func TestGitLastActivity(t *testing.T) {
 	t.Run("recent after clone", func(t *testing.T) {
-		f := newFixture(t)
-		r := openGit(t, f.gitClone(filepath.Join(f.root, "clone")))
+		f := vcstest.New(t)
+		r := openGit(t, f.GitClone(filepath.Join(f.Root, "clone")))
 
 		got, err := r.LastActivity(context.Background())
 		if err != nil {
@@ -247,10 +249,10 @@ func TestGitLastActivity(t *testing.T) {
 	})
 
 	t.Run("zero on empty reflog", func(t *testing.T) {
-		f := newFixture(t)
-		dest := f.gitClone(filepath.Join(f.root, "clone"))
+		f := vcstest.New(t)
+		dest := f.GitClone(filepath.Join(f.Root, "clone"))
 		r := openGit(t, dest)
-		f.runGit(dest, "reflog", "expire", "--expire=now", "--all")
+		f.RunGit(dest, "reflog", "expire", "--expire=now", "--all")
 
 		got, err := r.LastActivity(context.Background())
 		if err != nil {
@@ -263,18 +265,18 @@ func TestGitLastActivity(t *testing.T) {
 }
 
 func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Divergent local commit on main.
-	f.writeFile(dest, "LOCAL.md", "local-only\n")
-	f.runGit(dest, "add", "LOCAL.md")
-	f.runGit(dest, "commit", "-qm", "local divergent")
-	localHead := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
-	f.advanceOrigin("v2")
+	f.WriteFile(dest, "LOCAL.md", "local-only\n")
+	f.RunGit(dest, "add", "LOCAL.md")
+	f.RunGit(dest, "commit", "-qm", "local divergent")
+	localHead := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD"))
+	f.AdvanceOrigin("v2")
 
-	originBefore := f.originMain()
+	originBefore := f.OriginMain()
 	got, err := r.Advance(context.Background())
 	if err != nil {
 		t.Fatalf("advance: %v", err)
@@ -282,14 +284,14 @@ func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
 	if got != OutcomeDiverged {
 		t.Fatalf("outcome = %q, want diverged (ff refused, no-op)", got)
 	}
-	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != localHead {
+	if head := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD")); head != localHead {
 		t.Fatalf("local HEAD moved to %q, want unchanged %q", head, localHead)
 	}
-	if !f.fileExists(dest, "LOCAL.md") {
+	if !f.FileExists(dest, "LOCAL.md") {
 		t.Fatal("divergent local file was clobbered")
 	}
-	if originBefore != f.originMain() {
-		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	if originBefore != f.OriginMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.OriginMain())
 	}
 }
 
@@ -297,19 +299,19 @@ func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
 // untouched: local main is ahead AND origin has moved, so Advance reports diverged
 // and never force-moves the local main ref.
 func TestGitOffTrunkDivergedDeclines(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Divergent local commit on main, then step off trunk onto a feature branch.
-	f.writeFile(dest, "LOCAL.md", "local-only\n")
-	f.runGit(dest, "add", "LOCAL.md")
-	f.runGit(dest, "commit", "-qm", "local divergent")
-	localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
-	f.runGit(dest, "checkout", "-q", "-b", "feature")
-	f.advanceOrigin("v2")
+	f.WriteFile(dest, "LOCAL.md", "local-only\n")
+	f.RunGit(dest, "add", "LOCAL.md")
+	f.RunGit(dest, "commit", "-qm", "local divergent")
+	localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
+	f.RunGit(dest, "checkout", "-q", "-b", "feature")
+	f.AdvanceOrigin("v2")
 
-	originBefore := f.originMain()
+	originBefore := f.OriginMain()
 	got, err := r.Advance(context.Background())
 	if err != nil {
 		t.Fatalf("advance: %v", err)
@@ -317,11 +319,11 @@ func TestGitOffTrunkDivergedDeclines(t *testing.T) {
 	if got != OutcomeDiverged {
 		t.Fatalf("outcome = %q, want diverged (declined, no-op)", got)
 	}
-	if main := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); main != localMain {
+	if main := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); main != localMain {
 		t.Fatalf("local main moved to %q, want unchanged %q", main, localMain)
 	}
-	if originBefore != f.originMain() {
-		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	if originBefore != f.OriginMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.OriginMain())
 	}
 }
 
@@ -330,19 +332,19 @@ func TestGitOffTrunkDivergedDeclines(t *testing.T) {
 // and the local generated edit survives on disk, where the old flow restored/deleted
 // local generated edits ahead of a merge that then failed.
 func TestGitAdvanceGeneratedDivergedLeavesEditIntact(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Diverge: a local commit on main, then a trunk commit touching the same
 	// generated path the local edit dirties.
-	f.writeFile(dest, "LOCAL.md", "local-only\n")
-	f.runGit(dest, "add", "LOCAL.md")
-	f.runGit(dest, "commit", "-qm", "local divergent")
-	localHead := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	f.advanceOriginPath("build.gen", "trunk generated v2\n")
+	f.WriteFile(dest, "LOCAL.md", "local-only\n")
+	f.RunGit(dest, "add", "LOCAL.md")
+	f.RunGit(dest, "commit", "-qm", "local divergent")
+	localHead := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD"))
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.AdvanceOriginPath("build.gen", "trunk generated v2\n")
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -351,22 +353,22 @@ func TestGitAdvanceGeneratedDivergedLeavesEditIntact(t *testing.T) {
 	if got != OutcomeDiverged {
 		t.Fatalf("outcome = %q, want diverged (declined, no-op)", got)
 	}
-	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
 		t.Fatalf("build.gen = %q, want local edit intact (no restore before a doomed merge)", c)
 	}
-	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != localHead {
+	if head := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD")); head != localHead {
 		t.Fatalf("local HEAD moved to %q, want unchanged %q", head, localHead)
 	}
 }
 
 func TestGitDetachedHeadAdvancesLocalTrunk(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	f.runGit(dest, "checkout", "-q", "--detach", "HEAD")
-	detachedAt := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
-	want := f.advanceOrigin("v2")
+	f.RunGit(dest, "checkout", "-q", "--detach", "HEAD")
+	detachedAt := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD"))
+	want := f.AdvanceOrigin("v2")
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -375,30 +377,30 @@ func TestGitDetachedHeadAdvancesLocalTrunk(t *testing.T) {
 	if got != OutcomeAdvanced {
 		t.Fatalf("outcome = %q, want advanced", got)
 	}
-	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
 		t.Fatalf("local main = %q, want origin %q", localMain, want)
 	}
-	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != detachedAt {
+	if head := strings.TrimSpace(f.RunGit(dest, "rev-parse", "HEAD")); head != detachedAt {
 		t.Fatalf("HEAD moved to %q, want unchanged detached %q", head, detachedAt)
 	}
 }
 
 func TestGitNeverPushOnAdvance(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Local main ahead of origin.
-	f.writeFile(dest, "AHEAD.md", "ahead\n")
-	f.runGit(dest, "add", "AHEAD.md")
-	f.runGit(dest, "commit", "-qm", "local ahead")
+	f.WriteFile(dest, "AHEAD.md", "ahead\n")
+	f.RunGit(dest, "add", "AHEAD.md")
+	f.RunGit(dest, "commit", "-qm", "local ahead")
 
-	originBefore := f.originMain()
+	originBefore := f.OriginMain()
 	if _, err := r.Advance(context.Background()); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if originBefore != f.originMain() {
-		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	if originBefore != f.OriginMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.OriginMain())
 	}
 }
 
@@ -406,15 +408,15 @@ func TestGitNeverPushOnAdvance(t *testing.T) {
 // strictly ahead of an unmoved origin, so PushTrunk reports pushed and origin
 // main advances to the local commit.
 func TestGitPushTrunkFastForward(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Local main strictly ahead of origin; origin not moved.
-	f.writeFile(dest, "AHEAD.md", "ahead\n")
-	f.runGit(dest, "add", "AHEAD.md")
-	f.runGit(dest, "commit", "-qm", "local ahead")
-	localHead := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+	f.WriteFile(dest, "AHEAD.md", "ahead\n")
+	f.RunGit(dest, "add", "AHEAD.md")
+	f.RunGit(dest, "commit", "-qm", "local ahead")
+	localHead := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
 
 	got, err := r.PushTrunk(context.Background())
 	if err != nil {
@@ -423,7 +425,7 @@ func TestGitPushTrunkFastForward(t *testing.T) {
 	if got != OutcomePushed {
 		t.Fatalf("outcome = %q, want pushed", got)
 	}
-	if origin := f.originMain(); origin != localHead {
+	if origin := f.OriginMain(); origin != localHead {
 		t.Fatalf("origin main = %q, want local head %q", origin, localHead)
 	}
 }
@@ -432,15 +434,15 @@ func TestGitPushTrunkFastForward(t *testing.T) {
 // main is ahead AND origin has moved (behind > 0), so PushTrunk skips with
 // up-to-date, no error, and origin is left unchanged.
 func TestGitPushTrunkDivergedSkips(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Diverge: a local commit on main, then an unrelated commit on origin.
-	f.writeFile(dest, "AHEAD.md", "ahead\n")
-	f.runGit(dest, "add", "AHEAD.md")
-	f.runGit(dest, "commit", "-qm", "local ahead")
-	f.advanceOrigin("v2")
+	f.WriteFile(dest, "AHEAD.md", "ahead\n")
+	f.RunGit(dest, "add", "AHEAD.md")
+	f.RunGit(dest, "commit", "-qm", "local ahead")
+	f.AdvanceOrigin("v2")
 
 	// Advance fetches origin (updating origin/main) and refuses the non-ff merge,
 	// leaving local main put; this is the prior fetch PushTrunk relies on.
@@ -448,7 +450,7 @@ func TestGitPushTrunkDivergedSkips(t *testing.T) {
 		t.Fatalf("advance: %v", err)
 	}
 
-	originBefore := f.originMain()
+	originBefore := f.OriginMain()
 	got, err := r.PushTrunk(context.Background())
 	if err != nil {
 		t.Fatalf("push trunk: %v", err)
@@ -456,19 +458,19 @@ func TestGitPushTrunkDivergedSkips(t *testing.T) {
 	if got != OutcomeUpToDate {
 		t.Fatalf("outcome = %q, want up-to-date (diverged, skip)", got)
 	}
-	if originBefore != f.originMain() {
-		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	if originBefore != f.OriginMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.OriginMain())
 	}
 }
 
 // TestGitPushTrunkNotAheadNoop proves a not-ahead trunk is a no-op: a fresh clone
 // sits exactly at origin, so PushTrunk reports up-to-date and origin is unchanged.
 func TestGitPushTrunkNotAheadNoop(t *testing.T) {
-	f := newFixture(t)
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	originBefore := f.originMain()
+	originBefore := f.OriginMain()
 	got, err := r.PushTrunk(context.Background())
 	if err != nil {
 		t.Fatalf("push trunk: %v", err)
@@ -476,8 +478,8 @@ func TestGitPushTrunkNotAheadNoop(t *testing.T) {
 	if got != OutcomeUpToDate {
 		t.Fatalf("outcome = %q, want up-to-date (not ahead)", got)
 	}
-	if originBefore != f.originMain() {
-		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, f.originMain())
+	if originBefore != f.OriginMain() {
+		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, f.OriginMain())
 	}
 }
 
@@ -486,11 +488,11 @@ func TestGitPushTrunkNotAheadNoop(t *testing.T) {
 // clone's reflog still counts as recent activity under a normal idle window, so a
 // tiny idle window isolates the dirt classification as the asserted result.
 func TestGitInUseGeneratedOnlyNotBusy(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -507,12 +509,12 @@ func TestGitInUseGeneratedOnlyNotBusy(t *testing.T) {
 // TestGitInUseMixedDirtyIsBusy proves a tree dirty in both a generated and a
 // non-generated file is busy: the dirt is not generated-only.
 func TestGitInUseMixedDirtyIsBusy(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	f.writeFile(dest, "foo.txt", "real work\n")
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.WriteFile(dest, "foo.txt", "real work\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -529,11 +531,11 @@ func TestGitInUseMixedDirtyIsBusy(t *testing.T) {
 // TestGitInUseDirtyGitattributesIsBusy proves an uncommitted edit to .gitattributes
 // itself is busy: .gitattributes is not a generated path.
 func TestGitInUseDirtyGitattributesIsBusy(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.writeFile(dest, ".gitattributes", "*.gen linguist-generated\n*.foo linguist-generated\n")
+	f.WriteFile(dest, ".gitattributes", "*.gen linguist-generated\n*.foo linguist-generated\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -551,11 +553,11 @@ func TestGitInUseDirtyGitattributesIsBusy(t *testing.T) {
 // a generated-named path is busy: the rename source is non-generated, so the dirt
 // is not generated-only and the uncommitted rename of real work is never discarded.
 func TestGitInUseRenameToGeneratedIsBusy(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.runGit(dest, "mv", "README.md", "out.gen")
+	f.RunGit(dest, "mv", "README.md", "out.gen")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -572,13 +574,13 @@ func TestGitInUseRenameToGeneratedIsBusy(t *testing.T) {
 // TestGitAdvanceGeneratedCleanApply proves a generated-only edit that trunk does
 // not touch is carried untouched through the fast-forward, reporting rebased-generated.
 func TestGitAdvanceGeneratedCleanApply(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	want := f.advanceOriginPath("x.txt", "sibling on trunk\n")
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	want := f.AdvanceOriginPath("x.txt", "sibling on trunk\n")
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -587,10 +589,10 @@ func TestGitAdvanceGeneratedCleanApply(t *testing.T) {
 	if got != OutcomeRebasedGenerated {
 		t.Fatalf("outcome = %q, want rebased-generated", got)
 	}
-	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
 		t.Fatalf("local main = %q, want origin %q", localMain, want)
 	}
-	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
 		t.Fatalf("build.gen = %q, want local edit preserved", c)
 	}
 }
@@ -598,13 +600,13 @@ func TestGitAdvanceGeneratedCleanApply(t *testing.T) {
 // TestGitAdvanceGeneratedConflictTakesUpstream proves a generated-only edit that
 // conflicts with what trunk changed is discarded in favor of upstream content.
 func TestGitAdvanceGeneratedConflictTakesUpstream(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	want := f.advanceOriginPath("build.gen", "trunk generated v2\n")
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	want := f.AdvanceOriginPath("build.gen", "trunk generated v2\n")
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -613,10 +615,10 @@ func TestGitAdvanceGeneratedConflictTakesUpstream(t *testing.T) {
 	if got != OutcomeRebasedGenerated {
 		t.Fatalf("outcome = %q, want rebased-generated", got)
 	}
-	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
 		t.Fatalf("local main = %q, want origin %q", localMain, want)
 	}
-	if c := f.readFile(dest, "build.gen"); c != "trunk generated v2\n" {
+	if c := f.ReadFile(dest, "build.gen"); c != "trunk generated v2\n" {
 		t.Fatalf("build.gen = %q, want upstream content (local discarded)", c)
 	}
 }
@@ -624,13 +626,13 @@ func TestGitAdvanceGeneratedConflictTakesUpstream(t *testing.T) {
 // TestGitAdvanceGeneratedBehindZeroNoOp proves a generated-only dirt with trunk
 // not moved is a no-op: up-to-date, local edit intact, main unchanged.
 func TestGitAdvanceGeneratedBehindZeroNoOp(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	mainBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	mainBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -639,10 +641,10 @@ func TestGitAdvanceGeneratedBehindZeroNoOp(t *testing.T) {
 	if got != OutcomeUpToDate {
 		t.Fatalf("outcome = %q, want up-to-date", got)
 	}
-	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
 		t.Fatalf("build.gen = %q, want local edit untouched", c)
 	}
-	if mainAfter := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
+	if mainAfter := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
 		t.Fatalf("local main moved from %q to %q, want unchanged", mainBefore, mainAfter)
 	}
 }
@@ -650,12 +652,12 @@ func TestGitAdvanceGeneratedBehindZeroNoOp(t *testing.T) {
 // TestGitAdvanceUntrackedGeneratedPreserved proves an untracked generated file that
 // trunk does not touch survives a generated-aware advance with its local content.
 func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
-	f.writeFile(dest, "extra.gen", "untracked local\n")
+	f.WriteFile(dest, "extra.gen", "untracked local\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -665,7 +667,7 @@ func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
 		t.Fatalf("InUse = busy (%q), want not busy on untracked generated file", reason)
 	}
 
-	want := f.advanceOriginPath("y.txt", "sibling on trunk\n")
+	want := f.AdvanceOriginPath("y.txt", "sibling on trunk\n")
 	got, err := r.Advance(context.Background())
 	if err != nil {
 		t.Fatalf("advance: %v", err)
@@ -673,13 +675,13 @@ func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
 	if got != OutcomeRebasedGenerated {
 		t.Fatalf("outcome = %q, want rebased-generated", got)
 	}
-	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
 		t.Fatalf("local main = %q, want origin %q", localMain, want)
 	}
-	if !f.fileExists(dest, "extra.gen") {
+	if !f.FileExists(dest, "extra.gen") {
 		t.Fatal("untracked generated file was clobbered")
 	}
-	if c := f.readFile(dest, "extra.gen"); c != "untracked local\n" {
+	if c := f.ReadFile(dest, "extra.gen"); c != "untracked local\n" {
 		t.Fatalf("extra.gen = %q, want local content preserved", c)
 	}
 }
@@ -690,24 +692,24 @@ func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
 // worktree of the conflict path (taking upstream) and carries the untouched path,
 // reporting rebased-generated rather than hard-erroring on `git merge --ff-only`.
 func TestGitAdvanceStagedGeneratedAdvances(t *testing.T) {
-	f := newFixture(t)
-	f.seedGenerated()
+	f := vcstest.New(t)
+	f.SeedGenerated()
 	// A second generated file on trunk that the upcoming trunk commit will not touch.
-	f.writeFile(f.seed, "keep.gen", "trunk keep v1\n")
-	f.runGit(f.seed, "add", "keep.gen")
-	f.runGit(f.seed, "commit", "-qm", "seed keep.gen")
-	f.runGit(f.seed, "push", "-q", "origin", "main")
+	f.WriteFile(f.Seed, "keep.gen", "trunk keep v1\n")
+	f.RunGit(f.Seed, "add", "keep.gen")
+	f.RunGit(f.Seed, "commit", "-qm", "seed keep.gen")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
 
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	// Stage a generated edit on a trunk-untouched path and on a trunk-changed path.
-	f.writeFile(dest, "keep.gen", "local keep edit\n")
-	f.writeFile(dest, "build.gen", "local generated edit\n")
-	f.runGit(dest, "add", "keep.gen", "build.gen")
+	f.WriteFile(dest, "keep.gen", "local keep edit\n")
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.RunGit(dest, "add", "keep.gen", "build.gen")
 
 	// Trunk changes build.gen (the conflict path) but leaves keep.gen alone.
-	want := f.advanceOriginPath("build.gen", "trunk generated v2\n")
+	want := f.AdvanceOriginPath("build.gen", "trunk generated v2\n")
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -716,13 +718,13 @@ func TestGitAdvanceStagedGeneratedAdvances(t *testing.T) {
 	if got != OutcomeRebasedGenerated {
 		t.Fatalf("outcome = %q, want rebased-generated", got)
 	}
-	if localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); localMain != want {
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
 		t.Fatalf("local main = %q, want origin %q", localMain, want)
 	}
-	if c := f.readFile(dest, "build.gen"); c != "trunk generated v2\n" {
+	if c := f.ReadFile(dest, "build.gen"); c != "trunk generated v2\n" {
 		t.Fatalf("build.gen = %q, want upstream content (staged local discarded)", c)
 	}
-	if c := f.readFile(dest, "keep.gen"); c != "local keep edit\n" {
+	if c := f.ReadFile(dest, "keep.gen"); c != "local keep edit\n" {
 		t.Fatalf("keep.gen = %q, want staged local content preserved", c)
 	}
 }
@@ -734,21 +736,21 @@ func TestGitAdvanceStagedGeneratedAdvances(t *testing.T) {
 // wrongly classified as generated-only and skipped. -uall lists the file
 // individually, exposing it as a real dirty path so the tree is correctly busy.
 func TestGitInUseUntrackedDirNonGeneratedIsBusy(t *testing.T) {
-	f := newFixture(t)
+	f := vcstest.New(t)
 	// Mark a whole directory generated, so the collapsed '?? gendir/' record itself
 	// resolves linguist-generated even though a non-generated file lives inside.
-	f.writeFile(f.seed, ".gitattributes", "*.gen linguist-generated\ngendir/ linguist-generated\n")
-	f.runGit(f.seed, "add", ".gitattributes")
-	f.runGit(f.seed, "commit", "-qm", "seed dir attr")
-	f.runGit(f.seed, "push", "-q", "origin", "main")
+	f.WriteFile(f.Seed, ".gitattributes", "*.gen linguist-generated\ngendir/ linguist-generated\n")
+	f.RunGit(f.Seed, "add", ".gitattributes")
+	f.RunGit(f.Seed, "commit", "-qm", "seed dir attr")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
 
-	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 
 	if err := os.MkdirAll(filepath.Join(dest, "gendir"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	f.writeFile(dest, filepath.Join("gendir", "real.txt"), "real work\n")
+	f.WriteFile(dest, filepath.Join("gendir", "real.txt"), "real work\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
