@@ -7,9 +7,11 @@ import (
 	"github.com/yasyf/reposync/internal/reconcile"
 )
 
-// reposLoadedMsg carries the outcome of a repo discovery scan.
+// reposLoadedMsg carries the outcome of a repo discovery scan and the
+// configured idle threshold from the same state load.
 type reposLoadedMsg struct {
 	result discover.RepoResult
+	idle   time.Duration
 	err    error
 }
 

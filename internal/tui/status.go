@@ -13,12 +13,8 @@ import (
 
 	synckittui "github.com/yasyf/synckit/tui"
 
-	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
 )
-
-// defaultIdle is the fallback "recent activity" window when none is configured.
-const defaultIdle = 10 * time.Minute
 
 // repoStatus is the live VCS state of a repo row, learned asynchronously.
 type repoStatus int
@@ -141,19 +137,6 @@ func classifyStatus(busy bool, reason string) repoStatus {
 		return statusDirty
 	}
 	return statusActive
-}
-
-// loadIdleThreshold reads the configured idle window used to classify "recent
-// activity"; a missing config or unset value falls back to a sane default.
-func loadIdleThreshold() time.Duration {
-	st, err := state.Load()
-	if err != nil {
-		return defaultIdle
-	}
-	if d := time.Duration(st.Settings.IdleThreshold); d > 0 {
-		return d
-	}
-	return defaultIdle
 }
 
 // sortRepoItems orders a list of repoItems in place by the active sort mode.

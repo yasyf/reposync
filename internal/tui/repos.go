@@ -99,7 +99,7 @@ func (m reposModel) Update(msg tea.Msg) (synckittui.Screen, tea.Cmd) {
 		}
 		m.empty = len(msg.result.Candidates) == 0
 		m.scanDir = scanDir()
-		return m.loadItems(msg.result.Candidates)
+		return m.loadItems(msg.result.Candidates, msg.idle)
 
 	case repoStatusMsg:
 		return m.applyStatus(msg)
@@ -203,13 +203,12 @@ func (m *reposModel) setRepoItems(items []list.Item) {
 // loadItems sorts freshly discovered candidates by the active mode, shows them
 // immediately, and fans out an async status probe per repo stamped with the
 // current generation so a superseded scan's late results are ignored.
-func (m reposModel) loadItems(cands []discover.Candidate) (synckittui.Screen, tea.Cmd) {
+func (m reposModel) loadItems(cands []discover.Candidate, idle time.Duration) (synckittui.Screen, tea.Cmd) {
 	m.generation++
 	gen := m.generation
 
 	m.allItems = newRepoItems(cands)
 
-	idle := loadIdleThreshold()
 	cmds := make([]tea.Cmd, 0, 1+len(m.allItems))
 	cmds = append(cmds, m.refresh())
 	for _, raw := range m.allItems {
@@ -329,7 +328,7 @@ func discoverReposCmd() tea.Cmd {
 			return reposLoadedMsg{err: fmt.Errorf("load state: %w", err)}
 		}
 		result, err := discover.Repos(context.Background(), st)
-		return reposLoadedMsg{result: result, err: err}
+		return reposLoadedMsg{result: result, idle: time.Duration(st.Settings.IdleThreshold), err: err}
 	}
 }
 
