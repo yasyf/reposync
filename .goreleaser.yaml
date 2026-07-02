@@ -71,3 +71,8 @@ homebrew_casks:
           if OS.mac? && Hardware::CPU.arm?
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/reposync"]
           end
+
+release:
+  prerelease: auto
+  # Lets the shared workflow's goreleaser retry re-upload after a mid-publish failure.
+  replace_existing_artifacts: true
