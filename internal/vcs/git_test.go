@@ -87,6 +87,89 @@ func TestGitAdvance(t *testing.T) {
 	})
 }
 
+// TestGitStableDetectsDrift proves the pre-mutation guard predicate: stable holds
+// on a quiet repo, and reports drift the instant a live-operation lock appears or
+// git HEAD moves out from under the captured hash (a raw commit).
+func TestGitStableDetectsDrift(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest).(*gitRepo)
+	ctx := context.Background()
+
+	head, err := r.headHash(ctx)
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	ok, err := r.stable(ctx, head)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if !ok {
+		t.Fatal("stable = false on a quiet repo, want true")
+	}
+
+	lock := filepath.Join(dest, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	ok, err = r.stable(ctx, head)
+	if err != nil {
+		t.Fatalf("stable (locked): %v", err)
+	}
+	if ok {
+		t.Fatal("stable = true with index.lock held, want false")
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+
+	f.writeFile(dest, "raw.txt", "raw commit\n")
+	f.runGit(dest, "add", "raw.txt")
+	f.runGit(dest, "commit", "-qm", "raw user commit")
+	ok, err = r.stable(ctx, head)
+	if err != nil {
+		t.Fatalf("stable (moved): %v", err)
+	}
+	if ok {
+		t.Fatal("stable = true after HEAD moved out from the captured hash, want false")
+	}
+}
+
+// TestGitAdvanceAbortsUnderLock proves the fetch gate: a live-operation lock at the
+// start of Advance yields OutcomeRaced without fetching or moving HEAD, even though
+// trunk moved and a clean advance would otherwise fast-forward.
+func TestGitAdvanceAbortsUnderLock(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+	f.advanceOrigin("v2")
+
+	headBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
+	trackingBefore := strings.TrimSpace(f.runGit(dest, "rev-parse", "refs/remotes/origin/main"))
+
+	lock := filepath.Join(dest, ".git", "index.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRaced {
+		t.Fatalf("outcome = %q, want raced", got)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != headBefore {
+		t.Fatalf("HEAD moved to %q, want unchanged %q", head, headBefore)
+	}
+	if tracking := strings.TrimSpace(f.runGit(dest, "rev-parse", "refs/remotes/origin/main")); tracking != trackingBefore {
+		t.Fatalf("origin/main tracking ref moved to %q, want unchanged %q (fetch must be gated)", tracking, trackingBefore)
+	}
+}
+
 func TestGitInUseDirty(t *testing.T) {
 	f := newFixture(t)
 	dest := f.gitClone(filepath.Join(f.root, "clone"))

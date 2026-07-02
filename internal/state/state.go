@@ -35,7 +35,7 @@ const ToolName = "reposync"
 
 const (
 	defaultLocation      = "~/Code"
-	defaultIdleThreshold = 5 * time.Minute
+	defaultIdleThreshold = 30 * time.Minute
 	defaultRepoOpTimeout = 2 * time.Minute
 	defaultPushAfter     = 24 * time.Hour
 )

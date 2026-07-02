@@ -3,6 +3,7 @@ package vcs
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,6 +89,114 @@ func TestJJAdvanceUpToDate(t *testing.T) {
 	}
 	if got != OutcomeUpToDate {
 		t.Fatalf("outcome = %q, want up-to-date", got)
+	}
+}
+
+// TestJJStableDetectsGitHeadDrift proves the guard catches the exact colocated
+// footgun: a raw `git commit` moves git HEAD but records NO jj op, so jj's op log
+// is blind to it. stable holds on a quiet repo and reports drift once HEAD moves,
+// even though the jj op head is unchanged.
+func TestJJStableDetectsGitHeadDrift(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest).(*jjRepo)
+	ctx := context.Background()
+
+	head, err := gitHeadHash(ctx, dest)
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	ok, err := r.stable(ctx, head)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if !ok {
+		t.Fatal("stable = false on a quiet colocated repo, want true")
+	}
+
+	opBefore := f.jjOpHead(dest)
+	f.writeFile(dest, "raw.txt", "raw commit\n")
+	f.runGit(dest, "add", "raw.txt")
+	f.runGit(dest, "commit", "-qm", "raw user commit")
+
+	if op := f.jjOpHead(dest); op != opBefore {
+		t.Fatalf("jj op head moved %q -> %q: a raw git commit must record no jj op", opBefore, op)
+	}
+	ok, err = r.stable(ctx, head)
+	if err != nil {
+		t.Fatalf("stable (moved): %v", err)
+	}
+	if ok {
+		t.Fatal("stable = true after a raw git commit moved HEAD (op log blind to it), want false")
+	}
+}
+
+// TestJJAdvanceAbortsUnderLock proves the jj fetch gate: a working_copy.lock at the
+// start of Advance yields OutcomeRaced with no fetch and no snapshot, even though
+// trunk moved and a clean advance would otherwise run jj new. The op head is
+// unchanged, proving the daemon never touched the repo.
+func TestJJAdvanceAbortsUnderLock(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+	f.advanceOrigin("v2")
+
+	opBefore := f.jjOpHead(dest)
+	lock := filepath.Join(dest, ".jj", "working_copy", "working_copy.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRaced {
+		t.Fatalf("outcome = %q, want raced", got)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	if op := f.jjOpHead(dest); op != opBefore {
+		t.Fatalf("op head moved %q -> %q under a held lock: Advance must not fetch or snapshot", opBefore, op)
+	}
+}
+
+// TestJJAdvanceRawCommitNotStranded reproduces the end-to-end footgun: a raw git
+// commit lands real work with no jj op, then trunk moves and reposync advances.
+// The commit must not be orphaned — ancestrySafe sees the imported commit is not on
+// trunk and declines, so Advance reports not-disposable and the work stays on disk.
+func TestJJAdvanceRawCommitNotStranded(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	// The footgun: commit real work through raw git, moving HEAD with no jj op.
+	f.writeFile(dest, "work.txt", "hard-won work\n")
+	f.runGit(dest, "add", "work.txt")
+	f.runGit(dest, "commit", "-qm", "raw user commit")
+
+	want := f.advanceOrigin("v2")
+	originBefore := f.originMain()
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeNotDisposable {
+		t.Fatalf("outcome = %q, want not-disposable (raw-committed work must not be stranded)", got)
+	}
+	if !f.fileExists(dest, "work.txt") {
+		t.Fatal("work.txt gone: raw-committed work was orphaned")
+	}
+	if c := f.readFile(dest, "work.txt"); c != "hard-won work\n" {
+		t.Fatalf("work.txt = %q, want the raw-committed content intact", c)
+	}
+	if originBefore != f.originMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+	if want == "" {
+		t.Fatal("fixture precondition: advanceOrigin returned empty hash")
 	}
 }
 

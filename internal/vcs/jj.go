@@ -42,12 +42,22 @@ func (r *jjRepo) TrunkHash(ctx context.Context) (string, error) {
 	return trunkHashViaGit(ctx, r.path, r.trunk)
 }
 
-// InUse never snapshots the working copy: every probe runs --ignore-working-copy
-// so a concurrent interactive jj command (e.g. a push mid-checkout) is never
-// raced into a "Concurrent checkout" failure. The recency gate runs first, and
-// the dirty read is a heuristic over the last-recorded @; the authoritative
-// stranding guards stay in Advance's true snapshots.
+// InUse first stat-checks for a live git/jj operation (opInProgress) so a locked
+// repo short-circuits before any shell-out — jj blocks on working_copy.lock, so
+// probing a busy repo would otherwise hang. It then never snapshots the working
+// copy: every probe runs --ignore-working-copy so a concurrent interactive jj
+// command (e.g. a push mid-checkout) is never raced into a "Concurrent checkout"
+// failure. The recency gate runs next, and the dirty read is a heuristic over the
+// last-recorded @; the authoritative stranding guards stay in Advance's true
+// snapshots.
 func (r *jjRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, error) {
+	reason, err := opInProgress(r.path)
+	if err != nil {
+		return false, "", err
+	}
+	if reason != "" {
+		return true, reason, nil
+	}
 	started, desc, err := r.firstRealOp(ctx)
 	if err != nil {
 		return false, "", err
@@ -124,8 +134,19 @@ func (r *jjRepo) HasTrunk(ctx context.Context) (bool, error) {
 }
 
 func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
+	reason, err := opInProgress(r.path)
+	if err != nil {
+		return "", err
+	}
+	if reason != "" {
+		return OutcomeRaced, nil
+	}
 	if _, err := r.jj(ctx, "git", "fetch", "--remote", "origin", "--ignore-working-copy"); err != nil {
 		return "", fmt.Errorf("jj git fetch: %w", err)
+	}
+	head, err := gitHeadHash(ctx, r.path)
+	if err != nil {
+		return "", err
 	}
 	moved, err := r.trunkMovedPastWorkingCopy(ctx)
 	if err != nil {
@@ -142,6 +163,17 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	if !moved {
 		return OutcomeUpToDate, nil
 	}
+	// Guard before the first snapshot: disposable() below snapshots @, and a
+	// snapshot reconciles against git HEAD. A raw `git commit` between the fetch
+	// and here moved HEAD with no jj op, so snapshotting would import the diverged
+	// HEAD and jj new would strand it — abort untouched instead.
+	ok, err := r.stable(ctx, head)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return OutcomeRaced, nil
+	}
 	disposable, err := r.disposable(ctx)
 	if err != nil {
 		return "", err
@@ -156,6 +188,13 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 		}
 		if !safe {
 			return OutcomeNotDisposable, nil
+		}
+		ok, err := r.stable(ctx, head)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return OutcomeRaced, nil
 		}
 		if _, err := r.jj(ctx, "new", r.trunk); err != nil {
 			return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
@@ -172,10 +211,32 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 			return "", err
 		}
 		if safe {
-			return r.rebaseGenerated(ctx)
+			return r.rebaseGenerated(ctx, head)
 		}
 	}
 	return OutcomeNotDisposable, nil
+}
+
+// stable reports whether git HEAD still matches head and no git/jj operation is
+// now in progress — the pre-snapshot guard that aborts an advance the instant the
+// user's state drifts from what the fetch observed. In a colocated repo a raw
+// `git commit` moves HEAD with no jj op, so a jj snapshot would silently reconcile
+// @ against the diverged HEAD and jj new would strand the commit; git HEAD is the
+// drift signal jj's own op log cannot provide, and — unlike the op head — is never
+// perturbed by reposync's own snapshots, so it never false-aborts.
+func (r *jjRepo) stable(ctx context.Context, head string) (bool, error) {
+	reason, err := opInProgress(r.path)
+	if err != nil {
+		return false, err
+	}
+	if reason != "" {
+		return false, nil
+	}
+	now, err := gitHeadHash(ctx, r.path)
+	if err != nil {
+		return false, err
+	}
+	return now == head, nil
 }
 
 // PushTrunk fast-forward pushes the local <trunk> bookmark to origin. It pushes
@@ -220,8 +281,18 @@ func isConflictedBookmark(err error) bool {
 }
 
 // rebaseGenerated rebases @ (carrying only generated edits) onto trunk, then
-// resolves any conflicts by taking trunk's version of each conflicted path.
-func (r *jjRepo) rebaseGenerated(ctx context.Context) (Outcome, error) {
+// resolves any conflicts by taking trunk's version of each conflicted path. It
+// guards on git HEAD once before the rebase; the follow-on restores complete
+// reposync's own rebase, which itself moves HEAD, so re-guarding there would abort
+// on our own change.
+func (r *jjRepo) rebaseGenerated(ctx context.Context, head string) (Outcome, error) {
+	ok, err := r.stable(ctx, head)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return OutcomeRaced, nil
+	}
 	if _, err := r.jj(ctx, "rebase", "-r", "@", "-d", r.trunk); err != nil {
 		return "", fmt.Errorf("jj rebase: %w", err)
 	}

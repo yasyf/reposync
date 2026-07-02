@@ -32,8 +32,8 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if s.DefaultLocation != "~/Code" {
 		t.Errorf("DefaultLocation = %q, want ~/Code", s.DefaultLocation)
 	}
-	if got := time.Duration(s.Settings.IdleThreshold); got != 5*time.Minute {
-		t.Errorf("IdleThreshold = %s, want 5m", got)
+	if got := time.Duration(s.Settings.IdleThreshold); got != 30*time.Minute {
+		t.Errorf("IdleThreshold = %s, want 30m", got)
 	}
 	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
 		t.Errorf("RepoOpTimeout = %s, want 2m", got)

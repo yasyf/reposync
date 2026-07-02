@@ -311,6 +311,44 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	}
 }
 
+// TestSyncLockedRepoSkippedAndIntact proves a repo with a live git ref transaction
+// is treated as busy and left untouched: the exact packed-refs.lock symptom that
+// orphaned the reported commits now short-circuits at the InUse gate. Origin does
+// not move even with trunk advanced and the push gate open.
+func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("beta")
+	h.advanceOrigin("v2")
+
+	lock := filepath.Join(dest, ".git", "packed-refs.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	st := h.state(state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"})
+	originBefore := h.originMain()
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	res := resultFor(t, results, "beta")
+	if res.Err != nil {
+		t.Fatalf("beta err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeBusy {
+		t.Fatalf("beta outcome = %q, want busy", res.Outcome)
+	}
+	if res.Reason != "git refs locked" {
+		t.Fatalf("beta reason = %q, want git refs locked", res.Reason)
+	}
+	if got := h.originMain(); got != originBefore {
+		t.Fatalf("origin main moved from %q to %q under a held lock, want unchanged", originBefore, got)
+	}
+}
+
 func TestSyncNoTrunkRepo(t *testing.T) {
 	h := newHarness(t)
 	dest := filepath.Join(h.dataLoc, "gamma")
