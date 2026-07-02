@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,69 +12,26 @@ import (
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
+	"github.com/yasyf/reposync/internal/vcs/vcstest"
 )
 
-const jjTestConfig = `[user]
-name = "Test User"
-email = "test@example.com"
-`
-
-// harness is a temp-dir test rig: a real bare git origin, a seed clone used to
-// publish new trunk commits, and a default_location into which repos are cloned.
+// harness is the shared vcs fixture plus a default_location into which tracked
+// repos are cloned; newHarness also redirects state config under the fixture root.
 type harness struct {
+	*vcstest.Fixture
 	t       *testing.T
-	root    string
-	origin  string // bare origin repo
-	seed    string // plain-git clone used to push new commits to origin
 	dataLoc string // default_location where tracked repos live
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve temp dir: %v", err)
-	}
-	cfg := filepath.Join(root, "jjconfig.toml")
-	if err := os.WriteFile(cfg, []byte(jjTestConfig), 0o600); err != nil {
-		t.Fatalf("write jj config: %v", err)
-	}
-	t.Setenv("JJ_CONFIG", cfg)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
-	requireJJ(t)
-
-	h := &harness{
-		t:       t,
-		root:    root,
-		origin:  filepath.Join(root, "origin.git"),
-		seed:    filepath.Join(root, "seed"),
-		dataLoc: filepath.Join(root, "data"),
-	}
-	if err := os.MkdirAll(h.dataLoc, 0o750); err != nil {
+	f := vcstest.New(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(f.Root, "xdg"))
+	dataLoc := filepath.Join(f.Root, "data")
+	if err := os.MkdirAll(dataLoc, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
-	h.runGit(root, "init", "--bare", "-b", "main", h.origin)
-	h.runGit(root, "clone", h.origin, h.seed)
-	h.configGit(h.seed)
-	h.writeFile(h.seed, "README.md", "hello\n")
-	h.runGit(h.seed, "add", "README.md")
-	h.runGit(h.seed, "commit", "-q", "-m", "init")
-	h.runGit(h.seed, "push", "-q", "origin", "main")
-	return h
-}
-
-func requireJJ(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("jj"); err != nil {
-		t.Skipf("jj not installed: %v", err)
-	}
-	out, err := exec.Command("jj", "--version").CombinedOutput()
-	if err != nil {
-		t.Fatalf("jj --version failed: %v: %s", err, out)
-	}
-	if !strings.HasPrefix(string(out), "jj ") {
-		t.Fatalf("unexpected jj --version output: %s", out)
-	}
+	return &harness{Fixture: f, t: t, dataLoc: dataLoc}
 }
 
 // state builds a *state.State pointed at this harness's default_location with a
@@ -97,11 +53,13 @@ func (h *harness) state(repos ...state.Repo) *state.State {
 	return st
 }
 
-// jjClone makes a colocated jj clone of the origin at <dataLoc>/<relpath>.
+// jjClone makes a colocated jj clone of the origin at <dataLoc>/<relpath>. Unlike
+// Fixture.JJClone it goes through the production vcs.Clone path, which vcstest
+// cannot import.
 func (h *harness) jjClone(relpath string) string {
 	h.t.Helper()
 	dest := filepath.Join(h.dataLoc, relpath)
-	if err := vcs.Clone(context.Background(), h.origin, dest); err != nil {
+	if err := vcs.Clone(context.Background(), h.Origin, dest); err != nil {
 		h.t.Fatalf("jj clone %s: %v", relpath, err)
 	}
 	return dest
@@ -112,26 +70,16 @@ func (h *harness) jjClone(relpath string) string {
 // tracked repos cannot share one). It returns the new bare origin path.
 func (h *harness) extraOrigin(name string) string {
 	h.t.Helper()
-	origin := filepath.Join(h.root, name+".git")
-	seed := filepath.Join(h.root, name+"-seed")
-	h.runGit(h.root, "init", "--bare", "-b", "main", origin)
-	h.runGit(h.root, "clone", origin, seed)
-	h.configGit(seed)
-	h.writeFile(seed, "README.md", "hello "+name+"\n")
-	h.runGit(seed, "add", "README.md")
-	h.runGit(seed, "commit", "-q", "-m", "init")
-	h.runGit(seed, "push", "-q", "origin", "main")
+	origin := filepath.Join(h.Root, name+".git")
+	seed := filepath.Join(h.Root, name+"-seed")
+	h.RunGit(h.Root, "init", "--bare", "-b", "main", origin)
+	h.RunGit(h.Root, "clone", origin, seed)
+	h.ConfigGit(seed)
+	h.WriteFile(seed, "README.md", "hello "+name+"\n")
+	h.RunGit(seed, "add", "README.md")
+	h.RunGit(seed, "commit", "-q", "-m", "init")
+	h.RunGit(seed, "push", "-q", "origin", "main")
 	return origin
-}
-
-// advanceOrigin pushes a new trunk commit and returns the new origin main hash.
-func (h *harness) advanceOrigin(content string) string {
-	h.t.Helper()
-	cur := h.readFile(h.seed, "README.md")
-	h.writeFile(h.seed, "README.md", cur+content+"\n")
-	h.runGit(h.seed, "commit", "-aqm", content)
-	h.runGit(h.seed, "push", "-q", "origin", "main")
-	return h.originMain()
 }
 
 // localAhead writes real content into dest, commits it as a non-empty trunk commit
@@ -141,81 +89,16 @@ func (h *harness) advanceOrigin(content string) string {
 // local main commit id.
 func (h *harness) localAhead(dest, name, content string) string {
 	h.t.Helper()
-	h.writeFile(dest, name, content)
-	h.runJJ(dest, "commit", "-m", name)
-	h.runJJ(dest, "bookmark", "set", "main", "-r", "@-", "--ignore-working-copy")
+	h.WriteFile(dest, name, content)
+	h.RunJJ(dest, "commit", "-m", name)
+	h.RunJJ(dest, "bookmark", "set", "main", "-r", "@-", "--ignore-working-copy")
 	return h.localMain(dest)
 }
 
 // localMain resolves the local main bookmark's commit id via the colocated git ref.
 func (h *harness) localMain(dest string) string {
 	h.t.Helper()
-	return strings.TrimSpace(h.runGit(dest, "rev-parse", "main"))
-}
-
-// seedGenerated writes a .gitattributes marking *.gen as linguist-generated plus
-// an initial build.gen, commits, and pushes both onto trunk via the seed clone.
-// Call after newHarness and before cloning the work repo so both files are on
-// trunk in the clone.
-func (h *harness) seedGenerated() {
-	h.t.Helper()
-	h.writeFile(h.seed, ".gitattributes", "*.gen linguist-generated\n")
-	h.writeFile(h.seed, "build.gen", "generated v1\n")
-	h.runGit(h.seed, "add", ".gitattributes", "build.gen")
-	h.runGit(h.seed, "commit", "-qm", "seed generated")
-	h.runGit(h.seed, "push", "-q", "origin", "main")
-}
-
-func (h *harness) originMain() string {
-	h.t.Helper()
-	return strings.TrimSpace(h.runGit(h.root, "-C", h.origin, "rev-parse", "main"))
-}
-
-func (h *harness) configGit(dir string) {
-	h.t.Helper()
-	h.runGit(dir, "config", "user.name", "Test User")
-	h.runGit(dir, "config", "user.email", "test@example.com")
-}
-
-func (h *harness) runGit(dir string, args ...string) string {
-	h.t.Helper()
-	//nolint:gosec // G204: test helper running git with test-controlled args against a temp repo.
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		h.t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
-}
-
-func (h *harness) runJJ(dir string, args ...string) string {
-	h.t.Helper()
-	//nolint:gosec // G204: test helper running jj with test-controlled args against a temp repo.
-	cmd := exec.Command("jj", append([]string{"--repository", dir}, args...)...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		h.t.Fatalf("jj %s: %v: %s", strings.Join(args, " "), err, out)
-	}
-	return string(out)
-}
-
-func (h *harness) writeFile(dir, name, content string) {
-	h.t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
-		h.t.Fatalf("write %s: %v", name, err)
-	}
-}
-
-func (h *harness) readFile(dir, name string) string {
-	h.t.Helper()
-	//nolint:gosec // G304: test reads a file from a test-controlled temp dir.
-	data, err := os.ReadFile(filepath.Join(dir, name))
-	if err != nil {
-		h.t.Fatalf("read %s: %v", name, err)
-	}
-	return string(data)
+	return strings.TrimSpace(h.RunGit(dest, "rev-parse", "main"))
 }
 
 // TestFailureMapsContentionToBusy proves a working-copy contention error from a
@@ -260,8 +143,8 @@ func resultFor(t *testing.T, results []Result, relpath string) Result {
 func TestSyncAdvancesIdleRepo(t *testing.T) {
 	h := newHarness(t)
 	h.jjClone("alpha")
-	want := h.advanceOrigin("v2")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	want := h.AdvanceOrigin("v2")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -284,13 +167,13 @@ func TestSyncAdvancesIdleRepo(t *testing.T) {
 func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("beta")
-	h.advanceOrigin("v2")
+	h.AdvanceOrigin("v2")
 	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy. The
 	// default 1ns idle threshold keeps the recency gate out of the way so the
 	// dirty probe is what fires.
-	h.writeFile(dest, "WORK.txt", "in progress\n")
-	h.runJJ(dest, "status")
-	st := h.state(state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"})
+	h.WriteFile(dest, "WORK.txt", "in progress\n")
+	h.RunJJ(dest, "status")
+	st := h.state(state.Repo{Relpath: "beta", Origin: h.Origin, Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -306,7 +189,7 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	if res.Reason != "dirty working copy" {
 		t.Fatalf("beta reason = %q, want dirty working copy", res.Reason)
 	}
-	if got := h.readFile(dest, "WORK.txt"); got != "in progress\n" {
+	if got := h.ReadFile(dest, "WORK.txt"); got != "in progress\n" {
 		t.Fatalf("dirty change clobbered: %q", got)
 	}
 }
@@ -318,15 +201,15 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("beta")
-	h.advanceOrigin("v2")
+	h.AdvanceOrigin("v2")
 
 	lock := filepath.Join(dest, ".git", "packed-refs.lock")
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
 
-	st := h.state(state.Repo{Relpath: "beta", Origin: h.origin, Trunk: "main"})
-	originBefore := h.originMain()
+	st := h.state(state.Repo{Relpath: "beta", Origin: h.Origin, Trunk: "main"})
+	originBefore := h.OriginMain()
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -344,20 +227,14 @@ func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	if res.Reason != "git refs locked" {
 		t.Fatalf("beta reason = %q, want git refs locked", res.Reason)
 	}
-	if got := h.originMain(); got != originBefore {
+	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q under a held lock, want unchanged", originBefore, got)
 	}
 }
 
 func TestSyncNoTrunkRepo(t *testing.T) {
 	h := newHarness(t)
-	dest := filepath.Join(h.dataLoc, "gamma")
-	//nolint:gosec // G204: test running jj against a test-controlled temp dest.
-	cmd := exec.Command("jj", "git", "init", "--colocate", dest)
-	cmd.Dir = h.root
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("jj git init --colocate: %v: %s", err, out)
-	}
+	h.JJInit(filepath.Join(h.dataLoc, "gamma"))
 	st := h.state(state.Repo{Relpath: "gamma", Origin: "", Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
@@ -380,9 +257,9 @@ func TestSyncRepoFilterSelectsOne(t *testing.T) {
 	if err := vcs.Clone(context.Background(), betaOrigin, filepath.Join(h.dataLoc, "beta")); err != nil {
 		t.Fatalf("clone beta: %v", err)
 	}
-	h.advanceOrigin("v2")
+	h.AdvanceOrigin("v2")
 	st := h.state(
-		state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"},
+		state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"},
 		state.Repo{Relpath: "beta", Origin: betaOrigin, Trunk: "main"},
 	)
 
@@ -413,7 +290,7 @@ func TestSyncRepoFilterSelectsOne(t *testing.T) {
 
 func TestSyncUnknownFilterErrors(t *testing.T) {
 	h := newHarness(t)
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	_, err := Sync(context.Background(), st, "nonexistent", "")
 	if err == nil {
@@ -427,12 +304,12 @@ func TestSyncUnknownFilterErrors(t *testing.T) {
 func TestSyncBrokenRepoDoesNotAbortOthers(t *testing.T) {
 	h := newHarness(t)
 	h.jjClone("alpha")
-	want := h.advanceOrigin("v2")
+	want := h.AdvanceOrigin("v2")
 	st := h.state(
 		// missing is registered but absent on disk: its Open fails. It carries a
 		// distinct origin so it and alpha are separate registry entries.
 		state.Repo{Relpath: "missing", Origin: h.extraOrigin("missing"), Trunk: "main"},
-		state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"},
+		state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"},
 	)
 
 	results, err := Sync(context.Background(), st, "", "")
@@ -458,16 +335,16 @@ func TestSyncBrokenRepoDoesNotAbortOthers(t *testing.T) {
 
 func TestSyncRebasesGeneratedOnlyRepo(t *testing.T) {
 	h := newHarness(t)
-	h.seedGenerated()
+	h.SeedGenerated()
 	dest := h.jjClone("delta")
 	// Dirty the working copy with ONLY a generated edit, recorded by a real snapshot.
-	h.writeFile(dest, "build.gen", "generated local edit\n")
-	h.runJJ(dest, "status")
+	h.WriteFile(dest, "build.gen", "generated local edit\n")
+	h.RunJJ(dest, "status")
 	// Advance trunk on a non-generated path so the generated edit rebases cleanly.
-	want := h.advanceOrigin("v2")
+	want := h.AdvanceOrigin("v2")
 	// Default short idle threshold: the clone ops are not seen as recent activity,
 	// so the only thing the dirt gate sees is the generated-only working-copy edit.
-	st := h.state(state.Repo{Relpath: "delta", Origin: h.origin, Trunk: "main"})
+	st := h.state(state.Repo{Relpath: "delta", Origin: h.Origin, Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -495,7 +372,7 @@ func TestSyncPushesQuietAheadRepo(t *testing.T) {
 	dest := h.jjClone("alpha")
 	wantMain := h.localAhead(dest, "feature.txt", "shipped locally\n")
 	// Both gates open (IdleThreshold and PushAfter default to 1ns via h.state).
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -508,7 +385,7 @@ func TestSyncPushesQuietAheadRepo(t *testing.T) {
 	if res.Outcome != vcs.OutcomePushed {
 		t.Fatalf("alpha outcome = %q, want pushed", res.Outcome)
 	}
-	if got := h.originMain(); got != wantMain {
+	if got := h.OriginMain(); got != wantMain {
 		t.Fatalf("origin main = %q, want local main %q", got, wantMain)
 	}
 }
@@ -519,12 +396,12 @@ func TestSyncNoPushWhenRecentlyActive(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 	// IdleThreshold stays 1ns (Advance reaches the push check); PushAfter=1h makes
 	// the just-created clone look recently active, closing the push gate.
 	st.Settings.PushAfter = state.Duration(time.Hour)
 
-	originBefore := h.originMain()
+	originBefore := h.OriginMain()
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -536,7 +413,7 @@ func TestSyncNoPushWhenRecentlyActive(t *testing.T) {
 	if res.Outcome == vcs.OutcomePushed {
 		t.Fatalf("alpha outcome = %q, want not pushed (recently active)", res.Outcome)
 	}
-	if got := h.originMain(); got != originBefore {
+	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
 	}
 }
@@ -548,8 +425,8 @@ func TestSyncNoPushWhenDiverged(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
-	originBefore := h.advanceOrigin("v2")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	originBefore := h.AdvanceOrigin("v2")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
@@ -564,7 +441,7 @@ func TestSyncNoPushWhenDiverged(t *testing.T) {
 	if res.Outcome != vcs.OutcomeDiverged {
 		t.Fatalf("outcome = %q, want diverged (declined untouched)", res.Outcome)
 	}
-	if got := h.originMain(); got != originBefore {
+	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q on divergence, want unchanged", originBefore, got)
 	}
 }
@@ -577,11 +454,11 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
 	// A real edit recorded by a genuine jj snapshot makes @ dirty -> busy; the
 	// default 1ns idle threshold leaves the dirty probe as the deciding gate.
-	h.writeFile(dest, "WORK.txt", "in progress\n")
-	h.runJJ(dest, "status")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	h.WriteFile(dest, "WORK.txt", "in progress\n")
+	h.RunJJ(dest, "status")
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
-	originBefore := h.originMain()
+	originBefore := h.OriginMain()
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -593,7 +470,7 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 	if res.Outcome != OutcomeBusy {
 		t.Fatalf("alpha outcome = %q, want busy", res.Outcome)
 	}
-	if got := h.originMain(); got != originBefore {
+	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
 	}
 }
@@ -603,9 +480,9 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 func TestSyncNoPushWhenNotAhead(t *testing.T) {
 	h := newHarness(t)
 	h.jjClone("alpha")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
-	originBefore := h.originMain()
+	originBefore := h.OriginMain()
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
@@ -617,7 +494,7 @@ func TestSyncNoPushWhenNotAhead(t *testing.T) {
 	if res.Outcome == vcs.OutcomePushed {
 		t.Fatalf("alpha outcome = %q, want not pushed (not ahead)", res.Outcome)
 	}
-	if got := h.originMain(); got != originBefore {
+	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
 	}
 }
