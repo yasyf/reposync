@@ -56,6 +56,39 @@ func TestGitHasTrunk(t *testing.T) {
 	}
 }
 
+// TestGitHasTrunkMissing proves an absent trunk ref is a clean negative: the
+// rev-parse exit-1-with-empty-stderr signature classifies as (false, nil), not
+// an error.
+func TestGitHasTrunkMissing(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r, err := Open(dest, "nonexistent")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ok, err := r.HasTrunk(context.Background())
+	if err != nil {
+		t.Fatalf("has trunk: %v", err)
+	}
+	if ok {
+		t.Fatal("HasTrunk = true, want false for a nonexistent trunk")
+	}
+}
+
+// TestGitHasTrunkPropagatesFailure proves a real rev-parse failure is not
+// swallowed as trunk-missing: on a non-repo directory (exit 128) HasTrunk
+// returns the error.
+func TestGitHasTrunkPropagatesFailure(t *testing.T) {
+	r := &gitRepo{repoCore: repoCore{path: t.TempDir(), trunk: "main"}}
+	_, err := r.HasTrunk(context.Background())
+	if err == nil {
+		t.Fatal("HasTrunk err = nil on a non-repo directory, want the rev-parse failure propagated")
+	}
+	if code := exitCode(err); code != 128 {
+		t.Fatalf("exit code = %d, want 128 (not a repository)", code)
+	}
+}
+
 func TestGitAdvance(t *testing.T) {
 	t.Run("clean up-to-date returns up-to-date", func(t *testing.T) {
 		f := vcstest.New(t)
@@ -228,6 +261,27 @@ func TestGitInUseRecentReflog(t *testing.T) {
 	}
 	if notBusy {
 		t.Fatal("InUse = busy with tiny idle window, want not busy")
+	}
+}
+
+// TestGitInUseRecencyGateFirst proves the recency gate outranks dirt: a dirty
+// working tree inside the idle window reads busy as recent activity, so the
+// dirt classification never runs on a recently-active repo.
+func TestGitInUseRecencyGateFirst(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+	f.WriteFile(dest, "DIRTY.txt", "uncommitted\n")
+
+	busy, reason, err := r.InUse(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if !busy {
+		t.Fatal("InUse = false, want busy from the recent clone reflog entry")
+	}
+	if reason != "recent activity" {
+		t.Fatalf("reason = %q, want recent activity (recency gate outranks dirt)", reason)
 	}
 }
 
@@ -683,6 +737,34 @@ func TestGitAdvanceUntrackedGeneratedPreserved(t *testing.T) {
 	}
 	if c := f.ReadFile(dest, "extra.gen"); c != "untracked local\n" {
 		t.Fatalf("extra.gen = %q, want local content preserved", c)
+	}
+}
+
+// TestGitAdvanceUntrackedGeneratedTakesUpstream proves an untracked generated
+// file that trunk also adds is taken from upstream: the local copy cannot be
+// restored from HEAD (which has never seen the path), so advance removes it and
+// the fast-forward materializes trunk's content.
+func TestGitAdvanceUntrackedGeneratedTakesUpstream(t *testing.T) {
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+
+	f.WriteFile(dest, "extra.gen", "untracked local\n")
+	want := f.AdvanceOriginPath("extra.gen", "trunk generated v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.ReadFile(dest, "extra.gen"); c != "trunk generated v2\n" {
+		t.Fatalf("extra.gen = %q, want upstream content (untracked local removed)", c)
 	}
 }
 
