@@ -132,6 +132,55 @@ func TestJJStableDetectsGitHeadDrift(t *testing.T) {
 	}
 }
 
+// TestJJStableDetectsDriftAfterProbeSnapshot walks Advance's exact guard sequence
+// — guardHead, then the working-copy probe's true snapshot — and proves the guard
+// is still live for the mutation that follows: the probe's own snapshot never
+// perturbs git HEAD (no false abort), while a raw `git commit` landing after the
+// snapshot still reads as drift.
+func TestJJStableDetectsDriftAfterProbeSnapshot(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	f.configGit(dest) // a raw git commit below needs a git identity in the colocated repo
+	r := openJJ(t, dest).(*jjRepo)
+	ctx := context.Background()
+
+	f.writeFile(dest, "WORK.txt", "live edit\n")
+	g, err := r.guardHead(ctx)
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	snapshots := f.jjSnapshotOps(dest)
+	p, err := r.probeWorkingCopy(ctx)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if p.empty || p.described || p.bookmarked {
+		t.Fatalf("probe = %+v, want a non-empty undescribed unbookmarked @", p)
+	}
+	if n := f.jjSnapshotOps(dest); n != snapshots+1 {
+		t.Fatalf("snapshot ops %d -> %d: probeWorkingCopy must record the one true snapshot", snapshots, n)
+	}
+	ok, err := g.stable(ctx)
+	if err != nil {
+		t.Fatalf("stable: %v", err)
+	}
+	if !ok {
+		t.Fatal("stable = false after the probe's own snapshot, want true (a snapshot must not read as drift)")
+	}
+
+	f.writeFile(dest, "raw.txt", "raw commit\n")
+	f.runGit(dest, "add", "raw.txt")
+	f.runGit(dest, "commit", "-qm", "raw user commit")
+
+	ok, err = g.stable(ctx)
+	if err != nil {
+		t.Fatalf("stable (drifted): %v", err)
+	}
+	if ok {
+		t.Fatal("stable = true after a raw git commit moved HEAD post-snapshot, want drift")
+	}
+}
+
 // TestJJAdvanceAbortsUnderLock proves the jj fetch gate: a working_copy.lock at the
 // start of Advance yields OutcomeRaced with no fetch and no snapshot, even though
 // trunk moved and a clean advance would otherwise run jj new. The op head is
@@ -241,6 +290,37 @@ func TestJJLastActivity(t *testing.T) {
 			t.Fatalf("LastActivity = %v (%v ago), want within the last hour", got, since)
 		}
 	})
+}
+
+// TestJJLastActivityRealOpBuriedUnderNoise proves LastActivity pages past
+// reposync's own noise: a real user op buried under more than one op-log page of
+// snapshot ops (the shape of a peer-notify fetch storm) is still found, not
+// misread as no activity.
+func TestJJLastActivityRealOpBuriedUnderNoise(t *testing.T) {
+	f := newFixture(t)
+	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	r := openJJ(t, dest)
+
+	f.runJJ(dest, "describe", "-m", "real work", "--ignore-working-copy")
+	// Distinct sizes so every write is seen as dirty and records its own snapshot op.
+	for i := range opLogPage + 5 {
+		f.writeFile(dest, "noise.txt", strings.Repeat("n", i+1)+"\n")
+		f.snapshotJJ(dest)
+	}
+	if n := f.jjSnapshotOps(dest); n <= opLogPage {
+		t.Fatalf("fixture precondition: %d snapshot ops, want > %d to bury the real op past one page", n, opLogPage)
+	}
+
+	got, err := r.LastActivity(context.Background())
+	if err != nil {
+		t.Fatalf("last activity: %v", err)
+	}
+	if got.IsZero() {
+		t.Fatal("LastActivity = zero: the real op was lost under the noise burial")
+	}
+	if since := time.Since(got); since > time.Hour {
+		t.Fatalf("LastActivity = %v (%v ago), want within the last hour", got, since)
+	}
 }
 
 func TestJJInUseDirtyNoClobber(t *testing.T) {
@@ -590,9 +670,9 @@ func TestJJPushTrunkFastForward(t *testing.T) {
 
 // TestJJPushTrunkDivergedSkips proves a diverged trunk is not force-pushed: the
 // local main bookmark is moved ahead AND origin moves independently, so after the
-// fetch the local main bookmark is conflicted. Advance declines such a divergence
-// quietly (up-to-date, no error) like the git backend, and PushTrunk likewise
-// skips on the conflicted-bookmark revset error: up-to-date, no error, origin
+// fetch the local main bookmark is conflicted. Advance classifies such a
+// divergence (diverged, no error) like the git backend, and PushTrunk skips
+// quietly on the conflicted-bookmark revset error: up-to-date, no error, origin
 // unchanged.
 func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	f := newFixture(t)
@@ -606,14 +686,15 @@ func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	f.advanceOrigin("v2")
 
 	// Advance performs the fetch PushTrunk relies on; the fetch leaves the local
-	// main bookmark conflicted. Advance must decline quietly, matching git's non-FF
-	// decline rather than surfacing the conflict as an error.
+	// main bookmark conflicted. Advance must classify the divergence and decline
+	// untouched, matching git's structural classification rather than surfacing
+	// the conflict as an error.
 	got, err := r.Advance(context.Background())
 	if err != nil {
-		t.Fatalf("advance: want quiet decline on diverged bookmark, got error: %v", err)
+		t.Fatalf("advance: want diverged decline on conflicted bookmark, got error: %v", err)
 	}
-	if got != OutcomeUpToDate {
-		t.Fatalf("advance outcome = %q, want up-to-date (diverged, decline)", got)
+	if got != OutcomeDiverged {
+		t.Fatalf("advance outcome = %q, want diverged (declined untouched)", got)
 	}
 	conflicted := strings.TrimSpace(f.runJJ(dest, "bookmark", "list", "main", "--ignore-working-copy",
 		"-T", `name ++ " conflict=" ++ conflict ++ "\n"`))
@@ -634,12 +715,13 @@ func TestJJPushTrunkDivergedSkips(t *testing.T) {
 	}
 }
 
-// jjGeneratedOnlyProbe renders @'s emptiness, description, and bookmarks so a test
-// can assert @ still carries only a generated edit (no description, no bookmarks).
+// jjGeneratedOnlyProbe renders @'s emptiness, description, and bookmarks with the
+// production probe template so a test can assert @ still carries only a generated
+// edit ("f f f": non-empty, no description, no bookmarks).
 func (f *fixture) jjGeneratedOnlyProbe(repo string) string {
 	f.t.Helper()
 	out := f.runJJ(repo, "log", "-r", "@", "--no-graph", "--ignore-working-copy",
-		"-T", `separate(" | ", "empty=" ++ empty, "desc=[" ++ description.first_line() ++ "]", "bookmarks=[" ++ bookmarks.join(",") ++ "]") ++ "\n"`)
+		"-T", `separate(" ", if(empty, "t", "f"), if(description, "t", "f"), if(bookmarks, "t", "f")) ++ "\n"`)
 	return strings.TrimSpace(out)
 }
 
@@ -723,8 +805,8 @@ func TestJJAdvanceGeneratedCleanApply(t *testing.T) {
 	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
 		t.Fatalf("build.gen = %q, want local edit preserved", c)
 	}
-	if probe := f.jjGeneratedOnlyProbe(dest); probe != wcGeneratedDirty {
-		t.Fatalf("@ probe = %q, want non-empty generated-only @", probe)
+	if probe := f.jjGeneratedOnlyProbe(dest); probe != "f f f" {
+		t.Fatalf("@ probe = %q, want f f f (non-empty generated-only @)", probe)
 	}
 }
 

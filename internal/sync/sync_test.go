@@ -542,8 +542,8 @@ func TestSyncNoPushWhenRecentlyActive(t *testing.T) {
 }
 
 // TestSyncNoPushWhenDiverged proves a diverged repo is never force-moved: local is
-// ahead AND origin has independently advanced. jj's conflicted-bookmark skip (and
-// git's non-FF rejection) keep origin put even with the push gate open.
+// ahead AND origin has independently advanced. Advance classifies the divergence,
+// the diverged outcome fails the push gate, and origin stays put.
 func TestSyncNoPushWhenDiverged(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
@@ -555,14 +555,14 @@ func TestSyncNoPushWhenDiverged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
-	// jj now declines a diverged (conflicted) bookmark quietly, like git: no error,
-	// up-to-date, and crucially origin is not force-moved.
+	// jj classifies a diverged (conflicted) bookmark structurally, like git: no
+	// error, diverged, and crucially origin is not force-moved.
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
-		t.Fatalf("diverged repo: want no error (quiet decline like git), got %v", res.Err)
+		t.Fatalf("diverged repo: want no error (diverged decline like git), got %v", res.Err)
 	}
-	if res.Outcome != vcs.OutcomeUpToDate {
-		t.Fatalf("outcome = %q, want up-to-date (diverged, quiet decline)", res.Outcome)
+	if res.Outcome != vcs.OutcomeDiverged {
+		t.Fatalf("outcome = %q, want diverged (declined untouched)", res.Outcome)
 	}
 	if got := h.originMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q on divergence, want unchanged", originBefore, got)

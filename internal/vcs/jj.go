@@ -4,19 +4,14 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const jjOpTimeLayout = "2006-01-02T15:04:05-0700"
-
 const (
-	// wcEmptyClean is the workingCopyState probe line for a disposable @: empty,
-	// undescribed, unbookmarked.
-	wcEmptyClean = "empty=true | desc=[] | bookmarks=[]"
-	// wcGeneratedDirty is the workingCopyState probe line for a candidate
-	// generated-only @: non-empty, undescribed, unbookmarked.
-	wcGeneratedDirty = "empty=false | desc=[] | bookmarks=[]"
+	jjOpTimeLayout = "2006-01-02T15:04:05-0700"
+	opLogPage      = 30
 )
 
 // jjOpNoise is the allow-list of operation descriptions the poller produces or
@@ -78,35 +73,44 @@ func (r *jjRepo) LastActivity(ctx context.Context) (time.Time, error) {
 }
 
 // firstRealOp returns the start time and description of the most recent non-noise
-// operation in the jj op log. It returns the zero time and an empty description
-// when the log holds only noise ops (or is empty); jjOpNoise is the noise set.
+// operation in the jj op log, paging in growing chunks until a real op is found or
+// the log is exhausted — a burst of reposync's own noise ops (peer-notify fetch
+// storms) can bury a real op arbitrarily deep. It returns the zero time and an
+// empty description when the log holds only noise ops (or is empty); jjOpNoise is
+// the noise set.
 func (r *jjRepo) firstRealOp(ctx context.Context) (time.Time, string, error) {
-	out, err := r.jj(ctx, "op", "log", "--no-graph", "--ignore-working-copy",
-		"-T", `time.start().format("%Y-%m-%dT%H:%M:%S%z") ++ " | " ++ description.first_line() ++ "\n"`,
-		"-n", "30")
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		rawTS, rawDesc, ok := strings.Cut(line, " | ")
-		if !ok {
-			return time.Time{}, "", fmt.Errorf("parse jj op log line %q", line)
-		}
-		ts := strings.TrimSpace(rawTS)
-		desc := strings.TrimSpace(rawDesc)
-		if _, noise := jjOpNoise[desc]; noise {
-			continue
-		}
-		started, err := time.Parse(jjOpTimeLayout, ts)
+	for limit := opLogPage; ; limit *= 2 {
+		out, err := r.jj(ctx, "op", "log", "--no-graph", "--ignore-working-copy",
+			"-T", `time.start().format("%Y-%m-%dT%H:%M:%S%z") ++ " | " ++ description.first_line() ++ "\n"`,
+			"-n", strconv.Itoa(limit))
 		if err != nil {
-			return time.Time{}, "", fmt.Errorf("parse jj op timestamp %q: %w", ts, err)
+			return time.Time{}, "", err
 		}
-		return started, desc, nil
+		seen := 0
+		for _, line := range strings.Split(out, "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			seen++
+			rawTS, rawDesc, ok := strings.Cut(line, " | ")
+			if !ok {
+				return time.Time{}, "", fmt.Errorf("parse jj op log line %q", line)
+			}
+			ts := strings.TrimSpace(rawTS)
+			desc := strings.TrimSpace(rawDesc)
+			if _, noise := jjOpNoise[desc]; noise {
+				continue
+			}
+			started, err := time.Parse(jjOpTimeLayout, ts)
+			if err != nil {
+				return time.Time{}, "", fmt.Errorf("parse jj op timestamp %q: %w", ts, err)
+			}
+			return started, desc, nil
+		}
+		if seen < limit {
+			return time.Time{}, "", nil
+		}
 	}
-	return time.Time{}, "", nil
 }
 
 func (r *jjRepo) HasTrunk(ctx context.Context) (bool, error) {
@@ -141,20 +145,21 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	}
 	moved, err := r.trunkMovedPastWorkingCopy(ctx)
 	if err != nil {
-		// A conflicted trunk bookmark means local trunk diverged from origin: the
+		// A conflicted trunk bookmark means local trunk and origin both moved: the
 		// fetch above left it conflicted and revsets naming it now error. We cannot
-		// fast-forward, so decline quietly like the git backend does on a non-FF.
+		// fast-forward, so decline untouched, matching the git backend's structural
+		// ahead-and-behind classification.
 		if isConflictedBookmark(err) {
-			return OutcomeUpToDate, nil
+			return OutcomeDiverged, nil
 		}
 		return "", err
 	}
-	// Steady state: return before disposable() snapshots @, so the daemon never
-	// touches the working copy unless an advance is actually needed.
+	// Steady state: return before probeWorkingCopy snapshots @, so the daemon
+	// never touches the working copy unless an advance is actually needed.
 	if !moved {
 		return OutcomeUpToDate, nil
 	}
-	// Guard before the first snapshot: disposable() below snapshots @, and a
+	// Guard before the first snapshot: probeWorkingCopy below snapshots @, and a
 	// snapshot reconciles against git HEAD. A raw `git commit` between the fetch
 	// and here moved HEAD with no jj op, so snapshotting would import the diverged
 	// HEAD and jj new would strand it — abort untouched instead.
@@ -165,11 +170,12 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 	if !ok {
 		return OutcomeRaced, nil
 	}
-	disposable, err := r.disposable(ctx)
+	p, err := r.probeWorkingCopy(ctx)
 	if err != nil {
 		return "", err
 	}
-	if disposable {
+	switch {
+	case p.empty && !p.described && !p.bookmarked:
 		// An empty @ is only safe to advance when its parent is already on trunk.
 		// Sitting atop unpushed local work, jj new <trunk> would reparent the
 		// working copy onto trunk and strand that work — leave it untouched.
@@ -191,21 +197,25 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 			return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
 		}
 		return OutcomeAdvanced, nil
-	}
-	generatedOnly, err := r.generatedOnlyDirty(ctx)
-	if err != nil {
-		return "", err
-	}
-	if generatedOnly {
+	case !p.empty && !p.described && !p.bookmarked:
+		generatedOnly, err := r.changedPathsGeneratedOnly(ctx, false)
+		if err != nil {
+			return "", err
+		}
+		if !generatedOnly {
+			return OutcomeNotDisposable, nil
+		}
 		safe, err := r.ancestrySafe(ctx)
 		if err != nil {
 			return "", err
 		}
-		if safe {
-			return r.rebaseGenerated(ctx, g)
+		if !safe {
+			return OutcomeNotDisposable, nil
 		}
+		return r.rebaseGenerated(ctx, g)
+	default:
+		return OutcomeNotDisposable, nil
 	}
-	return OutcomeNotDisposable, nil
 }
 
 // PushTrunk fast-forward pushes the local <trunk> bookmark to origin. It pushes
@@ -334,36 +344,31 @@ func (r *jjRepo) changedPathsGeneratedOnly(ctx context.Context, ignoreWorkingCop
 	return len(gen) == len(paths), nil
 }
 
-// workingCopyState renders @'s emptiness, description, and bookmarks as a single
-// trimmed probe line, compared against wcEmptyClean / wcGeneratedDirty.
-func (r *jjRepo) workingCopyState(ctx context.Context) (string, error) {
+type wcProbe struct {
+	empty, described, bookmarked bool
+}
+
+// probeWorkingCopy snapshots @ and classifies it in a single read: emptiness,
+// description, and bookmarks rendered as three t/f flags. Unparseable output is
+// an error, never a guess.
+func (r *jjRepo) probeWorkingCopy(ctx context.Context) (wcProbe, error) {
 	out, err := r.jj(ctx, "log", "-r", "@", "--no-graph",
-		"-T", `separate(" | ", "empty=" ++ empty, "desc=[" ++ description.first_line() ++ "]", "bookmarks=[" ++ bookmarks.join(",") ++ "]") ++ "\n"`)
+		"-T", `separate(" ", if(empty, "t", "f"), if(description, "t", "f"), if(bookmarks, "t", "f")) ++ "\n"`)
 	if err != nil {
-		return "", err
+		return wcProbe{}, err
 	}
-	return strings.TrimSpace(out), nil
-}
-
-// generatedOnlyDirty reports whether @ holds only generated edits: non-empty, no
-// description, no bookmarks, and every changed path is generated.
-func (r *jjRepo) generatedOnlyDirty(ctx context.Context) (bool, error) {
-	state, err := r.workingCopyState(ctx)
-	if err != nil {
-		return false, err
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) != 3 {
+		return wcProbe{}, fmt.Errorf("parse working-copy probe %q", out)
 	}
-	if state != wcGeneratedDirty {
-		return false, nil
+	var p wcProbe
+	for i, dst := range []*bool{&p.empty, &p.described, &p.bookmarked} {
+		if fields[i] != "t" && fields[i] != "f" {
+			return wcProbe{}, fmt.Errorf("parse working-copy probe %q", out)
+		}
+		*dst = fields[i] == "t"
 	}
-	return r.changedPathsGeneratedOnly(ctx, false)
-}
-
-func (r *jjRepo) disposable(ctx context.Context) (bool, error) {
-	state, err := r.workingCopyState(ctx)
-	if err != nil {
-		return false, err
-	}
-	return state == wcEmptyClean, nil
+	return p, nil
 }
 
 // ancestrySafe reports whether every parent of @ is already contained in trunk.
