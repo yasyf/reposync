@@ -27,13 +27,6 @@ func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, 
 	if reason != "" {
 		return true, reason, nil
 	}
-	clean, generatedOnly, _, err := dirtState(ctx, r.path)
-	if err != nil {
-		return false, "", err
-	}
-	if !clean && !generatedOnly {
-		return true, "dirty working tree", nil
-	}
 	reflog, err := r.git(ctx, "reflog", "--date=iso", "-n", "1")
 	if err != nil {
 		return false, "", err
@@ -44,6 +37,13 @@ func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, 
 	}
 	if recent {
 		return true, "recent activity", nil
+	}
+	clean, generatedOnly, _, err := dirtState(ctx, r.path)
+	if err != nil {
+		return false, "", err
+	}
+	if !clean && !generatedOnly {
+		return true, "dirty working tree", nil
 	}
 	return false, "", nil
 }

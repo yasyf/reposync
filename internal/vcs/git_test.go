@@ -170,13 +170,17 @@ func TestGitAdvanceAbortsUnderLock(t *testing.T) {
 	}
 }
 
+// TestGitInUseDirty proves a working tree with a non-generated uncommitted edit
+// is busy from the dirt check. The fresh clone's reflog still counts as recent
+// activity under a normal idle window, so a tiny idle window isolates the dirt
+// classification as the asserted result.
 func TestGitInUseDirty(t *testing.T) {
 	f := newFixture(t)
 	dest := f.gitClone(filepath.Join(f.root, "clone"))
 	r := openGit(t, dest)
 	f.writeFile(dest, "DIRTY.txt", "uncommitted\n")
 
-	busy, reason, err := r.InUse(context.Background(), time.Hour)
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
 		t.Fatalf("in use: %v", err)
 	}
