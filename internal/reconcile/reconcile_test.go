@@ -236,6 +236,47 @@ func TestReconcilePresentRepoNotRecloned(t *testing.T) {
 	}
 }
 
+// TestReconcileBusyRepoReportedBusyAndIntact proves a present repo with a live
+// git ref transaction reconcile-reports busy — not present — and is left
+// untouched, rather than idleSync discarding the busy outcome.
+func TestReconcileBusyRepoReportedBusyAndIntact(t *testing.T) {
+	h := newHarness(t)
+	dest := filepath.Join(h.dataLoc, "alpha")
+	if err := vcs.Clone(context.Background(), h.origin, dest); err != nil {
+		t.Fatalf("seed clone: %v", err)
+	}
+	// Advance origin so an un-gated idle-sync would move the local checkout.
+	h.writeFile(h.seed, "README.md", "v2\n")
+	h.runGit(h.seed, "commit", "-aqm", "v2")
+	h.runGit(h.seed, "push", "-q", "origin", "main")
+
+	lock := filepath.Join(dest, ".git", "packed-refs.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	headBefore := strings.TrimSpace(h.runGit(dest, "rev-parse", "HEAD"))
+
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	results, err := Reconcile(context.Background(), st, "")
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Action != ActionBusy {
+		t.Fatalf("alpha action = %q, want busy", res.Action)
+	}
+	headAfter := strings.TrimSpace(h.runGit(dest, "rev-parse", "HEAD"))
+	if headAfter != headBefore {
+		t.Fatalf("locked repo HEAD moved from %q to %q, want untouched", headBefore, headAfter)
+	}
+}
+
 func TestReconcileSkipsLocalOnly(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "local", Origin: h.origin, Trunk: "main", LocalOnly: true})

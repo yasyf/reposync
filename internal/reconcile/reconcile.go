@@ -31,6 +31,8 @@ const (
 	ActionCloned = "cloned"
 	// ActionPresent means the repo was already present and was idle-synced.
 	ActionPresent = "present"
+	// ActionBusy means the repo was present but in use, so the idle-sync left it untouched.
+	ActionBusy = "busy"
 	// ActionSkippedLocalOnly means a local-only repo was absent and cannot be cloned.
 	ActionSkippedLocalOnly = "skipped-local-only"
 	// ActionSkippedNoOrigin means an absent repo has no origin and cannot be cloned.
@@ -111,7 +113,11 @@ func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmp
 
 	abspath := repo.AbsPath(dl)
 	if present(abspath) {
-		return Result{Relpath: repo.Relpath, Action: ActionPresent, Err: idleSync(ctx, st, abspath)}
+		busy, err := idleSync(ctx, st, abspath)
+		if busy {
+			return Result{Relpath: repo.Relpath, Action: ActionBusy, Err: err}
+		}
+		return Result{Relpath: repo.Relpath, Action: ActionPresent, Err: err}
 	}
 	if repo.LocalOnly {
 		return Result{Relpath: repo.Relpath, Action: ActionSkippedLocalOnly}
@@ -122,7 +128,9 @@ func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmp
 	if err := clone(ctx, repo, abspath, tmpRoot); err != nil {
 		return Result{Relpath: repo.Relpath, Action: ActionCloned, Err: err}
 	}
-	return Result{Relpath: repo.Relpath, Action: ActionCloned, Err: idleSync(ctx, st, abspath)}
+	// Busy is discarded: a fresh clone always looks recently active, and the clone did happen.
+	_, err := idleSync(ctx, st, abspath)
+	return Result{Relpath: repo.Relpath, Action: ActionCloned, Err: err}
 }
 
 // clone clones repo.Origin into a unique temp dir, verifies it is a colocated jj
@@ -174,19 +182,24 @@ func verifyClone(ctx context.Context, tmp, want string) error {
 }
 
 // idleSync runs the idle-safe sync for the single repo at abspath, reusing
-// internal/sync so reconcile never duplicates the vcs flow.
-func idleSync(ctx context.Context, st *state.State, abspath string) error {
+// internal/sync so reconcile never duplicates the vcs flow. It reports whether
+// that repo's sync was busy-gated alongside the joined error.
+func idleSync(ctx context.Context, st *state.State, abspath string) (bool, error) {
 	results, err := sync.Sync(ctx, st, abspath, "")
 	if err != nil {
-		return err
+		return false, err
 	}
+	busy := false
 	var errs []error
 	for _, res := range results {
+		if res.Outcome == sync.OutcomeBusy {
+			busy = true
+		}
 		if res.Err != nil {
 			errs = append(errs, res.Err)
 		}
 	}
-	return errors.Join(errs...)
+	return busy, errors.Join(errs...)
 }
 
 // present reports whether a repo checkout (jj or git) already exists at abspath.
