@@ -30,6 +30,9 @@ const (
 	OutcomeAdvanced Outcome = "advanced"
 	// OutcomeUpToDate means trunk had not moved past the working copy.
 	OutcomeUpToDate Outcome = "up-to-date"
+	// OutcomeDiverged means local trunk and origin both moved; the advance was
+	// declined and the repo left untouched.
+	OutcomeDiverged Outcome = "diverged"
 	// OutcomeBusy means the repo was in use and was left untouched.
 	OutcomeBusy Outcome = "busy"
 	// OutcomeNoTrunk means no tracked origin trunk exists to advance onto.

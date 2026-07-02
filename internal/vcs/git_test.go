@@ -275,8 +275,8 @@ func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if got != OutcomeUpToDate {
-		t.Fatalf("outcome = %q, want up-to-date (ff refused, no-op)", got)
+	if got != OutcomeDiverged {
+		t.Fatalf("outcome = %q, want diverged (ff refused, no-op)", got)
 	}
 	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != localHead {
 		t.Fatalf("local HEAD moved to %q, want unchanged %q", head, localHead)
@@ -286,6 +286,72 @@ func TestGitDivergedRefusesFFNoClobber(t *testing.T) {
 	}
 	if originBefore != f.originMain() {
 		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+}
+
+// TestGitOffTrunkDivergedDeclines proves an off-trunk diverged repo is declined
+// untouched: local main is ahead AND origin has moved, so Advance reports diverged
+// and never force-moves the local main ref.
+func TestGitOffTrunkDivergedDeclines(t *testing.T) {
+	f := newFixture(t)
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	// Divergent local commit on main, then step off trunk onto a feature branch.
+	f.writeFile(dest, "LOCAL.md", "local-only\n")
+	f.runGit(dest, "add", "LOCAL.md")
+	f.runGit(dest, "commit", "-qm", "local divergent")
+	localMain := strings.TrimSpace(f.runGit(dest, "rev-parse", "main"))
+	f.runGit(dest, "checkout", "-q", "-b", "feature")
+	f.advanceOrigin("v2")
+
+	originBefore := f.originMain()
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeDiverged {
+		t.Fatalf("outcome = %q, want diverged (declined, no-op)", got)
+	}
+	if main := strings.TrimSpace(f.runGit(dest, "rev-parse", "main")); main != localMain {
+		t.Fatalf("local main moved to %q, want unchanged %q", main, localMain)
+	}
+	if originBefore != f.originMain() {
+		t.Fatalf("NEVER-PUSH violated: origin main moved from %q to %q", originBefore, f.originMain())
+	}
+}
+
+// TestGitAdvanceGeneratedDivergedLeavesEditIntact proves a generated-only edit on a
+// diverged trunk is declined before the restore loop runs: Advance reports diverged
+// and the local generated edit survives on disk, where the old flow restored/deleted
+// local generated edits ahead of a merge that then failed.
+func TestGitAdvanceGeneratedDivergedLeavesEditIntact(t *testing.T) {
+	f := newFixture(t)
+	f.seedGenerated()
+	dest := f.gitClone(filepath.Join(f.root, "clone"))
+	r := openGit(t, dest)
+
+	// Diverge: a local commit on main, then a trunk commit touching the same
+	// generated path the local edit dirties.
+	f.writeFile(dest, "LOCAL.md", "local-only\n")
+	f.runGit(dest, "add", "LOCAL.md")
+	f.runGit(dest, "commit", "-qm", "local divergent")
+	localHead := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD"))
+	f.writeFile(dest, "build.gen", "local generated edit\n")
+	f.advanceOriginPath("build.gen", "trunk generated v2\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeDiverged {
+		t.Fatalf("outcome = %q, want diverged (declined, no-op)", got)
+	}
+	if c := f.readFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit intact (no restore before a doomed merge)", c)
+	}
+	if head := strings.TrimSpace(f.runGit(dest, "rev-parse", "HEAD")); head != localHead {
+		t.Fatalf("local HEAD moved to %q, want unchanged %q", head, localHead)
 	}
 }
 

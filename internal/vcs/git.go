@@ -2,6 +2,7 @@ package vcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,11 @@ func (r *gitRepo) LastActivity(ctx context.Context) (time.Time, error) {
 
 func (r *gitRepo) HasTrunk(ctx context.Context) (bool, error) {
 	if _, err := r.git(ctx, "rev-parse", "--verify", "-q", "origin/"+r.trunk); err != nil {
-		return false, nil
+		var cerr *cmdError
+		if errors.As(err, &cerr) && cerr.code == 1 && cerr.stderr == "" {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }
@@ -77,21 +82,27 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	if err != nil {
 		return "", err
 	}
-	_, behind, err := r.aheadBehind(ctx)
+	ahead, behind, err := r.aheadBehind(ctx)
 	if err != nil {
 		return "", err
 	}
-	branch, err := r.currentBranch(ctx)
+	onTrunk, err := r.onTrunk(ctx)
 	if err != nil {
 		return "", err
 	}
-	if branch == r.trunk {
+	if onTrunk {
 		_, generatedOnly, generated, err := dirtState(ctx, r.path)
 		if err != nil {
 			return "", err
 		}
 		if generatedOnly {
-			return r.advanceGenerated(ctx, g, behind, generated)
+			return r.advanceGenerated(ctx, g, ahead, behind, generated)
+		}
+		if behind == 0 {
+			return OutcomeUpToDate, nil
+		}
+		if ahead > 0 {
+			return OutcomeDiverged, nil
 		}
 		ok, err := g.stable(ctx)
 		if err != nil {
@@ -101,29 +112,36 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 			return OutcomeRaced, nil
 		}
 		if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
-			return OutcomeUpToDate, nil
+			return "", fmt.Errorf("git merge --ff-only: %w", err)
 		}
-		if behind > 0 {
-			return OutcomeAdvanced, nil
-		}
-		return OutcomeUpToDate, nil
-	}
-	if _, err := r.git(ctx, "fetch", "origin", r.trunk+":"+r.trunk); err != nil {
-		return OutcomeUpToDate, nil
-	}
-	if behind > 0 {
 		return OutcomeAdvanced, nil
 	}
-	return OutcomeUpToDate, nil
+	if behind == 0 {
+		return OutcomeUpToDate, nil
+	}
+	if ahead > 0 {
+		return OutcomeDiverged, nil
+	}
+	// Off trunk, the working copy is not involved: fast-forward the local <trunk>
+	// ref from the tracking ref already fetched above. The plus-less refspec is
+	// the fast-forward guard — never force it.
+	if _, err := r.git(ctx, "fetch", ".", "refs/remotes/origin/"+r.trunk+":refs/heads/"+r.trunk); err != nil {
+		return "", fmt.Errorf("git fetch %s: %w", r.trunk, err)
+	}
+	return OutcomeAdvanced, nil
 }
 
 // advanceGenerated advances an on-trunk working tree whose only uncommitted edits
 // are to generated files. Generated edits that conflict with what trunk changes
 // are dropped (upstream wins); cleanly-applying generated edits are carried
-// untouched through the fast-forward.
-func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, behind int, generated []string) (Outcome, error) {
+// untouched through the fast-forward. A diverged trunk is declined before the
+// restore loop touches any local edit — the merge below could not fast-forward it.
+func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind int, generated []string) (Outcome, error) {
 	if behind == 0 {
 		return OutcomeUpToDate, nil
+	}
+	if ahead > 0 {
+		return OutcomeDiverged, nil
 	}
 	changed, err := r.trunkChangedPaths(ctx)
 	if err != nil {
@@ -179,7 +197,10 @@ func (r *gitRepo) trunkChangedPaths(ctx context.Context) (map[string]struct{}, e
 func (r *gitRepo) tracked(ctx context.Context, path string) (bool, error) {
 	out, err := r.git(ctx, "ls-files", "--error-unmatch", "--", path)
 	if err != nil {
-		return false, nil
+		if exitCode(err) == 1 {
+			return false, nil
+		}
+		return false, err
 	}
 	return strings.TrimSpace(out) != "", nil
 }
@@ -227,17 +248,17 @@ func (r *gitRepo) aheadBehind(ctx context.Context) (ahead, behind int, err error
 	return ahead, behind, nil
 }
 
-func (r *gitRepo) currentBranch(ctx context.Context) (string, error) {
+func (r *gitRepo) onTrunk(ctx context.Context) (bool, error) {
 	out, err := r.git(ctx, "symbolic-ref", "--short", "-q", "HEAD")
 	if err == nil {
-		return strings.TrimSpace(out), nil
+		return strings.TrimSpace(out) == r.trunk, nil
 	}
 	// symbolic-ref -q fails on a detached HEAD; confirm HEAD resolves to tell a
-	// detached HEAD (a legitimate empty branch) from a real failure.
+	// detached HEAD (legitimately off trunk) from a real failure.
 	if _, headErr := r.git(ctx, "rev-parse", "--verify", "-q", "HEAD"); headErr == nil {
-		return "", nil
+		return false, nil
 	}
-	return "", fmt.Errorf("resolve current branch: %w", err)
+	return false, fmt.Errorf("resolve current branch: %w", err)
 }
 
 func (r *gitRepo) reflogRecent(line string, idle time.Duration) (bool, error) {
