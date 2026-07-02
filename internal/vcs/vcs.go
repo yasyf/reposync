@@ -91,14 +91,15 @@ func Open(path, trunk string) (Repo, error) {
 // Clone clones origin into dest as a colocated jj repo (.git + .jj), regardless
 // of whether origin is a jj or a plain-git source.
 func Clone(ctx context.Context, origin, dest string) error {
-	if _, err := run(ctx, "", "jj", "git", "clone", "--colocate", origin, dest); err != nil {
-		return fmt.Errorf("jj git clone %s: %w", origin, err)
-	}
-	return nil
+	_, err := run(ctx, "", "jj", "git", "clone", "--colocate", origin, dest)
+	return err
 }
 
-// WatchPaths returns the VCS metadata leaf directories that change when origin
-// trunk refs or the jj op log move — the minimal cheap-to-watch/stat set.
+// WatchPaths returns the VCS metadata leaf directories to watch for a repo. Each
+// is a small directory holding origin trunk refs (and the jj op log), so it is
+// cheap to watch recursively — unlike the repo root, which watchman ignores as a
+// VCS dir, or .git, whose object store would be crawled. A loose-ref fetch always
+// touches one of these; the rare packed-refs case is caught by the reconcile tick.
 func WatchPaths(root string) []string {
 	git := filepath.Join(root, ".git")
 	paths := []string{

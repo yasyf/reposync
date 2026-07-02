@@ -2,7 +2,6 @@ package vcs
 
 import (
 	"context"
-	"fmt"
 	"strings"
 )
 
@@ -13,7 +12,7 @@ import (
 func dirtState(ctx context.Context, path string) (clean, generatedOnly bool, generated []string, err error) {
 	status, err := run(ctx, path, "git", "-C", path, "status", "--porcelain", "-uall", "-z")
 	if err != nil {
-		return false, false, nil, fmt.Errorf("git status: %w", err)
+		return false, false, nil, err
 	}
 	dirty := parsePorcelainZ(status)
 	if len(dirty) == 0 {
@@ -57,7 +56,7 @@ func generatedPaths(ctx context.Context, path string, paths []string) ([]string,
 	stdin := strings.Join(paths, "\x00") + "\x00"
 	out, err := runStdin(ctx, path, stdin, "git", "-C", path, "check-attr", "-z", "linguist-generated", "--stdin")
 	if err != nil {
-		return nil, fmt.Errorf("git check-attr: %w", err)
+		return nil, err
 	}
 	return parseCheckAttrZ(out), nil
 }

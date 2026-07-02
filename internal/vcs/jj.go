@@ -137,7 +137,7 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 		return OutcomeRaced, nil
 	}
 	if _, err := r.jj(ctx, "git", "fetch", "--remote", "origin", "--ignore-working-copy"); err != nil {
-		return "", fmt.Errorf("jj git fetch: %w", err)
+		return "", err
 	}
 	g, err := r.guardHead(ctx)
 	if err != nil {
@@ -194,7 +194,7 @@ func (r *jjRepo) Advance(ctx context.Context) (Outcome, error) {
 			return OutcomeRaced, nil
 		}
 		if _, err := r.jj(ctx, "new", r.trunk); err != nil {
-			return "", fmt.Errorf("jj new %s: %w", r.trunk, err)
+			return "", err
 		}
 		return OutcomeAdvanced, nil
 	case !p.empty && !p.described && !p.bookmarked:
@@ -248,7 +248,7 @@ func (r *jjRepo) PushTrunk(ctx context.Context) (Outcome, error) {
 		return OutcomeUpToDate, nil
 	}
 	if _, err := r.jj(ctx, "git", "push", "--remote", "origin", "--bookmark", r.trunk, "--ignore-working-copy"); err != nil {
-		return "", fmt.Errorf("jj git push %s: %w", r.trunk, err)
+		return "", err
 	}
 	return OutcomePushed, nil
 }
@@ -284,14 +284,14 @@ func (r *jjRepo) rebaseGenerated(ctx context.Context, g *guard) (Outcome, error)
 		return OutcomeRaced, nil
 	}
 	if _, err := r.jj(ctx, "rebase", "-r", "@", "-d", r.trunk); err != nil {
-		return "", fmt.Errorf("jj rebase: %w", err)
+		return "", err
 	}
 	conflicts, err := r.jj(ctx, "resolve", "--list")
 	if err != nil {
 		if stderrContains(err, "No conflicts found") {
 			return OutcomeRebasedGenerated, nil
 		}
-		return "", fmt.Errorf("jj resolve --list: %w", err)
+		return "", err
 	}
 	for _, line := range strings.Split(conflicts, "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -299,7 +299,7 @@ func (r *jjRepo) rebaseGenerated(ctx context.Context, g *guard) (Outcome, error)
 		}
 		path := conflictListPath(line)
 		if _, err := r.jj(ctx, "restore", "--from", r.trunk, "--", path); err != nil {
-			return "", fmt.Errorf("jj restore %s: %w", path, err)
+			return "", err
 		}
 	}
 	return OutcomeRebasedGenerated, nil
@@ -326,7 +326,7 @@ func (r *jjRepo) changedPathsGeneratedOnly(ctx context.Context, ignoreWorkingCop
 	}
 	out, err := r.jj(ctx, args...)
 	if err != nil {
-		return false, fmt.Errorf("jj diff: %w", err)
+		return false, err
 	}
 	var paths []string
 	for _, line := range strings.Split(out, "\n") {

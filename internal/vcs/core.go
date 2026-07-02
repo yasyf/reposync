@@ -2,7 +2,6 @@ package vcs
 
 import (
 	"context"
-	"fmt"
 	"strings"
 )
 
@@ -20,7 +19,7 @@ func (c *repoCore) Origin(ctx context.Context) (string, error) {
 		if stderrContains(err, "No such remote") {
 			return "", ErrNoOrigin
 		}
-		return "", fmt.Errorf("get origin url: %w", err)
+		return "", err
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -29,7 +28,7 @@ func (c *repoCore) Origin(ctx context.Context) (string, error) {
 func (c *repoCore) TrunkHash(ctx context.Context) (string, error) {
 	out, err := c.git(ctx, "rev-parse", "refs/remotes/origin/"+c.trunk)
 	if err != nil {
-		return "", fmt.Errorf("rev-parse origin/%s: %w", c.trunk, err)
+		return "", err
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -42,7 +41,7 @@ func (c *repoCore) TrunkHash(ctx context.Context) (string, error) {
 func (c *repoCore) headHash(ctx context.Context) (string, error) {
 	out, err := c.git(ctx, "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("rev-parse HEAD: %w", err)
+		return "", err
 	}
 	return strings.TrimSpace(out), nil
 }

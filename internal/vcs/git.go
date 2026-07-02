@@ -76,7 +76,7 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		return OutcomeRaced, nil
 	}
 	if _, err := r.git(ctx, "fetch", "--prune", "origin"); err != nil {
-		return "", fmt.Errorf("git fetch: %w", err)
+		return "", err
 	}
 	g, err := r.guardHead(ctx)
 	if err != nil {
@@ -112,7 +112,7 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 			return OutcomeRaced, nil
 		}
 		if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
-			return "", fmt.Errorf("git merge --ff-only: %w", err)
+			return "", err
 		}
 		return OutcomeAdvanced, nil
 	}
@@ -126,7 +126,7 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	// ref from the tracking ref already fetched above. The plus-less refspec is
 	// the fast-forward guard — never force it.
 	if _, err := r.git(ctx, "fetch", ".", "refs/remotes/origin/"+r.trunk+":refs/heads/"+r.trunk); err != nil {
-		return "", fmt.Errorf("git fetch %s: %w", r.trunk, err)
+		return "", err
 	}
 	return OutcomeAdvanced, nil
 }
@@ -164,7 +164,7 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 		}
 		if tracked {
 			if _, err := r.git(ctx, "restore", "--staged", "--worktree", "--source=HEAD", "--", p); err != nil {
-				return "", fmt.Errorf("git restore %s: %w", p, err)
+				return "", err
 			}
 			continue
 		}
@@ -173,7 +173,7 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 		}
 	}
 	if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
-		return "", fmt.Errorf("git merge --ff-only: %w", err)
+		return "", err
 	}
 	return OutcomeRebasedGenerated, nil
 }
@@ -182,7 +182,7 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 func (r *gitRepo) trunkChangedPaths(ctx context.Context) (map[string]struct{}, error) {
 	out, err := r.git(ctx, "diff", "--name-only", "HEAD", "origin/"+r.trunk)
 	if err != nil {
-		return nil, fmt.Errorf("git diff trunk: %w", err)
+		return nil, err
 	}
 	changed := make(map[string]struct{})
 	for _, line := range strings.Split(out, "\n") {
@@ -221,7 +221,7 @@ func (r *gitRepo) PushTrunk(ctx context.Context) (Outcome, error) {
 		return OutcomeUpToDate, nil
 	}
 	if _, err := r.git(ctx, "push", "origin", r.trunk+":"+r.trunk); err != nil {
-		return "", fmt.Errorf("git push %s: %w", r.trunk, err)
+		return "", err
 	}
 	return OutcomePushed, nil
 }
