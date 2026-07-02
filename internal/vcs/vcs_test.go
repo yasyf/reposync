@@ -14,7 +14,7 @@ func TestIsWorkingCopyContention(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"concurrent checkout", fmt.Errorf("jj new main: %w", errors.New("Internal error: Failed to check out commit 99366219: Concurrent checkout")), true},
-		{"concurrent working copy operation", errors.New("Concurrent working copy operation. Try again."), true},
+		{"concurrent working copy operation", errors.New("Concurrent working copy operation"), true},
 		{"failed checkout", errors.New("Internal error: Failed to check out commit deadbeef"), true},
 		{"unrelated", errors.New("jj git fetch: exit status 1: network unreachable"), false},
 	}

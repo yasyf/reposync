@@ -99,6 +99,7 @@ func TestJJAdvanceUpToDate(t *testing.T) {
 func TestJJStableDetectsGitHeadDrift(t *testing.T) {
 	f := newFixture(t)
 	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	f.configGit(dest) // a raw git commit below needs a git identity in the colocated repo
 	r := openJJ(t, dest).(*jjRepo)
 	ctx := context.Background()
 
@@ -169,6 +170,7 @@ func TestJJAdvanceAbortsUnderLock(t *testing.T) {
 func TestJJAdvanceRawCommitNotStranded(t *testing.T) {
 	f := newFixture(t)
 	dest := f.jjClone(filepath.Join(f.root, "clone"))
+	f.configGit(dest) // a raw git commit below needs a git identity in the colocated repo
 	r := openJJ(t, dest)
 
 	// The footgun: commit real work through raw git, moving HEAD with no jj op.
