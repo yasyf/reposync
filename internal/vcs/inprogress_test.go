@@ -79,6 +79,26 @@ func TestOpInProgressFirstHitWins(t *testing.T) {
 	}
 }
 
+// TestOpInProgressExportedWrapper pins the exported wrapper over the probe: it
+// reports the marker reason while a lock is held and "" once the repo is idle.
+func TestOpInProgressExportedWrapper(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+
+	if reason, err := OpInProgress(dest); err != nil || reason != "" {
+		t.Fatalf("idle OpInProgress = (%q, %v), want (\"\", nil)", reason, err)
+	}
+
+	create(t, filepath.Join(dest, ".git", "index.lock"), false)
+	reason, err := OpInProgress(dest)
+	if err != nil {
+		t.Fatalf("OpInProgress: %v", err)
+	}
+	if reason != "git index locked" {
+		t.Fatalf("OpInProgress = %q, want git index locked", reason)
+	}
+}
+
 func create(t *testing.T, path string, dir bool) {
 	t.Helper()
 	if dir {

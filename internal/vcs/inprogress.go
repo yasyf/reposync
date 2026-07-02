@@ -37,6 +37,13 @@ var jjInProgressMarkers = []struct {
 	{filepath.Join("repo", "git_import_export.lock"), "jj importing git refs"},
 }
 
+// OpInProgress reports a live git or jj operation under root by lock-marker
+// presence alone, or "" when the repo is idle. It never shells out, so it is safe
+// to probe a locked repo.
+func OpInProgress(root string) (string, error) {
+	return opInProgress(root)
+}
+
 // opInProgress reports a live git or jj operation under repoPath, or "" when the
 // repo is idle. It only stats known lock and state markers — presence is the
 // signal — so it never shells into (and so never blocks on) a locked repo. The git

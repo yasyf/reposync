@@ -30,11 +30,26 @@ func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string)
 
 func watchItem(ctx context.Context, errw io.Writer, id string, repo state.Repo, dl string) syncservice.WatchItem {
 	abs := repo.AbsPath(dl)
+	reason := busyReason(errw, abs)
 	return syncservice.WatchItem{
 		ID:          id,
 		WatchDirs:   vcs.WatchPaths(abs),
 		Fingerprint: trunkHash(ctx, errw, abs, repo.Trunk),
+		Busy:        reason != "",
+		BusyReason:  reason,
 	}
+}
+
+// busyReason probes for a live git/jj operation at abs by lock-marker presence, the
+// busy signal synckitd's watch gate defers on. It returns "" (never an error) when
+// the probe fails, logging the cause so a probe failure never drops the item.
+func busyReason(errw io.Writer, abs string) string {
+	reason, err := vcs.OpInProgress(abs)
+	if err != nil {
+		_, _ = fmt.Fprintf(errw, "reposync list: %s: %v\n", abs, err)
+		return ""
+	}
+	return reason
 }
 
 // trunkHash resolves the upstream trunk commit hash through the vcs layer, the

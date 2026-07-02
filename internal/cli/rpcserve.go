@@ -71,25 +71,26 @@ func (repoConsumer) List(ctx context.Context) ([]syncservice.WatchItem, error) {
 }
 
 // Reconcile converges this host against origin — pull-merge every peer, then clone or
-// idle-sync each repo — and reports how many repos converged. origin is the anti-echo
-// provenance tag the converge pass uses to skip the notifying peer.
+// idle-sync each repo — and reports how many repos converged and how many were left
+// untouched because they were busy. origin is the anti-echo provenance tag the
+// converge pass uses to skip the notifying peer.
 func (repoConsumer) Reconcile(ctx context.Context, origin string) (syncservice.ReconcileResult, error) {
-	converged, err := reconcileConverged(ctx, origin)
+	converged, skippedBusy, err := reconcileConverged(ctx, origin)
 	if err != nil {
 		return syncservice.ReconcileResult{}, err
 	}
-	return syncservice.ReconcileResult{Converged: converged}, nil
+	return syncservice.ReconcileResult{Converged: converged, SkippedBusy: skippedBusy}, nil
 }
 
 // Sync runs the same converging reconcile as [repoConsumer.Reconcile]; reposync has no
-// distinct sync pass, so both drive reconcile.Reconcile and report the converged
-// count.
+// distinct sync pass, so both drive reconcile.Reconcile and report the same converged
+// and skipped-busy counts.
 func (repoConsumer) Sync(ctx context.Context, origin string) (syncservice.SyncResult, error) {
-	converged, err := reconcileConverged(ctx, origin)
+	converged, skippedBusy, err := reconcileConverged(ctx, origin)
 	if err != nil {
 		return syncservice.SyncResult{}, err
 	}
-	return syncservice.SyncResult{Converged: converged}, nil
+	return syncservice.SyncResult{Converged: converged, SkippedBusy: skippedBusy}, nil
 }
 
 // GetState returns the propagating repo registry as opaque JSON, the form a peer
@@ -102,23 +103,26 @@ func (repoConsumer) GetState(_ context.Context) (syncservice.RawRegistry, error)
 	return st.EncodeRepoRegistry()
 }
 
-// reconcileConverged runs a converging reconcile pass against origin and counts the
-// repos that landed on disk without error, the converged tally both Reconcile and
-// Sync report.
-func reconcileConverged(ctx context.Context, origin string) (int, error) {
+// reconcileConverged runs a converging reconcile pass against origin and tallies the
+// repos that landed on disk without error apart from those skipped as busy — a busy
+// repo is not an error, but it did not converge either — the counts both Reconcile
+// and Sync report.
+func reconcileConverged(ctx context.Context, origin string) (converged, skippedBusy int, err error) {
 	st, err := state.Load()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	results, err := reconcile.Reconcile(ctx, st, origin)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	converged := 0
 	for _, r := range results {
-		if r.Err == nil {
+		switch {
+		case r.Action == reconcile.ActionBusy:
+			skippedBusy++
+		case r.Err == nil:
 			converged++
 		}
 	}
-	return converged, nil
+	return converged, skippedBusy, nil
 }
