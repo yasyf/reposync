@@ -97,6 +97,20 @@ func Clone(ctx context.Context, origin, dest string) error {
 	return nil
 }
 
+// WatchPaths returns the VCS metadata leaf directories that change when origin
+// trunk refs or the jj op log move — the minimal cheap-to-watch/stat set.
+func WatchPaths(root string) []string {
+	git := filepath.Join(root, ".git")
+	paths := []string{
+		filepath.Join(git, "refs", "remotes", "origin"),
+		filepath.Join(git, "logs", "refs", "remotes", "origin"),
+	}
+	if isDir(filepath.Join(root, ".jj")) {
+		paths = append(paths, filepath.Join(root, ".jj", "repo", "op_heads", "heads"))
+	}
+	return paths
+}
+
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()

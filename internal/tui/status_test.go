@@ -120,10 +120,10 @@ func TestApplyStatusRefineSorts(t *testing.T) {
 
 func TestRepoMTime(t *testing.T) {
 	dir := t.TempDir()
-	if repoMTime(dir, "git").IsZero() {
+	if repoMTime(dir).IsZero() {
 		t.Fatal("repoMTime of an existing dir should fall back to the root mtime, not zero")
 	}
-	if !repoMTime(filepath.Join(dir, "missing"), "git").IsZero() {
+	if !repoMTime(filepath.Join(dir, "missing")).IsZero() {
 		t.Fatal("repoMTime of a missing path should be zero")
 	}
 }

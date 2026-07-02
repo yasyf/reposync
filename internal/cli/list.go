@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/yasyf/synckit/syncservice"
 
@@ -34,7 +32,7 @@ func watchItem(ctx context.Context, errw io.Writer, id string, repo state.Repo, 
 	abs := repo.AbsPath(dl)
 	return syncservice.WatchItem{
 		ID:          id,
-		WatchDirs:   watchSet(abs),
+		WatchDirs:   vcs.WatchPaths(abs),
 		Fingerprint: trunkHash(ctx, errw, abs, repo.Trunk),
 	}
 }
@@ -54,31 +52,4 @@ func trunkHash(ctx context.Context, errw io.Writer, abs, trunk string) string {
 		return ""
 	}
 	return hash
-}
-
-// watchSet returns the VCS metadata leaf directories to watch for a repo, by kind.
-// Each is a small directory holding origin trunk refs (and the jj op log), so it is
-// cheap to watch recursively — unlike the repo root, which watchman ignores as a
-// VCS dir, or .git, whose object store would be crawled. A loose-ref fetch always
-// touches one of these; the rare packed-refs case is caught by the reconcile tick.
-func watchSet(abs string) []string {
-	git := filepath.Join(abs, ".git")
-	originRefs := filepath.Join(git, "refs", "remotes", "origin")
-	originLogs := filepath.Join(git, "logs", "refs", "remotes", "origin")
-	if isDir(filepath.Join(abs, ".jj")) {
-		return []string{
-			filepath.Join(abs, ".jj", "repo", "op_heads", "heads"),
-			originRefs,
-			originLogs,
-		}
-	}
-	return []string{
-		originRefs,
-		originLogs,
-	}
-}
-
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }

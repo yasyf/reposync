@@ -44,7 +44,7 @@ func newRepoItems(cands []discover.Candidate) []list.Item {
 		items[i] = repoItem{
 			cand:     c,
 			selected: c.Tracked,
-			mtime:    repoMTime(c.AbsPath, c.Kind),
+			mtime:    repoMTime(c.AbsPath),
 		}
 	}
 	return items
