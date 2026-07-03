@@ -236,9 +236,10 @@ func TestReconcilePresentRepoNotRecloned(t *testing.T) {
 	}
 }
 
-// TestReconcileBusyRepoReportedBusyAndIntact proves a present repo with a live
+// TestReconcileBusyRepoReportedBusyAndIntact proves a present repo with a fresh
 // git ref transaction reconcile-reports busy — not present — and is left
-// untouched, rather than idleSync discarding the busy outcome.
+// untouched, rather than idleSync discarding the busy outcome. The fresh lock is
+// younger than staleLockAge, so the janitor leaves it in place.
 func TestReconcileBusyRepoReportedBusyAndIntact(t *testing.T) {
 	h := newHarness(t)
 	dest := filepath.Join(h.dataLoc, "alpha")
@@ -254,15 +255,13 @@ func TestReconcileBusyRepoReportedBusyAndIntact(t *testing.T) {
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
+	t.Cleanup(func() { _ = os.Remove(lock) })
 	headBefore := strings.TrimSpace(h.runGit(dest, "rev-parse", "HEAD"))
 
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 	results, err := Reconcile(context.Background(), st, "")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
-	}
-	if err := os.Remove(lock); err != nil {
-		t.Fatalf("remove lock: %v", err)
 	}
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -271,9 +270,59 @@ func TestReconcileBusyRepoReportedBusyAndIntact(t *testing.T) {
 	if res.Action != ActionBusy {
 		t.Fatalf("alpha action = %q, want busy", res.Action)
 	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("fresh lock removed by janitor: %v", err)
+	}
 	headAfter := strings.TrimSpace(h.runGit(dest, "rev-parse", "HEAD"))
 	if headAfter != headBefore {
 		t.Fatalf("locked repo HEAD moved from %q to %q, want untouched", headBefore, headAfter)
+	}
+}
+
+// TestReconcileClearsStaleLockAndSyncs proves reconcile self-heals a dead holder's
+// lock through the same janitor: a backdated packed-refs.lock is removed, the repo
+// reports present (not busy), the lock is gone, and local trunk advances onto origin.
+func TestReconcileClearsStaleLockAndSyncs(t *testing.T) {
+	h := newHarness(t)
+	dest := filepath.Join(h.dataLoc, "alpha")
+	if err := vcs.Clone(context.Background(), h.origin, dest); err != nil {
+		t.Fatalf("seed clone: %v", err)
+	}
+	h.writeFile(h.seed, "README.md", "v2\n")
+	h.runGit(h.seed, "commit", "-aqm", "v2")
+	h.runGit(h.seed, "push", "-q", "origin", "main")
+	want := strings.TrimSpace(h.runGit(h.root, "-C", h.origin, "rev-parse", "main"))
+
+	lock := filepath.Join(dest, ".git", "packed-refs.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	stale := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lock, stale, stale); err != nil {
+		t.Fatalf("backdate lock: %v", err)
+	}
+
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+	results, err := Reconcile(context.Background(), st, "")
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	res := resultFor(t, results, "alpha")
+	if res.Err != nil {
+		t.Fatalf("alpha err: %v", res.Err)
+	}
+	if res.Action != ActionPresent {
+		t.Fatalf("alpha action = %q, want present", res.Action)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("stale lock still present after reconcile: %v", err)
+	}
+	r, err := vcs.Open(dest, "main")
+	if err != nil {
+		t.Fatalf("open advanced repo: %v", err)
+	}
+	if got, _ := r.TrunkHash(context.Background()); got != want {
+		t.Fatalf("alpha trunk hash = %q, want %q", got, want)
 	}
 }
 

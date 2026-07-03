@@ -7,6 +7,7 @@ package sync
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"sync"
 	"time"
@@ -94,6 +95,15 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 	if err != nil {
 		res.Err = err
 		return res
+	}
+
+	cleared, err := vcs.ClearStaleLocks(abspath)
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	for _, l := range cleared {
+		log.Printf("sync: %s: removed stale lock %s", repo.Relpath, l)
 	}
 
 	busy, reason, err := r.InUse(ctx, idle)

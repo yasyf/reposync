@@ -194,10 +194,11 @@ func TestSyncBusyRepoSkippedAndIntact(t *testing.T) {
 	}
 }
 
-// TestSyncLockedRepoSkippedAndIntact proves a repo with a live git ref transaction
+// TestSyncLockedRepoSkippedAndIntact proves a repo with a fresh git ref transaction
 // is treated as busy and left untouched: the exact packed-refs.lock symptom that
-// orphaned the reported commits now short-circuits at the InUse gate. Origin does
-// not move even with trunk advanced and the push gate open.
+// orphaned the reported commits short-circuits at the InUse gate. The fresh lock is
+// younger than staleLockAge, so the janitor leaves it in place, and origin does not
+// move even with trunk advanced and the push gate open.
 func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("beta")
@@ -207,15 +208,13 @@ func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	if err := os.WriteFile(lock, nil, 0o600); err != nil {
 		t.Fatalf("write lock: %v", err)
 	}
+	t.Cleanup(func() { _ = os.Remove(lock) })
 
 	st := h.state(state.Repo{Relpath: "beta", Origin: h.Origin, Trunk: "main"})
 	originBefore := h.OriginMain()
 	results, err := Sync(context.Background(), st, "", "")
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
-	}
-	if err := os.Remove(lock); err != nil {
-		t.Fatalf("remove lock: %v", err)
 	}
 	res := resultFor(t, results, "beta")
 	if res.Err != nil {
@@ -227,8 +226,50 @@ func TestSyncLockedRepoSkippedAndIntact(t *testing.T) {
 	if res.Reason != "git refs locked" {
 		t.Fatalf("beta reason = %q, want git refs locked", res.Reason)
 	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("fresh lock removed by janitor: %v", err)
+	}
 	if got := h.OriginMain(); got != originBefore {
 		t.Fatalf("origin main moved from %q to %q under a held lock, want unchanged", originBefore, got)
+	}
+}
+
+// TestSyncClearsStaleLockAndAdvances proves the janitor self-heals a dead holder's
+// lock: a backdated packed-refs.lock is removed before the InUse gate, so the repo
+// syncs normally — the lock is gone and local trunk advances onto origin — instead
+// of staying wedged busy forever.
+func TestSyncClearsStaleLockAndAdvances(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("beta")
+	want := h.AdvanceOrigin("v2")
+
+	lock := filepath.Join(dest, ".git", "packed-refs.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+	stale := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lock, stale, stale); err != nil {
+		t.Fatalf("backdate lock: %v", err)
+	}
+
+	st := h.state(state.Repo{Relpath: "beta", Origin: h.Origin, Trunk: "main"})
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "beta")
+	if res.Err != nil {
+		t.Fatalf("beta err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeAdvanced {
+		t.Fatalf("beta outcome = %q, want advanced", res.Outcome)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("stale lock still present after sync: %v", err)
+	}
+	r, _ := vcs.Open(dest, "main")
+	if got, _ := r.TrunkHash(context.Background()); got != want {
+		t.Fatalf("beta trunk hash = %q, want %q", got, want)
 	}
 }
 
