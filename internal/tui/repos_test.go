@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
@@ -124,6 +126,67 @@ func TestReposApplyNothingToApply(t *testing.T) {
 	if !strings.Contains(rm.status, "nothing to apply") {
 		t.Fatalf("status = %q, want it to mention nothing to apply", rm.status)
 	}
+}
+
+// sizedReposModel builds a loaded repos screen sized to a wxh terminal (the inner
+// size the router hands the screen) and stages the given rows. It drives the real
+// WindowSizeMsg path so the master-detail split is sized exactly as in production.
+func sizedReposModel(t *testing.T, w, h int, items ...repoItem) reposModel {
+	t.Helper()
+	m := newReposModel()
+	next, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m = next.(reposModel)
+	m.loading = false
+	raw := make([]list.Item, len(items))
+	for i, it := range items {
+		raw[i] = it
+	}
+	m.setRepoItems(raw)
+	return m
+}
+
+// TestReposViewHeightFitsBudget pins the whole screen to the terminal's row
+// budget: an open confirm box or the applying spinner must be reserved out of the
+// split, never pushed past the last row. Relpaths are far wider than the list pane
+// so the v0.7.2 no-wrap truncation is exercised too.
+func TestReposViewHeightFitsBudget(t *testing.T) {
+	const w, h = 80, 30
+	long := strings.Repeat("deeply/nested/", 8) + "repo"
+	tracked := discover.Candidate{Relpath: long, Origin: "https://x/" + long + ".git", Kind: "git", Tracked: true}
+	untracked := discover.Candidate{Relpath: long, Origin: "https://x/" + long + ".git", Kind: "git"}
+
+	t.Run("plain list", func(t *testing.T) {
+		m := sizedReposModel(t, w, h, repoItem{cand: tracked, selected: true})
+		if got := lipgloss.Height(m.View()); got != h {
+			t.Fatalf("plain View height = %d, want %d", got, h)
+		}
+	})
+
+	t.Run("confirm open", func(t *testing.T) {
+		// A tracked repo deselected makes apply() open the disable confirm dialog.
+		m := sizedReposModel(t, w, h, repoItem{cand: tracked, selected: false})
+		next, _ := m.apply()
+		m = next.(reposModel)
+		if m.confirm == nil {
+			t.Fatal("apply() with a pending disable must open the confirm dialog")
+		}
+		if got := lipgloss.Height(m.View()); got != h {
+			t.Fatalf("confirm-open View height = %d, want %d", got, h)
+		}
+	})
+
+	t.Run("applying spinner", func(t *testing.T) {
+		// An untracked repo selected makes apply() enter the applying state directly.
+		m := sizedReposModel(t, w, h, repoItem{cand: untracked, selected: true})
+		next, _ := m.apply()
+		m = next.(reposModel)
+		if !m.applying {
+			t.Fatal("an enable-only apply() must enter the applying state")
+		}
+		if got := lipgloss.Height(m.View()); got != h {
+			t.Fatalf("applying View height = %d, want %d", got, h)
+		}
+	})
 }
 
 func TestReposApplyEnableOnlyRunsImmediately(t *testing.T) {

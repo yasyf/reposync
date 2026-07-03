@@ -46,6 +46,9 @@ type reposModel struct {
 	sortMode   sortMode
 	generation int
 
+	width  int
+	height int
+
 	mdListW      int
 	mdDetailW    int
 	mdHeight     int
@@ -55,6 +58,13 @@ type reposModel struct {
 // reposReserve is the rows the repos screen keeps below the master-detail split
 // for its status line.
 const reposReserve = 1
+
+// confirmReserve is the extra rows an open confirmation prompt claims below the
+// split: its single prompt line plus the confirm box's top and bottom borders.
+const confirmReserve = 3
+
+// applyingReserve is the extra row the "Applying…" spinner claims below the split.
+const applyingReserve = 1
 
 func newReposModel() reposModel {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
@@ -87,8 +97,9 @@ func (m reposModel) Init() tea.Cmd {
 func (m reposModel) Update(msg tea.Msg) (synckittui.Screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = synckittui.SplitDims(msg.Width, msg.Height-synckittui.FilterBarLines-reposReserve)
-		m.list.SetSize(m.mdListW, m.mdHeight)
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeSplit()
 		return m, nil
 
 	case reposLoadedMsg:
@@ -106,6 +117,7 @@ func (m reposModel) Update(msg tea.Msg) (synckittui.Screen, tea.Cmd) {
 
 	case reposAppliedMsg:
 		m.applying = false
+		m.resizeSplit()
 		m.status = applySummary(msg.results, msg.err)
 		return m, discoverReposCmd()
 
@@ -133,9 +145,11 @@ func (m reposModel) handleKey(msg tea.KeyMsg) (synckittui.Screen, tea.Cmd) {
 			sel := m.confirm.sel
 			m.confirm = nil
 			m.applying = true
+			m.resizeSplit()
 			return m, tea.Batch(m.spin.Tick, applyReposCmd(sel))
 		case key.Matches(msg, m.keys.No):
 			m.confirm = nil
+			m.resizeSplit()
 			return m, nil
 		}
 		return m, nil
@@ -180,6 +194,21 @@ func (m reposModel) handleFilterKey(msg tea.KeyMsg) (synckittui.Screen, tea.Cmd)
 	m.filter, icmd = m.filter.Update(msg)
 	rcmd := m.refresh()
 	return m, tea.Batch(icmd, rcmd)
+}
+
+// resizeSplit recomputes the master-detail dimensions for the stored terminal
+// size, widening the reserve while a confirmation prompt or the applying spinner
+// is showing so neither pushes the layout past the last terminal row.
+func (m *reposModel) resizeSplit() {
+	reserve := reposReserve
+	if m.confirm != nil {
+		reserve += confirmReserve
+	}
+	if m.applying {
+		reserve += applyingReserve
+	}
+	m.mdListW, m.mdDetailW, m.mdHeight, m.mdShowDetail = synckittui.SplitDims(m.width, m.height-synckittui.FilterBarLines-reserve)
+	m.list.SetSize(m.mdListW, m.mdHeight)
 }
 
 // refresh recomputes the visible list from the canonical slice under the active
@@ -290,9 +319,11 @@ func (m reposModel) apply() (synckittui.Screen, tea.Cmd) {
 			prompt: fmt.Sprintf("Disable %d tracked repo(s)? They stop syncing. (y/N)", len(sel.Disable)),
 			sel:    sel,
 		}
+		m.resizeSplit()
 		return m, nil
 	}
 	m.applying = true
+	m.resizeSplit()
 	return m, tea.Batch(m.spin.Tick, applyReposCmd(sel))
 }
 
