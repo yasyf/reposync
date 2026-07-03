@@ -155,6 +155,10 @@ func (m reposModel) handleKey(msg tea.KeyMsg) (synckittui.Screen, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.applying {
+		return m, nil
+	}
+
 	if m.filter.Focused() {
 		return m.handleFilterKey(msg)
 	}

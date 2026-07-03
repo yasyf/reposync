@@ -208,3 +208,30 @@ func TestReposApplyEnableOnlyRunsImmediately(t *testing.T) {
 		t.Fatal("an enable-only apply should issue the apply command")
 	}
 }
+
+// TestReposKeysIgnoredWhileApplying pins the in-flight apply gate: a second
+// enter must not reopen the confirm dialog or race the running apply.
+func TestReposKeysIgnoredWhileApplying(t *testing.T) {
+	tracked := discover.Candidate{Relpath: "a/repo", Origin: "https://x/a.git", Kind: "git", Tracked: true}
+
+	m := sizedReposModel(t, 80, 30, repoItem{cand: tracked, selected: false})
+	next, _ := m.apply()
+	m = next.(reposModel)
+	if m.confirm == nil {
+		t.Fatal("apply() with a pending disable must open the confirm dialog")
+	}
+	next, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = next.(reposModel)
+	if !m.applying || m.confirm != nil {
+		t.Fatal("y must start the apply and close the confirm dialog")
+	}
+
+	next, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(reposModel)
+	if m.confirm != nil {
+		t.Fatal("enter during an in-flight apply must not reopen the confirm dialog")
+	}
+	if !m.applying {
+		t.Fatal("the in-flight apply must survive stray keys")
+	}
+}
