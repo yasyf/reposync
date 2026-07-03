@@ -194,6 +194,7 @@ func TestClearStaleLocksSkipsLiveJJLock(t *testing.T) {
 		t.Fatalf("backdate jj lock: %v", err)
 	}
 
+	//nolint:gosec // G304: p is a lock path inside this test's t.TempDir repo.
 	held, err := os.OpenFile(p, os.O_RDONLY, 0)
 	if err != nil {
 		t.Fatalf("open jj lock: %v", err)

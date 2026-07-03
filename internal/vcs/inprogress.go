@@ -121,6 +121,7 @@ func removeIfStale(path string, probeFlock bool) (bool, error) {
 // holder is alive, so the lock is left in place (not an error). The remove happens
 // while the probe lock is held so a concurrent acquirer cannot slip in between.
 func removeIfHolderDead(path string) (bool, error) {
+	//nolint:gosec // G304: path is a lock file inside a repo reposync manages, from internal call sites, not untrusted input.
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
