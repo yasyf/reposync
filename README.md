@@ -16,7 +16,7 @@ reposync install
 
 That's the whole setup. `reposync sync` runs the same converge pass the daemon now runs for you:
 
-<img src="docs/assets/demo.png" alt="Terminal running 'reposync sync' — api fast-forwarded, notes skipped busy with a dirty working tree, web already up-to-date" width="700">
+<img src="docs/assets/demo.png" alt="Terminal running 'reposync sync' — api advanced, notes busy (dirty working tree), web up-to-date" width="700">
 
 Driving with an agent? Paste this:
 
