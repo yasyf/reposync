@@ -59,6 +59,8 @@ $ reposync sync
 ✓ notes: busy (dirty working tree)
 ```
 
+A stale lock left behind by a killed git or jj process no longer wedges a repo: sync clears a `packed-refs.lock` after 30 minutes, clears a jj lock of the same age once a flock probe confirms its holder is dead, and logs what it removed.
+
 The only write it ever sends is a fast-forward push of your own trunk, and only after the repo has been quiet past `push_after` (a day by default).
 
 ## Commands

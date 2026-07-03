@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Canceling a git/jj invocation now sends SIGTERM to the whole process group, so the git that jj
+  spawns for fetch and push also unwinds its ref transaction and unlinks its lock files before the
+  10-second SIGKILL backstop fires.
+- Sync self-heals a stale `packed-refs.lock` after 30 minutes, and reclaims a stale jj working-copy
+  or git-import lock only once a flock probe confirms its holder is dead, instead of reporting the
+  repo busy forever after a killed process left one behind.
+
+### Changed
+- reposync-driven git — including the git that jj spawns for fetch and push — runs with auto-gc and
+  auto-maintenance suppressed, so no invocation holds `packed-refs.lock` inside a killable window.
+- The default `repo_op_timeout` is raised from 2m to 5m.
+
 ## [0.10.2] - 2026-06-27
 
 ### Changed
