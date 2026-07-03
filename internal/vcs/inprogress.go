@@ -128,7 +128,7 @@ func removeIfHolderDead(path string) (bool, error) {
 		}
 		return false, fmt.Errorf("open jj lock %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return false, nil
