@@ -6,7 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-03
+
 ### Fixed
+- The TUI no longer renders past the bottom of the terminal, where long repo names used to push
+  the end of the list and the key-hint bar off-screen. Bumping synckit to v0.7.2 stops the
+  master-detail panes from re-wrapping rows already truncated to the column width and makes the
+  router reserve the help bar's true height when `?` expands it. On the Repos tab, an open disable confirm or the
+  applying spinner is now reserved out of the split instead of overflowing it, and repo keys are
+  ignored while an apply is in flight so a stray enter cannot race the running apply.
 - Canceling a git/jj invocation now sends SIGTERM to the whole process group, so the git that jj
   spawns for fetch and push also unwinds its ref transaction and unlinks its lock files before the
   10-second SIGKILL backstop fires.
