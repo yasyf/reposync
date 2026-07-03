@@ -35,8 +35,8 @@ func TestLoadMissingReturnsDefaults(t *testing.T) {
 	if got := time.Duration(s.Settings.IdleThreshold); got != 30*time.Minute {
 		t.Errorf("IdleThreshold = %s, want 30m", got)
 	}
-	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
-		t.Errorf("RepoOpTimeout = %s, want 2m", got)
+	if got := time.Duration(s.Settings.RepoOpTimeout); got != 5*time.Minute {
+		t.Errorf("RepoOpTimeout = %s, want 5m", got)
 	}
 	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
 		t.Errorf("PushAfter = %s, want 24h", got)
@@ -65,8 +65,8 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 	if got := time.Duration(s.Settings.IdleThreshold); got != 10*time.Minute {
 		t.Errorf("IdleThreshold = %s, want explicit 10m", got)
 	}
-	if got := time.Duration(s.Settings.RepoOpTimeout); got != 2*time.Minute {
-		t.Errorf("RepoOpTimeout = %s, want default 2m", got)
+	if got := time.Duration(s.Settings.RepoOpTimeout); got != 5*time.Minute {
+		t.Errorf("RepoOpTimeout = %s, want default 5m", got)
 	}
 	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
 		t.Errorf("PushAfter = %s, want default 24h", got)
