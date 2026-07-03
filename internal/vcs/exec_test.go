@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestRunFailureTypedError pins run()'s failure contract: the cmdError keeps the
@@ -51,5 +54,57 @@ func TestRunFailureTypedError(t *testing.T) {
 	}
 	if got := exitCode(errors.New("never ran a command")); got != -1 {
 		t.Errorf("exitCode(non-command error) = %d, want -1", got)
+	}
+}
+
+// TestRunCancelSendsSIGTERM proves a canceled invocation is signaled with SIGTERM,
+// not SIGKILL: a child that traps TERM runs its cleanup handler (drops a sentinel)
+// and exits well within termGrace, so a killed git/jj gets the chance to unwind its
+// ref transaction and unlink its lock files.
+func TestRunCancelSendsSIGTERM(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "cleaned")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// sleep runs in the background under `wait` so the trapped signal interrupts
+	// promptly (a foreground child defers the trap until it exits); the trap kills
+	// the child so no orphan keeps the output pipes open past WaitDelay.
+	script := "trap 'touch " + sentinel + "; kill $p 2>/dev/null; exit 0' TERM; sleep 30 & p=$!; wait"
+	start := time.Now()
+	_, err := run(ctx, dir, "sh", "-c", script)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("run of a canceled command returned nil error")
+	}
+	if elapsed >= termGrace {
+		t.Fatalf("run took %v, want well under termGrace %v (SIGKILL backstop fired)", elapsed, termGrace)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("sentinel missing: TERM handler never ran (SIGKILL?): %v", err)
+	}
+}
+
+// TestRunSuppressesAutoMaintenance proves the gitConfigEnv plumbing reaches git end
+// to end: reposync-driven git resolves gc.auto=0 and maintenance.auto=false from the
+// command-scope config, so no invocation runs a synchronous gc/pack-refs.
+func TestRunSuppressesAutoMaintenance(t *testing.T) {
+	dir := t.TempDir()
+
+	got, err := run(context.Background(), dir, "git", "config", "gc.auto")
+	if err != nil {
+		t.Fatalf("git config gc.auto: %v", err)
+	}
+	if strings.TrimSpace(got) != "0" {
+		t.Fatalf("gc.auto = %q, want 0", strings.TrimSpace(got))
+	}
+
+	got, err = run(context.Background(), dir, "git", "config", "maintenance.auto")
+	if err != nil {
+		t.Fatalf("git config maintenance.auto: %v", err)
+	}
+	if strings.TrimSpace(got) != "false" {
+		t.Fatalf("maintenance.auto = %q, want false", strings.TrimSpace(got))
 	}
 }
