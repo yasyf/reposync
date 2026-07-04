@@ -33,6 +33,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-maintenance suppressed, so no invocation holds `packed-refs.lock` inside a killable window.
 - The default `repo_op_timeout` is raised from 2m to 5m.
 
+## [0.11.1] - 2026-07-03
+
+### Changed
+- Bump synckit to v0.7.1, picking up the fix for a nil-pointer crash in the stale-exchange
+  transport, where an abandoned exchange goroutine read pipe fields the transport had already
+  reset after a converge peer timeout. The bump also pulls in the synckit v0.6.0/v0.7.0 line.
+
+## [0.11.0] - 2026-07-02
+
+### Fixed
+- Sync never disrupts an active repo. reposync used to race a user's rapid raw `git commit`s in a
+  jj-colocated repo and orphan the commits, because a raw commit moves git HEAD with no jj op, so
+  the next snapshot reconciled against the diverged HEAD and stranded it. Every sync mutation is
+  now gated on provable quiescence. A stat-only `opInProgress` probe of the git/jj lock and state
+  markers, from `index.lock` and `packed-refs.lock` through merge/rebase/bisect state to jj's
+  `working_copy.lock` and `git_import_export.lock`, runs before any shell-out, so a live operation
+  short-circuits `InUse` instead of hanging on jj's working-copy lock; `Advance` captures git HEAD
+  after the fetch and re-checks it immediately before each mutation, aborting with `OutcomeRaced`
+  when the repo drifts underneath; and the default idle threshold is raised from 5m to 30m so a
+  user committing every few minutes no longer falls inside the idle window.
+- Reconcile reports a busy repo as busy instead of present, so a busy-gated idle-sync no longer
+  counts as a completed one.
+- The TUI reads the idle threshold from the same state load that discovers repos, instead of a
+  dead 10-minute fallback that ignored the configured value.
+- git `InUse` probes recent activity before the dirty-tree check, matching jj's gate order, so a
+  recently active repo reports "recent activity" instead of "dirty working tree".
+- git `Advance` classifies divergence structurally from the ahead/behind counts, so a trunk with
+  local commits now reports diverged instead of masquerading as up to date, and fast-forward
+  failures are returned as errors instead of swallowed.
+- jj `Advance` classifies the working copy in a single probe, and the op-log scan pages in growing
+  chunks so a burst of reposync's own noise ops can no longer bury the last real operation.
+
+### Changed
+- Bump synckit to v0.5.0: busy repos are signaled on the watch wire, and sync summaries carry
+  skipped-busy counts.
+
+## [0.10.3] - 2026-07-01
+
+### Fixed
+- Daemon probes are snapshot-free, so they never race an in-flight interactive jj command into
+  `Internal error: Failed to check out commit: Concurrent checkout`. `InUse` runs the op-log
+  recency gate first and reads the last-recorded `@` with `--ignore-working-copy`, `Advance`
+  short-circuits before any snapshot when trunk has not moved, and residual working-copy
+  contention degrades to a busy skip retried on the next converge.
+
+### Changed
+- The manifest watch debounce is raised to 15s so a converge fires after a push instead of
+  mid-flight, and the never-consumed `WatchDebounce`/`Interval` settings knobs are dropped.
+
 ## [0.10.2] - 2026-06-27
 
 ### Changed
@@ -86,7 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/yasyf/reposync/releases/tag/v0.13.0
+[0.12.0]: https://github.com/yasyf/reposync/releases/tag/v0.12.0
+[0.11.1]: https://github.com/yasyf/reposync/releases/tag/v0.11.1
+[0.11.0]: https://github.com/yasyf/reposync/releases/tag/v0.11.0
+[0.10.3]: https://github.com/yasyf/reposync/releases/tag/v0.10.3
 [0.10.2]: https://github.com/yasyf/reposync/releases/tag/v0.10.2
 [0.10.1]: https://github.com/yasyf/reposync/releases/tag/v0.10.1
 [0.10.0]: https://github.com/yasyf/reposync/releases/tag/v0.10.0
