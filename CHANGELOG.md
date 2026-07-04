@@ -6,8 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-03
+
 ### Changed
 - Reconcile logs an unreachable peer once per outage — one line when the peer goes down and one with the outage duration when it recovers — instead of warning on every pass.
+- Bump synckit to v0.8.0: tailscale host discovery now mints MagicDNS FQDN ssh targets (re-add hosts to adopt), and reconcile gains the per-outage peer logging above.
 
 ## [0.12.0] - 2026-07-03
 
