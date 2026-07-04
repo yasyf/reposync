@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
 
 	"github.com/yasyf/reposync/internal/state"
@@ -49,7 +50,7 @@ func TestConvergeClonesPeerAdvertisedRepo(t *testing.T) {
 
 	f := newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
 
-	results, err := convergeReposWith(context.Background(), st, f, []string{"yasyf@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"yasyf@peer"}, "")
 	if err != nil {
 		t.Fatalf("convergeRepos: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestConvergeTombstonePropagates(t *testing.T) {
 	peer.Remove(h.origin, localAdd+1)
 	f := newPeerFetcher(peer)
 
-	results, err := convergeReposWith(context.Background(), st, f, []string{"yasyf@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"yasyf@peer"}, "")
 	if err != nil {
 		t.Fatalf("convergeRepos: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestConvergeOfflinePeerSelfHeals(t *testing.T) {
 	f := newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
 	f.fail["down@peer"] = true
 
-	results, err := convergeReposWith(context.Background(), st, f, []string{"down@peer", "up@peer"}, "")
+	results, err := convergeReposWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"down@peer", "up@peer"}, "")
 	if err != nil {
 		t.Fatalf("an offline peer must not abort the pass: %v", err)
 	}

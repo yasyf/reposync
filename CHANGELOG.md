@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Reconcile logs an unreachable peer once per outage — one line when the peer goes down and one with the outage duration when it recovers — instead of warning on every pass.
+
 ## [0.12.0] - 2026-07-03
 
 ### Fixed

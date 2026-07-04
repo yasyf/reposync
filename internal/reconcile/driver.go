@@ -13,6 +13,13 @@ import (
 	"github.com/yasyf/reposync/internal/state"
 )
 
+// peerStatus is the process-lived transition tracker converge.Reconcile logs against,
+// so an unreachable peer warns once per outage rather than every pass. The resident
+// rpc-serve child keeps it for its generation; each 15-minute synckitd reconcile tick
+// is a fresh process, so a persistently-down peer emits one residual line per tick — by
+// design, no state is persisted across processes.
+var peerStatus = converge.NewPeerStatus()
+
 // repoDriver implements synckit converge.Driver[state.RepoMeta] for the propagating
 // (origin-keyed) repo registry: it reads and writes that registry inside reposync's
 // state.json and clones-or-idle-syncs each present repo. It runs entirely inside the
@@ -77,12 +84,13 @@ func (sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[st
 // pull-merge every peer, persist the converged registry, then clone-or-sync each
 // present repo. state.WithLock wraps the whole pass.
 func convergeRepos(ctx context.Context, st *state.State, peers []string, origin string) ([]Result, error) {
-	return convergeReposWith(ctx, st, sshFetcher{}, peers, origin)
+	return convergeReposWith(ctx, st, sshFetcher{}, peerStatus, peers, origin)
 }
 
-// convergeReposWith is convergeRepos with the peer fetcher injected so tests can drive
-// the pull-merge against a mock peer without real ssh.
-func convergeReposWith(ctx context.Context, st *state.State, f converge.Fetcher[state.RepoMeta], peers []string, origin string) ([]Result, error) {
+// convergeReposWith is convergeRepos with the peer fetcher and transition tracker
+// injected so tests can drive the pull-merge against a mock peer, with a fresh tracker
+// per test, without real ssh.
+func convergeReposWith(ctx context.Context, st *state.State, f converge.Fetcher[state.RepoMeta], status *converge.PeerStatus, peers []string, origin string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
 		return nil, err
@@ -91,7 +99,7 @@ func convergeReposWith(ctx context.Context, st *state.State, f converge.Fetcher[
 	defer func() { _ = os.RemoveAll(tmpRoot) }()
 
 	d := &repoDriver{st: st, dl: dl, tmpRoot: tmpRoot}
-	items, err := converge.Reconcile(ctx, state.WithLock, d, f, peers, origin)
+	items, err := converge.Reconcile(ctx, state.WithLock, d, f, status, peers, origin)
 	if err != nil {
 		return nil, err
 	}
