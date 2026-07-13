@@ -96,10 +96,12 @@ func Clone(ctx context.Context, origin, dest string) error {
 }
 
 // WatchPaths returns the VCS metadata leaf directories to watch for a repo. Each
-// is a small directory holding origin trunk refs (and the jj op log), so it is
-// cheap to watch recursively — unlike the repo root, which watchman ignores as a
-// VCS dir, or .git, whose object store would be crawled. A loose-ref fetch always
-// touches one of these; the rare packed-refs case is caught by the reconcile tick.
+// is a small directory holding origin trunk refs (and the jj op log), cheap for
+// synckit's fsnotify backend to watch recursively (kqueue/inotify, zero FSEvents
+// streams) — unlike .git, whose object store would cost a descriptor per entry
+// (kqueue charges files too).
+// A loose-ref fetch always touches one of these; the rare packed-refs case is
+// caught by the reconcile tick.
 func WatchPaths(root string) []string {
 	git := filepath.Join(root, ".git")
 	paths := []string{

@@ -38,7 +38,7 @@ func reposyncManifest() manifest.Manifest {
 		Binary: state.ToolName,
 		Brew:   "yasyf/tap/reposync",
 		Watch: manifest.WatchSpec{
-			Backend:  "watchman",
+			Backend:  "fsnotify",
 			Debounce: codec.Duration(watchDebounce),
 		},
 		Service: manifest.ServiceSpec{

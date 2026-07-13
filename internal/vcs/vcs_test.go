@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-// TestWatchPaths locks the external watchman contract: the exact ordered leaf
-// set per repo shape, including the not-yet-cloned case (watch items are built
-// before the clone exists).
+// TestWatchPaths locks the watch-backend contract (backend-agnostic): the exact
+// ordered leaf set per repo shape, including the not-yet-cloned case (watch items
+// are built before the clone exists).
 func TestWatchPaths(t *testing.T) {
 	gitLeaves := func(root string) []string {
 		return []string{

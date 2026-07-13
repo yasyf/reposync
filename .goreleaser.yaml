@@ -59,10 +59,8 @@ homebrew_casks:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/yasyf/reposync
     description: Keep git repos in sync across your remote hosts.
-    # The watch daemon shells out to watchman for filesystem subscriptions, and
-    # the sync path shells out to jj for jj-colocated repos.
+    # The sync path shells out to jj for jj-colocated repos.
     dependencies:
-      - formula: watchman
       - formula: jj
     # Strip the quarantine attribute so the unsigned binary runs on first launch.
     hooks:
