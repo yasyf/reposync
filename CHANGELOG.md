@@ -6,7 +6,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.14.0] - 2026-07-14
+## [0.15.0] - 2026-07-14
 
 ### Added
 - reposync now syncs untracked root `.env*` files across hosts, merged key by key: the newest
@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Upgrade all hosts together: an older host answering `env.get_state` with an unknown-method
   error is skipped until upgraded, and re-serving the repo registry from an old binary can drop
   the `no_env_sync` flag on a same-microsecond registry tie.
+
+## [0.14.0] - 2026-07-13
+
+### Changed
+- The synckit watch backend flips to hardened fsnotify.
+- CI's test job resolves Go from go.mod like every other job.
 
 ## [0.13.0] - 2026-07-03
 
@@ -149,7 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/yasyf/reposync/releases/tag/v0.15.0
 [0.14.0]: https://github.com/yasyf/reposync/releases/tag/v0.14.0
 [0.13.0]: https://github.com/yasyf/reposync/releases/tag/v0.13.0
 [0.12.0]: https://github.com/yasyf/reposync/releases/tag/v0.12.0
