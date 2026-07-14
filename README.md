@@ -63,12 +63,22 @@ A stale lock left behind by a killed git or jj process no longer wedges a repo: 
 
 The only write it ever sends is a fast-forward push of your own trunk, and only after the repo has been quiet past `push_after` (a day by default).
 
+### Your `.env` files follow your repos
+
+git syncs everything except the file your app won't boot without. reposync merges updates to untracked root `.env*` files across hosts, key by key: change `API_KEY` on the desktop, add `NEW_FLAG` on the laptop, and both edits land in both files. The newest edit wins per key, deletions propagate, and each host keeps its own comments and line order.
+
+```sh
+reposync repo add ~/Code/my-repo --no-env-sync   # opt a repo out
+```
+
+Anything git tracks is git's to sync and never touched. A symlinked or oversized (>256 KiB) `.env` opts itself out on that host, and the merge is line-based: multiline values are out of scope.
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `reposync` | Open the TUI: toggle discovered repos on the Repos tab, add peers on the Hosts tab |
-| `reposync repo add <path>` | Register a repo and converge it everywhere (`--local-only` keeps it on this host) |
+| `reposync repo add <path>` | Register a repo and converge it everywhere (`--local-only` keeps it on this host, `--no-env-sync` skips its `.env` files) |
 | `reposync repo discover` | List git/jj repos under `default_location` and whether each is tracked |
 | `reposync repo ls` / `reposync repo rm <path>` | List registered repos / untrack one (the checkout stays) |
 | `reposync sync` | Run the idle-safe fetch and fast-forward pass by hand |
@@ -81,9 +91,11 @@ Run `reposync --help` for the full command tree and flags.
 
 reposync itself is not a daemon. `reposync install` registers a manifest with [synckitd](https://github.com/yasyf/synckit), the shared sync daemon, which spawns `reposync rpc-serve` over stdio and drives it through a typed contract — no shell templates, no per-tool launchd agent. Repos are tracked by path relative to `default_location`, so each lands at the same place on every host, and the registry is a last-writer-wins CRDT: adds and removals pull-merge across peers, removals as tombstones. Adding a peer on the Hosts tab ssh-bootstraps it, brew-installing synckitd and reposync and cloning every tracked repo. A sync is pull-first: fetch plus a safe fast-forward, anchored to the git HEAD the fetch observed, so a `git commit` racing the advance aborts it instead of losing work.
 
+`.env` files ride the same reconcile pass. Each host pulls every peer's stamped per-key map over the same ssh channel, merges last-writer-wins per key on file mtimes, and rewrites its own files in place — a write within the last five seconds defers the whole repo to the next pass.
+
 ## Configuration
 
-State lives at `~/.config/reposync/state.json`, sharing one file and one flock with synckit's host identity.
+State lives at `~/.config/reposync/state.json`, sharing one file and one flock with synckit's host identity. Per-repo `.env` merge state lives beside it under `~/.config/reposync/env/`.
 
 | Key | Default | What it does |
 | --- | --- | --- |

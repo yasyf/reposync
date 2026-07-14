@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- reposync now syncs untracked root `.env*` files across hosts, merged key by key: the newest
+  edit wins per key, deletions propagate, and each host keeps its own comments and line order.
+  The merge rides the reconcile pass over the existing rpc-serve ssh channel (a new lock-free
+  `env.get_state` method), gates on a five-second quiet window so it never races a live edit,
+  and leaves alone anything git tracks, symlinks, and files over 256 KiB. Per-repo merge state
+  lives under `~/.config/reposync/env/`. Opt a repo out with `reposync repo add --no-env-sync`;
+  the setting shows as an ENV column in `repo ls` and an env line in the TUI detail pane.
+  Upgrade all hosts together: an older host answering `env.get_state` with an unknown-method
+  error is skipped until upgraded, and re-serving the repo registry from an old binary can drop
+  the `no_env_sync` flag on a same-microsecond registry tie.
+
 ## [0.13.0] - 2026-07-03
 
 ### Changed
