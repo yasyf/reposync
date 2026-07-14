@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-14
+
+### Fixed
+- A background advance could sweep uncommitted files out of a colocated jj working copy: edits
+  landing between reposync's disposability check and its own `jj new`/`jj rebase` were captured
+  by the mutation's at-execution snapshot and stranded off-disk in an anonymous head. Advance now
+  verifies every mutation after the fact, treating a surviving outgoing change after `jj new`, or
+  rebase paths escaping the pre-classified generated set, as proof that live edits were swept. It
+  recovers them automatically, forward onto the new trunk when conflict-free or back onto the
+  original parents otherwise (`recovered`). When concurrent activity makes recovery unsafe, it
+  goes hands-off with the content preserved in a visible commit (`swept`); sync logs both.
+
 ## [0.15.0] - 2026-07-14
 
 ### Added
