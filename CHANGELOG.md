@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-14
+
 ### Added
 - reposync now syncs untracked root `.env*` files across hosts, merged key by key: the newest
   edit wins per key, deletions propagate, and each host keeps its own comments and line order.
@@ -147,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/yasyf/reposync/releases/tag/v0.14.0
 [0.13.0]: https://github.com/yasyf/reposync/releases/tag/v0.13.0
 [0.12.0]: https://github.com/yasyf/reposync/releases/tag/v0.12.0
 [0.11.1]: https://github.com/yasyf/reposync/releases/tag/v0.11.1
