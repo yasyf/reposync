@@ -24,6 +24,7 @@ type Fixture struct {
 	Root   string
 	Origin string // path to the bare origin repo
 	Seed   string // a plain-git clone used to push new commits to origin
+	realJJ string // absolute real-jj path, resolved before any shim owns PATH
 }
 
 // New builds a Fixture rooted in a symlink-resolved temp dir: it points
@@ -175,6 +176,51 @@ func (f *Fixture) JJSnapshotOps(repo string) int {
 		}
 	}
 	return n
+}
+
+// ShimJJ prepends a shim jj to PATH: a /bin/sh script that runs the caller's
+// script lines with the original argv, then execs the real jj. The shim and its
+// marker files live under <Root>/shim, outside every repo dir, so a jj snapshot
+// can never sweep them up. It returns the shim dir.
+func (f *Fixture) ShimJJ(script string) string {
+	f.t.Helper()
+	if f.realJJ == "" {
+		realJJ, err := exec.LookPath("jj")
+		if err != nil {
+			f.t.Fatalf("locate real jj: %v", err)
+		}
+		f.realJJ = realJJ
+	}
+	shimDir := filepath.Join(f.Root, "shim")
+	if err := os.MkdirAll(shimDir, 0o750); err != nil {
+		f.t.Fatalf("mkdir shim dir: %v", err)
+	}
+	shim := "#!/bin/sh\nREAL_JJ=" + shQuote(f.realJJ) + "\n" + script + "\nexec \"$REAL_JJ\" \"$@\"\n"
+	//nolint:gosec // G306: the shim must be executable; it lives in a test-controlled temp dir.
+	if err := os.WriteFile(filepath.Join(shimDir, "jj"), []byte(shim), 0o755); err != nil {
+		f.t.Fatalf("write jj shim: %v", err)
+	}
+	f.t.Setenv("PATH", shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return shimDir
+}
+
+// ShimJJDirtOn shims jj so the first invocation carrying arg as a standalone
+// argument writes content to dir/file before the real command runs — a user
+// edit landing inside a mutating jj command's own snapshot window.
+func (f *Fixture) ShimJJDirtOn(arg, dir, file, content string) {
+	f.t.Helper()
+	claim := filepath.Join(f.Root, "shim", "dirt-once")
+	f.ShimJJ(strings.Join([]string{
+		`for a in "$@"; do`,
+		`  if [ "$a" = ` + shQuote(arg) + ` ] && mkdir ` + shQuote(claim) + ` 2>/dev/null; then`,
+		`    printf '%s' ` + shQuote(content) + ` > ` + shQuote(filepath.Join(dir, file)),
+		`  fi`,
+		`done`,
+	}, "\n"))
+}
+
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // ConfigGit sets the test git identity (user.name and user.email) in dir.

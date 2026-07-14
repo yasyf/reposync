@@ -405,6 +405,32 @@ func TestSyncRebasesGeneratedOnlyRepo(t *testing.T) {
 	}
 }
 
+// TestSyncAdvanceRecoveredSurfaces proves the recovered outcome flows through
+// Sync untouched: an edit swept by a raced jj new is restored and reported as
+// recovered, not an error.
+func TestSyncAdvanceRecoveredSurfaces(t *testing.T) {
+	h := newHarness(t)
+	dest := h.jjClone("epsilon")
+	h.AdvanceOrigin("v2")
+	h.ShimJJDirtOn("new", dest, "interim.txt", "typed mid-advance\n")
+	st := h.state(state.Repo{Relpath: "epsilon", Origin: h.Origin, Trunk: "main"})
+
+	results, err := Sync(context.Background(), st, "", "")
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	res := resultFor(t, results, "epsilon")
+	if res.Err != nil {
+		t.Fatalf("epsilon err: %v", res.Err)
+	}
+	if res.Outcome != vcs.OutcomeRecovered {
+		t.Fatalf("epsilon outcome = %q, want recovered", res.Outcome)
+	}
+	if c := h.ReadFile(dest, "interim.txt"); c != "typed mid-advance\n" {
+		t.Fatalf("interim.txt = %q, want mid-advance edit restored", c)
+	}
+}
+
 // TestSyncPushesQuietAheadRepo proves the positive path: a quiet repo whose local
 // trunk is strictly ahead of an unmoved origin is fast-forward pushed, and origin
 // lands exactly on the local main commit.

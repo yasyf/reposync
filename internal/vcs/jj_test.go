@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func TestJJAdvanceIdleEmpty(t *testing.T) {
 	dest := f.JJClone(filepath.Join(f.Root, "clone"))
 	r := openJJ(t, dest)
 	want := f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+	snapsBefore := f.JJSnapshotOps(dest)
+	opBefore := strings.TrimSpace(f.RunJJ(dest, "op", "log", "-n", "1", "--no-graph", "--ignore-working-copy", "-T", `id ++ "\n"`))
 
 	got, err := r.Advance(context.Background())
 	if err != nil {
@@ -78,6 +82,44 @@ func TestJJAdvanceIdleEmpty(t *testing.T) {
 	if h, _ := r.TrunkHash(context.Background()); h != want {
 		t.Fatalf("trunk hash = %q, want %q", h, want)
 	}
+	// The clean advance auto-abandons the empty @ (the changeSurvived contract),
+	// records exactly one jj new and one fetch op, and never snapshots.
+	present := strings.TrimSpace(f.RunJJ(dest, "log", "-r", "present("+oldChange+")", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+	if present != "" {
+		t.Fatalf("pre-advance @ %q survived, want auto-abandoned by clean advance", oldChange)
+	}
+	wantOps := []string{"new empty commit", "fetch from git remote(s) origin"}
+	if ops := jjOpsSince(t, f, dest, opBefore); !slices.Equal(ops, wantOps) {
+		t.Fatalf("ops since advance = %v, want exactly %v", ops, wantOps)
+	}
+	if snaps := f.JJSnapshotOps(dest); snaps != snapsBefore {
+		t.Fatalf("snapshot ops = %d, want %d (clean advance must not snapshot)", snaps, snapsBefore)
+	}
+}
+
+// jjChangeID returns @'s full change id.
+func jjChangeID(t *testing.T, f *vcstest.Fixture, repo string) string {
+	t.Helper()
+	return strings.TrimSpace(f.RunJJ(repo, "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `change_id`))
+}
+
+// jjOpsSince returns the op descriptions recorded after sinceOp, newest first.
+func jjOpsSince(t *testing.T, f *vcstest.Fixture, repo, sinceOp string) []string {
+	t.Helper()
+	out := f.RunJJ(repo, "op", "log", "-n", "20", "--no-graph", "--ignore-working-copy", "-T", `id ++ " " ++ description.first_line() ++ "\n"`)
+	var descs []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		id, desc, _ := strings.Cut(line, " ")
+		if id == sinceOp {
+			return descs
+		}
+		descs = append(descs, desc)
+	}
+	t.Fatalf("op %s not found in the recent op log", sinceOp)
+	return nil
 }
 
 func TestJJAdvanceUpToDate(t *testing.T) {
@@ -1071,5 +1113,268 @@ func TestJJAdvanceDescribedGeneratedNotDisposable(t *testing.T) {
 	}
 	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
 		t.Fatalf("build.gen = %q, want local edit untouched", c)
+	}
+}
+
+// TestJJAdvanceSweptMidNewRecovers proves the branch-A TOCTOU recovery: an edit
+// typed between Advance's empty-@ classification and its jj new is snapshotted
+// into the outgoing commit and swept off disk; Advance detects the survival,
+// rebases the swept commit onto the new trunk, and re-materializes it as @.
+func TestJJAdvanceSweptMidNewRecovers(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+	want := f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+	f.ShimJJDirtOn("new", dest, "interim.txt", "typed mid-advance\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRecovered {
+		t.Fatalf("outcome = %q, want recovered", got)
+	}
+	if c := f.ReadFile(dest, "interim.txt"); c != "typed mid-advance\n" {
+		t.Fatalf("interim.txt = %q, want mid-advance edit restored byte-identical", c)
+	}
+	if cur := jjChangeID(t, f, dest); cur != oldChange {
+		t.Fatalf("@ change id = %q, want original %q", cur, oldChange)
+	}
+	if parent := jjParent(t, f, dest); parent != want {
+		t.Fatalf("@ parent = %q, want new trunk %q (forward recovery)", parent, want)
+	}
+	heads := strings.Fields(f.RunJJ(dest, "log", "-r", "heads(all())", "--no-graph", "--ignore-working-copy", "-T", `change_id ++ "\n"`))
+	if len(heads) != 1 || heads[0] != oldChange {
+		t.Fatalf("heads(all()) = %v, want only @ %q (no debris)", heads, oldChange)
+	}
+}
+
+// TestJJAdvanceGeneratedSweptForeignPathRecovers proves the branch-B TOCTOU
+// recovery: prose typed between the generated-only classification and the
+// rebase is snapshotted into @ and rebased along with it; the surplus path
+// fails verification, and with only reposync's own ops in the window the
+// conflicted rebase is undone onto the original parents, where the conflict
+// cancels — the trunk-takes-conflicts restores must never run.
+func TestJJAdvanceGeneratedSweptForeignPathRecovers(t *testing.T) {
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.SnapshotJJ(dest)
+	f.AdvanceOriginPath("build.gen", "trunk generated v2\n")
+	oldChange := jjChangeID(t, f, dest)
+	oldParent := jjParent(t, f, dest)
+	f.ShimJJDirtOn("rebase", dest, "notes.txt", "user prose\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRecovered {
+		t.Fatalf("outcome = %q, want recovered", got)
+	}
+	if c := f.ReadFile(dest, "notes.txt"); c != "user prose\n" {
+		t.Fatalf("notes.txt = %q, want mid-advance prose byte-identical", c)
+	}
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want LOCAL edit (restores must not run)", c)
+	}
+	if cur := jjChangeID(t, f, dest); cur != oldChange {
+		t.Fatalf("@ change id = %q, want original %q", cur, oldChange)
+	}
+	if parent := jjParent(t, f, dest); parent != oldParent {
+		t.Fatalf("@ parent = %q, want original %q (back-rebased)", parent, oldParent)
+	}
+	if conflicts := strings.TrimSpace(f.RunJJConflicts(dest)); conflicts != "" {
+		t.Fatalf("resolve --list = %q, want no conflicts after back-rebase", conflicts)
+	}
+}
+
+// TestJJAdvanceSweptOpHeadMovedHandsOff proves the honest failure mode: a user
+// op (a bookmark create) lands between jj new and the verification read, so the
+// window is foreign and Advance returns swept with zero recovery commands — the
+// swept edit stays off disk but preserved in a visible commit.
+func TestJJAdvanceSweptOpHeadMovedHandsOff(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+	f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+
+	shimDir := filepath.Join(f.Root, "shim")
+	dirted := filepath.Join(shimDir, "dirted")
+	raced := filepath.Join(shimDir, "raced")
+	f.ShimJJ(strings.Join([]string{
+		`for a in "$@"; do`,
+		`  if [ "$a" = new ] && mkdir "` + dirted + `" 2>/dev/null; then`,
+		`    printf '%s\n' 'typed mid-advance' > "` + filepath.Join(dest, "interim.txt") + `"`,
+		`  fi`,
+		`  if [ "$a" = log ] && [ -d "` + dirted + `" ] && mkdir "` + raced + `" 2>/dev/null; then`,
+		`    "$REAL_JJ" --repository "` + dest + `" bookmark create raced-marker -r main`,
+		`  fi`,
+		`done`,
+	}, "\n"))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeSwept {
+		t.Fatalf("outcome = %q, want swept", got)
+	}
+	if f.FileExists(dest, "interim.txt") {
+		t.Fatal("interim.txt on disk, want swept (hands-off mode restores nothing)")
+	}
+	swept := f.RunJJ(dest, "diff", "-r", oldChange, "--name-only", "--ignore-working-copy")
+	if !strings.Contains(swept, "interim.txt") {
+		t.Fatalf("diff -r %s = %q, want interim.txt preserved in the swept commit", oldChange, swept)
+	}
+	if cur := jjChangeID(t, f, dest); cur == oldChange {
+		t.Fatalf("@ change id still %q, want moved by jj new", cur)
+	}
+	top := strings.TrimSpace(f.RunJJ(dest, "op", "log", "-n", "1", "--no-graph", "--ignore-working-copy", "-T", `description.first_line() ++ "\n"`))
+	if !strings.HasPrefix(top, "create bookmark") {
+		t.Fatalf("top op = %q, want the raced bookmark create (no recovery commands ran)", top)
+	}
+}
+
+// TestJJAdvanceSecondSweepDuringRecoverySurfaces proves the second-sweep guard:
+// dirt typed just before recovery's jj edit is snapshotted into the interim
+// trunk commit, which therefore survives the edit; Advance reports swept even
+// though recovery materially completed — the first sweep is back on disk, the
+// second sits preserved in the visible interim head.
+func TestJJAdvanceSecondSweepDuringRecoverySurfaces(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+	f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+
+	shimDir := filepath.Join(f.Root, "shim")
+	f.ShimJJ(strings.Join([]string{
+		`for a in "$@"; do`,
+		`  if [ "$a" = new ] && mkdir "` + filepath.Join(shimDir, "dirt1") + `" 2>/dev/null; then`,
+		`    printf '%s\n' 'typed mid-advance' > "` + filepath.Join(dest, "interim.txt") + `"`,
+		`  fi`,
+		`  if [ "$a" = edit ] && mkdir "` + filepath.Join(shimDir, "dirt2") + `" 2>/dev/null; then`,
+		`    printf '%s\n' 'typed during recovery' > "` + filepath.Join(dest, "interim2.txt") + `"`,
+		`  fi`,
+		`done`,
+	}, "\n"))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeSwept {
+		t.Fatalf("outcome = %q, want swept on second sweep", got)
+	}
+	if c := f.ReadFile(dest, "interim.txt"); c != "typed mid-advance\n" {
+		t.Fatalf("interim.txt = %q, want first sweep restored (recovery materially completed)", c)
+	}
+	if cur := jjChangeID(t, f, dest); cur != oldChange {
+		t.Fatalf("@ change id = %q, want original %q", cur, oldChange)
+	}
+	if f.FileExists(dest, "interim2.txt") {
+		t.Fatal("interim2.txt on disk, want second sweep off-disk")
+	}
+	heads := strings.Fields(f.RunJJ(dest, "log", "-r", "heads(all())", "--no-graph", "--ignore-working-copy", "-T", `change_id ++ "\n"`))
+	preserved := false
+	for _, h := range heads {
+		if strings.Contains(f.RunJJ(dest, "diff", "-r", h, "--name-only", "--ignore-working-copy"), "interim2.txt") {
+			preserved = true
+		}
+	}
+	if !preserved {
+		t.Fatalf("no visible head carries interim2.txt; heads = %v", heads)
+	}
+}
+
+// TestJJAdvanceRecoveryContentionSwept proves working-copy contention during a
+// recovery mutation degrades to swept, not an error: the survivor stays a
+// visible head and the repo is left for the user.
+func TestJJAdvanceRecoveryContentionSwept(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+	f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+
+	shimDir := filepath.Join(f.Root, "shim")
+	f.ShimJJ(strings.Join([]string{
+		`for a in "$@"; do`,
+		`  if [ "$a" = new ] && mkdir "` + filepath.Join(shimDir, "dirt1") + `" 2>/dev/null; then`,
+		`    printf '%s\n' 'typed mid-advance' > "` + filepath.Join(dest, "interim.txt") + `"`,
+		`  fi`,
+		`  if [ "$a" = edit ] && mkdir "` + filepath.Join(shimDir, "contend") + `" 2>/dev/null; then`,
+		`    echo 'Error: Concurrent checkout' >&2`,
+		`    exit 1`,
+		`  fi`,
+		`done`,
+	}, "\n"))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeSwept {
+		t.Fatalf("outcome = %q, want swept on recovery contention", got)
+	}
+	if f.FileExists(dest, "interim.txt") {
+		t.Fatal("interim.txt on disk, want recovery aborted before the edit materialized it")
+	}
+	swept := f.RunJJ(dest, "diff", "-r", oldChange, "--name-only", "--ignore-working-copy")
+	if !strings.Contains(swept, "interim.txt") {
+		t.Fatalf("diff -r %s = %q, want interim.txt still visible in the survivor", oldChange, swept)
+	}
+}
+
+// TestJJAdvanceSweptConcurrentNewHandsOff pins the op-shape cardinality: a
+// user's own jj new lands between the mutation and the verification read,
+// emitting an allowlisted-STRING "new empty commit" op that breaks the shape,
+// so Advance keeps hands off.
+func TestJJAdvanceSweptConcurrentNewHandsOff(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.JJClone(filepath.Join(f.Root, "clone"))
+	r := openJJ(t, dest)
+	f.AdvanceOrigin("v2")
+	oldChange := jjChangeID(t, f, dest)
+
+	shimDir := filepath.Join(f.Root, "shim")
+	dirted := filepath.Join(shimDir, "dirted")
+	f.ShimJJ(strings.Join([]string{
+		`for a in "$@"; do`,
+		`  if [ "$a" = new ] && mkdir "` + dirted + `" 2>/dev/null; then`,
+		`    printf '%s\n' 'typed mid-advance' > "` + filepath.Join(dest, "interim.txt") + `"`,
+		`  fi`,
+		`  if [ "$a" = log ] && [ -d "` + dirted + `" ] && mkdir "` + filepath.Join(shimDir, "raced") + `" 2>/dev/null; then`,
+		`    "$REAL_JJ" --repository "` + dest + `" new`,
+		`  fi`,
+		`done`,
+	}, "\n"))
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeSwept {
+		t.Fatalf("outcome = %q, want swept on shape-breaking concurrent jj new", got)
+	}
+	if f.FileExists(dest, "interim.txt") {
+		t.Fatal("interim.txt on disk, want swept (hands-off mode restores nothing)")
+	}
+	swept := f.RunJJ(dest, "diff", "-r", oldChange, "--name-only", "--ignore-working-copy")
+	if !strings.Contains(swept, "interim.txt") {
+		t.Fatalf("diff -r %s = %q, want interim.txt preserved in the swept commit", oldChange, swept)
+	}
+	if cur := jjChangeID(t, f, dest); cur == oldChange {
+		t.Fatalf("@ change id still %q, want moved by the raced jj new", cur)
+	}
+	top := strings.TrimSpace(f.RunJJ(dest, "op", "log", "-n", "1", "--no-graph", "--ignore-working-copy", "-T", `description.first_line() ++ "\n"`))
+	if top != "new empty commit" {
+		t.Fatalf("top op = %q, want the user's new empty commit (no recovery commands ran)", top)
 	}
 }

@@ -43,6 +43,17 @@ const (
 	// HEAD moved or an operation went in-progress — so the advance was aborted
 	// untouched, to retry next tick.
 	OutcomeRaced Outcome = "raced"
+	// OutcomeRecovered means a mid-advance user edit was snapshotted into the
+	// outgoing commit; the mutation was verified, the working copy restored
+	// (forward onto trunk when conflict-free, else at its original parents), and
+	// no user content was lost.
+	OutcomeRecovered Outcome = "recovered"
+	// OutcomeSwept means a sweep was detected but concurrent user activity kept
+	// the advance from a clean recovered state: recovery was skipped (foreign
+	// ops in the window, or working-copy contention mid-recovery) or was itself
+	// swept by a second mid-recovery edit. Whatever was not restored to disk
+	// survives in a visible commit; no user content is lost.
+	OutcomeSwept Outcome = "swept"
 )
 
 // Repo is a tracked repository whose working copy can be safely advanced onto trunk.

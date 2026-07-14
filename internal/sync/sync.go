@@ -131,6 +131,12 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 		return failure(res, err)
 	}
 	res.Outcome = outcome
+	switch outcome {
+	case vcs.OutcomeRecovered:
+		log.Printf("sync: %s: advance raced live edits; working copy restored", repo.Relpath)
+	case vcs.OutcomeSwept:
+		log.Printf("sync: %s: advance raced live edits; content preserved in a visible commit, left for the user", repo.Relpath)
+	}
 
 	if outcome != vcs.OutcomeUpToDate && outcome != vcs.OutcomeAdvanced {
 		return res
