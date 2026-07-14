@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // tempPrefix names an apply's temp file in the repo root. It must never match the
@@ -73,6 +74,18 @@ func ValidKey(k string) bool {
 // lines. A merged value must pass this.
 func ValidValue(v string) bool {
 	return !strings.Contains(v, "\n")
+}
+
+// AggregateSize is a file's on-wire byte cost: for every entry, present or tombstoned,
+// the key, the value, and the two bytes ('=' and '\n') a written line adds. It is the
+// size validatePeerEnv caps a payload at and the merge drops a file over, so both agree
+// on when a file exceeds MaxFileSize.
+func AggregateSize(reg FileMap) int {
+	size := 0
+	for k, e := range reg {
+		size += len(k) + len(e.Value) + 2
+	}
+	return size
 }
 
 // isName reports whether s matches [A-Za-z_][A-Za-z0-9_]*.
@@ -170,35 +183,106 @@ func insertBeforeTrailingBlank(lines, added []envLine) []envLine {
 // An exempt target (see Exempt: a symlink or other non-regular path, or a file over
 // MaxFileSize) is left untouched — the write is skipped without error.
 func Apply(path string, reg FileMap) (bool, error) {
-	exempt, info, err := exemptInfo(path)
+	p, err := planApply(path, reg)
 	if err != nil {
 		return false, err
 	}
+	return p.write()
+}
+
+// applyPlan is the write Apply would perform for one file: the rewritten bytes, the
+// mode to write them at, and the path's Lstat (nil when absent). change is false when
+// the target is exempt or already byte-identical, so no write is due.
+type applyPlan struct {
+	path   string
+	data   []byte
+	mode   os.FileMode
+	info   os.FileInfo
+	change bool
+}
+
+// planApply computes, without writing, the rewrite Apply would perform for reg at path:
+// it Lstats path (reusing the exempt check), reads and rewrites an existing file, and
+// reports via change whether the result differs from what is on disk.
+func planApply(path string, reg FileMap) (applyPlan, error) {
+	exempt, info, err := exemptInfo(path)
+	if err != nil {
+		return applyPlan{}, err
+	}
 	if exempt {
-		return false, nil
+		return applyPlan{path: path, info: info}, nil
 	}
 	present := valuesOf(reg.Present())
 	tombstoned := tombstonesOf(reg)
 	mode := os.FileMode(0o600)
-	exists := info != nil
 	var data []byte
-	if exists {
+	if info != nil {
 		mode = info.Mode().Perm()
 		data, err = os.ReadFile(path) //nolint:gosec // G304: env file under a reposync-tracked repo root, not user-supplied.
 		if err != nil {
-			return false, fmt.Errorf("read env file %s: %w", path, err)
+			return applyPlan{}, fmt.Errorf("read env file %s: %w", path, err)
 		}
 	} else if len(present) == 0 {
-		return false, nil
+		return applyPlan{path: path, info: info}, nil
 	}
 	out := parse(data).rewrite(present, tombstoned)
-	if exists && bytes.Equal(out, data) {
+	if info != nil && bytes.Equal(out, data) {
+		return applyPlan{path: path, info: info}, nil
+	}
+	return applyPlan{path: path, data: out, mode: mode, info: info, change: true}, nil
+}
+
+// write performs the planned rewrite, reporting whether it wrote.
+func (p applyPlan) write() (bool, error) {
+	if !p.change {
 		return false, nil
 	}
-	if err := atomicWrite(path, out, mode, tempPrefix); err != nil {
+	if err := atomicWrite(p.path, p.data, p.mode, tempPrefix); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// ApplyAll reconciles every file in merged to disk under root as a two-pass,
+// all-or-nothing quiet-window gate, returning (changed, busy, err). Pass 1 plans the
+// rewrite of every file and, for each that would change, freshly Lstats it; if any such
+// existing file was modified within QuietWindow of now, ApplyAll returns busy having
+// written nothing. Pass 2 writes every planned change. The gate and the writes are as
+// close as the filesystem allows: a local edit landing in the microseconds between a
+// file's pass-1 Lstat and its pass-2 rename is the residual race QuietWindow narrows but
+// cannot close.
+func ApplyAll(root string, merged RepoState) (bool, bool, error) {
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	now := time.Now()
+	plans := make([]applyPlan, 0, len(names))
+	for _, name := range names {
+		p, err := planApply(filepath.Join(root, name), merged[name])
+		if err != nil {
+			return false, false, err
+		}
+		if !p.change {
+			continue
+		}
+		if p.info != nil && now.Sub(p.info.ModTime()) < QuietWindow {
+			return false, true, nil
+		}
+		plans = append(plans, p)
+	}
+	changed := false
+	for _, p := range plans {
+		wrote, err := p.write()
+		if err != nil {
+			return changed, false, err
+		}
+		if wrote {
+			changed = true
+		}
+	}
+	return changed, false, nil
 }
 
 // valuesOf projects a present registry to its key/value map.

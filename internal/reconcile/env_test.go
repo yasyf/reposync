@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,12 @@ func (f *fakeEnvFetcher) FetchEnv(_ context.Context, peer string, origins []stri
 		}
 	}
 	return out, nil
+}
+
+// staticState is the reload for tests driving convergeEnvWith with an in-memory state:
+// it returns st unchanged.
+func staticState(st *state.State) func() (*state.State, error) {
+	return func() (*state.State, error) { return st, nil }
 }
 
 // cloneRepo clones the harness origin into dataLoc/relpath as a colocated jj checkout —
@@ -104,7 +111,7 @@ func TestConvergeEnvPeerKeyLands(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -123,7 +130,7 @@ func TestConvergeEnvPeerKeyLands(t *testing.T) {
 
 	// Second pass over the same peer: no change, byte-identical file.
 	afterFirst := h.readFile(dest, ".env")
-	second := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	second := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 	res2 := resultFor(t, second, "alpha")
 	if res2.Err != nil {
 		t.Fatalf("second pass err: %v", res2.Err)
@@ -149,7 +156,7 @@ func TestConvergeEnvNewestWins(t *testing.T) {
 		st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 		f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("KEY", "peer", cregistry.UnixMicros(old))})}
-		results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+		results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 		if res := resultFor(t, results, "alpha"); res.Err != nil {
 			t.Fatalf("err: %v", res.Err)
@@ -166,7 +173,7 @@ func TestConvergeEnvNewestWins(t *testing.T) {
 		st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 		f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("KEY", "peer", cregistry.UnixMicros(newer))})}
-		results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+		results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 		if res := resultFor(t, results, "alpha"); res.Err != nil || res.Action != ActionEnvApplied {
 			t.Fatalf("res = %+v, want env-applied no err", res)
@@ -193,7 +200,7 @@ func TestConvergeEnvDeletionPropagates(t *testing.T) {
 	peer.Remove("KEY", cregistry.UnixMicros(newer))
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": peer})}
 
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 	if res := resultFor(t, results, "alpha"); res.Err != nil || res.Action != ActionEnvApplied {
 		t.Fatalf("res = %+v, want env-applied no err", res)
 	}
@@ -206,7 +213,7 @@ func TestConvergeEnvDeletionPropagates(t *testing.T) {
 	}
 
 	// Re-pull the same tombstone: KEY stays gone (not resurrected), clean pass.
-	second := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	second := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 	if res := resultFor(t, second, "alpha"); res.Err != nil || res.Action != ActionEnvClean {
 		t.Fatalf("re-pull res = %+v, want env-clean no err", res)
 	}
@@ -225,7 +232,7 @@ func TestConvergeEnvFetchesOriginPeer(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{states: envState("hostA", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
-	convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"hostA"}, "hostA")
+	convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"hostA"}, "hostA")
 
 	if len(f.called) != 1 || f.called[0] != "hostA" {
 		t.Fatalf("origin peer not fetched: called = %v (env must not skip the notifying origin)", f.called)
@@ -247,7 +254,7 @@ func TestConvergeEnvOfflinePeerSelfHeals(t *testing.T) {
 		states: envState("up", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())}),
 		fail:   map[string]bool{"down": true},
 	}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"down", "up"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"down", "up"}, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -267,7 +274,7 @@ func TestConvergeEnvOldVersionPeerSkips(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{unknown: map[string]bool{"old": true}}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"old"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"old"}, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -290,7 +297,7 @@ func TestConvergeEnvTrackedFileUntouched(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -322,7 +329,7 @@ func TestConvergeEnvSkipsOptOutAndLocalOnly(t *testing.T) {
 	)
 
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 	if len(results) != 0 {
 		t.Fatalf("results = %+v, want none (both repos ineligible)", results)
@@ -350,7 +357,7 @@ func TestConvergeEnvQuietWindow(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -422,9 +429,9 @@ func TestConvergeEnvBootstrapTwoHosts(t *testing.T) {
 
 	for round := 0; round < 4; round++ {
 		t.Setenv("XDG_CONFIG_HOME", xdgA)
-		convergeEnvWith(context.Background(), stA, serve(xdgB, destB), converge.NewPeerStatus(), []string{"peer"}, "")
+		convergeEnvWith(context.Background(), stA, staticState(stA), serve(xdgB, destB), converge.NewPeerStatus(), []string{"peer"}, "")
 		t.Setenv("XDG_CONFIG_HOME", xdgB)
-		convergeEnvWith(context.Background(), stB, serve(xdgA, destA), converge.NewPeerStatus(), []string{"peer"}, "")
+		convergeEnvWith(context.Background(), stB, staticState(stB), serve(xdgA, destA), converge.NewPeerStatus(), []string{"peer"}, "")
 	}
 
 	gotA := h.readFile(destA, ".env")
@@ -504,7 +511,7 @@ func TestConvergeEnvRejectsMaliciousPeers(t *testing.T) {
 		"good":      {h.origin: env.RepoState{".env": oneKey("GOOD", "yes", peerStamp())}},
 	}}
 	peers := []string{"traversal", "dotfile", "badkey", "badvalue", "good"}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), peers, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), peers, "")
 
 	res := resultFor(t, results, "alpha")
 	if res.Err != nil {
@@ -537,7 +544,7 @@ func TestConvergeEnvRejectsFutureStamp(t *testing.T) {
 		"future": {h.origin: env.RepoState{".env": oneKey("EVIL", "x", future)}},
 		"good":   {h.origin: env.RepoState{".env": oneKey("GOOD", "yes", peerStamp())}},
 	}}
-	results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"future", "good"}, "")
+	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"future", "good"}, "")
 
 	if res := resultFor(t, results, "alpha"); res.Err != nil {
 		t.Fatalf("future-stamp peer errored the repo: %v", res.Err)
@@ -566,6 +573,11 @@ func TestConvergeEnvRejectsOversizedPayloads(t *testing.T) {
 	bigValue := cregistry.New[string]()
 	bigValue.Add("K", strings.Repeat("x", env.MaxFileSize), peerStamp())
 
+	// key+value sums to exactly MaxFileSize: accepted by the old accounting, rejected
+	// once the +2 for '=' and '\n' is counted.
+	sepOverflow := cregistry.New[string]()
+	sepOverflow.Add("K", strings.Repeat("x", env.MaxFileSize-1), peerStamp())
+
 	cases := []struct {
 		id  string
 		bad env.RepoState
@@ -573,6 +585,7 @@ func TestConvergeEnvRejectsOversizedPayloads(t *testing.T) {
 		{"too many files", manyFiles},
 		{"too many keys", env.RepoState{".env": manyKeys}},
 		{"aggregate over MaxFileSize", env.RepoState{".env": bigValue}},
+		{"aggregate over only with separators", env.RepoState{".env": sepOverflow}},
 	}
 	for _, c := range cases {
 		t.Run(c.id, func(t *testing.T) {
@@ -585,7 +598,7 @@ func TestConvergeEnvRejectsOversizedPayloads(t *testing.T) {
 				"bad":  {h.origin: c.bad},
 				"good": {h.origin: env.RepoState{".env": oneKey("GOOD", "yes", peerStamp())}},
 			}}
-			results := convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"bad", "good"}, "")
+			results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"bad", "good"}, "")
 
 			if res := resultFor(t, results, "alpha"); res.Err != nil {
 				t.Fatalf("oversized peer errored the repo: %v", res.Err)
@@ -617,7 +630,7 @@ func TestConvergeEnvDropsNeverLocalTombstone(t *testing.T) {
 		".env.ghost": ghost,
 	})}
 
-	if res := resultFor(t, convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
+	if res := resultFor(t, convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
 		t.Fatalf("err: %v", res.Err)
 	}
 	if h.exists(filepath.Join(dest, ".env.ghost")) {
@@ -674,13 +687,13 @@ func TestConvergeEnvWholeFileDeletionPropagates(t *testing.T) {
 
 	// Sync .env.extra into A's sidecar, then delete it locally and converge again.
 	t.Setenv("XDG_CONFIG_HOME", xdgA)
-	if res := resultFor(t, convergeEnvWith(context.Background(), stA, &fakeEnvFetcher{}, converge.NewPeerStatus(), nil, ""), "alpha"); res.Err != nil {
+	if res := resultFor(t, convergeEnvWith(context.Background(), stA, staticState(stA), &fakeEnvFetcher{}, converge.NewPeerStatus(), nil, ""), "alpha"); res.Err != nil {
 		t.Fatalf("seed converge on A: %v", res.Err)
 	}
 	if err := os.Remove(filepath.Join(destA, ".env.extra")); err != nil {
 		t.Fatalf("delete .env.extra: %v", err)
 	}
-	if res := resultFor(t, convergeEnvWith(context.Background(), stA, &fakeEnvFetcher{}, converge.NewPeerStatus(), nil, ""), "alpha"); res.Err != nil {
+	if res := resultFor(t, convergeEnvWith(context.Background(), stA, staticState(stA), &fakeEnvFetcher{}, converge.NewPeerStatus(), nil, ""), "alpha"); res.Err != nil {
 		t.Fatalf("post-delete converge on A: %v", res.Err)
 	}
 
@@ -706,7 +719,7 @@ func TestConvergeEnvWholeFileDeletionPropagates(t *testing.T) {
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdgB)
 	f := &fakeEnvFetcher{states: envState("hostA", h.origin, served)}
-	if res := resultFor(t, convergeEnvWith(context.Background(), stB, f, converge.NewPeerStatus(), []string{"hostA"}, ""), "alpha"); res.Err != nil || res.Action != ActionEnvApplied {
+	if res := resultFor(t, convergeEnvWith(context.Background(), stB, staticState(stB), f, converge.NewPeerStatus(), []string{"hostA"}, ""), "alpha"); res.Err != nil || res.Action != ActionEnvApplied {
 		t.Fatalf("converge on B = %+v, want env-applied", res)
 	}
 	if h.exists(filepath.Join(destB, ".env.extra")) {
@@ -726,7 +739,7 @@ func TestConvergeEnvTrackedAfterSyncPurges(t *testing.T) {
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
 	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("SECRET", "1", peerStamp())})}
-	if res := resultFor(t, convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
+	if res := resultFor(t, convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
 		t.Fatalf("seed converge: %v", res.Err)
 	}
 	if sc, err := env.LoadSidecar(sidecarPath(t, h.origin), h.origin); err != nil {
@@ -746,7 +759,7 @@ func TestConvergeEnvTrackedAfterSyncPurges(t *testing.T) {
 		t.Fatal("now-tracked .env still served by LocalEnvState")
 	}
 
-	if res := resultFor(t, convergeEnvWith(context.Background(), st, f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
+	if res := resultFor(t, convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha"); res.Err != nil {
 		t.Fatalf("second converge: %v", res.Err)
 	}
 	sc, err := env.LoadSidecar(sidecarPath(t, h.origin), h.origin)
@@ -759,6 +772,266 @@ func TestConvergeEnvTrackedAfterSyncPurges(t *testing.T) {
 	if got := h.readFile(dest, ".env"); got != "SECRET=1\n" {
 		t.Fatalf("tracked .env = %q, want untouched", got)
 	}
+}
+
+// TestConvergeEnvNoChangeAtQuietWindowIsClean proves a file whose merged content equals
+// its current content never gates on the quiet window: with the file's mtime at now and
+// a peer advertising the value already on disk, the converge is env-clean, not env-busy.
+func TestConvergeEnvNoChangeAtQuietWindowIsClean(t *testing.T) {
+	h := newHarness(t)
+	dest := h.cloneRepo("alpha")
+	writeEnvFile(t, dest, ".env", "LOCAL=1\n", time.Now())
+	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+
+	f := &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("LOCAL", "1", peerStamp())})}
+	res := resultFor(t, convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"peer"}, ""), "alpha")
+	if res.Err != nil {
+		t.Fatalf("err: %v", res.Err)
+	}
+	if res.Action != ActionEnvClean {
+		t.Fatalf("action = %q, want env-clean (no change needed, fresh mtime must not gate)", res.Action)
+	}
+	if got := h.readFile(dest, ".env"); got != "LOCAL=1\n" {
+		t.Fatalf(".env = %q, want untouched LOCAL=1", got)
+	}
+}
+
+// mutatingEnvFetcher wraps a fakeEnvFetcher, applying mutate to the on-disk state once
+// before the first fetch returns — a state change landing during the unlocked fetch window.
+type mutatingEnvFetcher struct {
+	t      *testing.T
+	inner  *fakeEnvFetcher
+	mutate func(*state.State) error
+}
+
+func (m *mutatingEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
+	if m.mutate != nil {
+		if _, err := state.Update(ctx, m.mutate); err != nil {
+			m.t.Fatalf("mutate state during fetch: %v", err)
+		}
+		m.mutate = nil
+	}
+	return m.inner.FetchEnv(ctx, peer, origins)
+}
+
+// TestConvergeEnvEligibilityReloadedUnderLock proves the eligible set is recomputed
+// from a fresh state load under the flock: a repo opted out (NoEnvSync) during the
+// unlocked peer-fetch window gets nothing applied — .env untouched, no sidecar — while
+// a control run without the mutation applies the peer's key normally.
+func TestConvergeEnvEligibilityReloadedUnderLock(t *testing.T) {
+	seed := func(t *testing.T) (*harness, string, *state.State) {
+		h := newHarness(t)
+		dest := h.cloneRepo("alpha")
+		writeEnvFile(t, dest, ".env", "LOCAL=1\n", backdated())
+		st, err := state.Update(context.Background(), func(s *state.State) error {
+			s.DefaultLocation = h.dataLoc
+			s.AddRepo(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("seed on-disk state: %v", err)
+		}
+		return h, dest, st
+	}
+	peerFetcher := func(h *harness) *fakeEnvFetcher {
+		return &fakeEnvFetcher{states: envState("peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
+	}
+
+	t.Run("opt-out during fetch skips apply", func(t *testing.T) {
+		h, dest, st := seed(t)
+		f := &mutatingEnvFetcher{t: t, inner: peerFetcher(h), mutate: func(s *state.State) error {
+			s.AddRepo(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main", NoEnvSync: true})
+			return nil
+		}}
+		results := convergeEnvWith(context.Background(), st, state.Load, f, converge.NewPeerStatus(), []string{"peer"}, "")
+		if len(results) != 0 {
+			t.Fatalf("results = %+v, want none for a repo opted out during the fetch window", results)
+		}
+		if got := h.readFile(dest, ".env"); got != "LOCAL=1\n" {
+			t.Fatalf(".env = %q, want untouched LOCAL=1", got)
+		}
+		if h.exists(sidecarPath(t, h.origin)) {
+			t.Fatal("sidecar created for a repo opted out during the fetch window")
+		}
+	})
+
+	t.Run("control applies without the mutation", func(t *testing.T) {
+		h, dest, st := seed(t)
+		results := convergeEnvWith(context.Background(), st, state.Load, peerFetcher(h), converge.NewPeerStatus(), []string{"peer"}, "")
+		res := resultFor(t, results, "alpha")
+		if res.Err != nil || res.Action != ActionEnvApplied {
+			t.Fatalf("res = %+v, want env-applied no err", res)
+		}
+		if got := h.readFile(dest, ".env"); !strings.Contains(got, "API_KEY=secret") {
+			t.Fatalf(".env = %q, want the peer's key applied", got)
+		}
+		if !h.exists(sidecarPath(t, h.origin)) {
+			t.Fatal("sidecar not created after env-applied")
+		}
+	})
+}
+
+// TestConvergeEnvCapsMergedFiles proves the merged state is capped to the wire limits
+// deterministically: two peers each serving a distinct valid file set whose union
+// exceeds MaxWireFiles converge to exactly the lexicographically-first MaxWireFiles
+// names, the served LocalEnvState passes validatePeerEnv, and a second host on the same
+// inputs lands on the identical set.
+func TestConvergeEnvCapsMergedFiles(t *testing.T) {
+	h := newHarness(t)
+
+	const total = 100 // > MaxWireFiles, split across two peers
+	even, odd := env.RepoState{}, env.RepoState{}
+	for i := 0; i < total; i++ {
+		name := fmt.Sprintf(".env.f%03d", i)
+		if i%2 == 0 {
+			even[name] = oneKey("K", "v", peerStamp())
+		} else {
+			odd[name] = oneKey("K", "v", peerStamp())
+		}
+	}
+
+	dataA := filepath.Join(h.root, "dataA")
+	dataB := filepath.Join(h.root, "dataB")
+	for _, d := range []string{dataA, dataB} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	destA := filepath.Join(dataA, "alpha")
+	destB := filepath.Join(dataB, "alpha")
+	if err := vcs.Clone(context.Background(), h.origin, destA); err != nil {
+		t.Fatalf("clone A: %v", err)
+	}
+	if err := vcs.Clone(context.Background(), h.origin, destB); err != nil {
+		t.Fatalf("clone B: %v", err)
+	}
+	writeEnvFile(t, destA, ".env", "LOCAL=1\n", backdated())
+	writeEnvFile(t, destB, ".env", "LOCAL=1\n", backdated())
+
+	xdgA := filepath.Join(h.root, "xdgA")
+	xdgB := filepath.Join(h.root, "xdgB")
+	hostState := func(dl string) *state.State {
+		st := state.New()
+		st.DefaultLocation = dl
+		st.Settings = state.Settings{IdleThreshold: state.Duration(time.Nanosecond), RepoOpTimeout: state.Duration(time.Minute)}
+		st.AddRepo(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
+		return st
+	}
+	f := &fakeEnvFetcher{states: map[string]map[string]env.RepoState{
+		"p1": {h.origin: even},
+		"p2": {h.origin: odd},
+	}}
+	peers := []string{"p1", "p2"}
+
+	run := func(st *state.State, xdg string) {
+		t.Setenv("XDG_CONFIG_HOME", xdg)
+		if res := resultFor(t, convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), peers, ""), "alpha"); res.Err != nil {
+			t.Fatalf("converge: %v", res.Err)
+		}
+	}
+	run(hostState(dataA), xdgA)
+	run(hostState(dataB), xdgB)
+
+	wantKept := map[string]bool{".env": true}
+	for i := 0; i < env.MaxWireFiles-1; i++ {
+		wantKept[fmt.Sprintf(".env.f%03d", i)] = true
+	}
+	keptNames := func(xdg string) map[string]bool {
+		sc, err := env.LoadSidecar(env.SidecarPath(filepath.Join(xdg, "reposync"), h.origin), h.origin)
+		if err != nil {
+			t.Fatalf("load sidecar: %v", err)
+		}
+		names := make(map[string]bool, len(sc.Files))
+		for n := range sc.Files {
+			names[n] = true
+		}
+		return names
+	}
+	namesA := keptNames(xdgA)
+	namesB := keptNames(xdgB)
+	if len(namesA) != env.MaxWireFiles {
+		t.Fatalf("host A kept %d files, want %d", len(namesA), env.MaxWireFiles)
+	}
+	if !maps.Equal(namesA, wantKept) {
+		t.Fatalf("kept set = %v, want the lexicographically-first %d names", namesA, env.MaxWireFiles)
+	}
+	if !maps.Equal(namesA, namesB) {
+		t.Fatalf("hosts diverged on the capped set: A=%v B=%v", namesA, namesB)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdgA)
+	served, err := LocalEnvState(context.Background(), destA, env.SidecarPath(filepath.Join(xdgA, "reposync"), h.origin), h.origin)
+	if err != nil {
+		t.Fatalf("LocalEnvState: %v", err)
+	}
+	if err := validatePeerEnv(map[string]bool{h.origin: true}, map[string]env.RepoState{h.origin: served}); err != nil {
+		t.Fatalf("served capped state fails validatePeerEnv: %v", err)
+	}
+}
+
+// batchRecordingFetcher records, per peer, the origin count of every FetchEnv call and
+// can fail a chosen 1-based call index, so a test asserts the per-peer batch shape.
+type batchRecordingFetcher struct {
+	perCall map[string][]int
+	errCall map[string]int // peer -> 1-based call index to error on; 0 = never
+}
+
+func (b *batchRecordingFetcher) FetchEnv(_ context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
+	b.perCall[peer] = append(b.perCall[peer], len(origins))
+	if b.errCall[peer] == len(b.perCall[peer]) {
+		return nil, errors.New("batch offline")
+	}
+	out := make(map[string]env.RepoState, len(origins))
+	for _, o := range origins {
+		out[o] = env.RepoState{".env": oneKey("K", "v", peerStamp())}
+	}
+	return out, nil
+}
+
+// TestFetchEnvPeersBatchesOrigins proves fetchEnvPeers chunks a per-peer fetch into
+// batches of at most env.MaxOrigins and merges the responses, and that a failed batch
+// drops the whole peer (no partial trust).
+func TestFetchEnvPeersBatchesOrigins(t *testing.T) {
+	origins := make([]string, 600)
+	for i := range origins {
+		origins[i] = fmt.Sprintf("origin-%d", i)
+	}
+
+	t.Run("chunks under the cap and merges", func(t *testing.T) {
+		b := &batchRecordingFetcher{perCall: map[string][]int{}, errCall: map[string]int{}}
+		got := fetchEnvPeers(context.Background(), b, converge.NewPeerStatus(), []string{"p"}, origins)
+
+		calls := b.perCall["p"]
+		wantCalls := (len(origins) + env.MaxOrigins - 1) / env.MaxOrigins
+		if len(calls) != wantCalls {
+			t.Fatalf("peer p made %d calls, want ceil(%d/%d)=%d", len(calls), len(origins), env.MaxOrigins, wantCalls)
+		}
+		for i, c := range calls {
+			if c > env.MaxOrigins {
+				t.Fatalf("call %d requested %d origins, over the %d cap", i, c, env.MaxOrigins)
+			}
+		}
+		if len(got) != len(origins) {
+			t.Fatalf("merged %d origins, want all %d", len(got), len(origins))
+		}
+		for _, o := range origins {
+			if len(got[o]) != 1 {
+				t.Fatalf("origin %q merged %d states, want 1", o, len(got[o]))
+			}
+		}
+	})
+
+	t.Run("a failed batch drops the whole peer", func(t *testing.T) {
+		b := &batchRecordingFetcher{perCall: map[string][]int{}, errCall: map[string]int{"p": 2}}
+		got := fetchEnvPeers(context.Background(), b, converge.NewPeerStatus(), []string{"p"}, origins)
+
+		if len(got) != 0 {
+			t.Fatalf("collected %d origins from a peer whose 2nd batch failed, want 0", len(got))
+		}
+		if calls := len(b.perCall["p"]); calls != 2 {
+			t.Fatalf("peer p made %d calls, want 2 (stopped at the failing batch)", calls)
+		}
+	})
 }
 
 // seedMesh writes a self+hosts identity into the shared synckit mesh so a full Reconcile

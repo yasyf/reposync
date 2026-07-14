@@ -112,10 +112,6 @@ func servedEnvState(ctx context.Context, st *state.State, dl, configDir, origin 
 	return rs, true, nil
 }
 
-// maxOrigins caps the origins one env.get_state request may ask for, bounding the work
-// a single peer request can force.
-const maxOrigins = 256
-
 // originsParam extracts the requested origins from the request params, rejecting a
 // non-string entry or an over-cap count so a malformed or oversized request fails loudly
 // rather than serving garbage. Duplicates are collapsed so each origin costs one pass.
@@ -128,8 +124,8 @@ func originsParam(p map[string]any) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("env.get_state: origins must be an array of strings")
 	}
-	if len(arr) > maxOrigins {
-		return nil, fmt.Errorf("env.get_state: %d origins over the %d limit", len(arr), maxOrigins)
+	if len(arr) > env.MaxOrigins {
+		return nil, fmt.Errorf("env.get_state: %d origins over the %d limit", len(arr), env.MaxOrigins)
 	}
 	seen := make(map[string]bool, len(arr))
 	out := make([]string, 0, len(arr))

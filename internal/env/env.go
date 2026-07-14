@@ -17,6 +17,14 @@
 // Exempt paths are never observed, written, or propagated from this host: a symlink
 // or other non-regular file (a deliberate local arrangement, never followed) and a
 // regular file over MaxFileSize both sync as if absent, without tombstoning peers.
+//
+// Crash-consistency limits. Two windows are known and accepted. A crash or write
+// error between applying files and persisting the sidecar re-stamps just-imported
+// values at the apply time on the next pass, which may win last-write-wins over an
+// edit made elsewhere in that interval; the key self-corrects on its next edit. A git
+// add or a symlink swap racing the milliseconds between the final trackedness and
+// exempt checks and the rename overwrites the file once; git's index copy survives and
+// the next pass purges the file from sync.
 package env
 
 import (
@@ -29,7 +37,9 @@ const (
 	// MethodGetState is the rpc method a host calls to fetch a peer's stamped env state.
 	MethodGetState = "env.get_state"
 	// QuietWindow is how long a target file must sit unmodified before an apply may
-	// write it, so a converge never races a concurrent local edit.
+	// write it. It does not close the check-to-write race, only narrows it: a converge
+	// defers a file written within the window, shrinking the unavoidable gap between the
+	// freshness Lstat and the rename to microseconds rather than eliminating it.
 	QuietWindow = 5 * time.Second
 	// TombstoneTTL is how long a removed key is retained before sidecar GC drops it;
 	// resurrection requires a replica offline longer than this against the converge cadence.
@@ -45,6 +55,10 @@ const (
 	MaxWireFiles = 64
 	// MaxWireKeys caps the entries one env file may carry in a single peer payload.
 	MaxWireKeys = 4096
+	// MaxOrigins caps the origins one env.get_state request may ask for, bounding the
+	// work a single peer request can force. A converge with more eligible repos than
+	// this chunks its per-peer fetch into batches of at most MaxOrigins.
+	MaxOrigins = 256
 )
 
 // Now is the clock the sidecar GC compares tombstone stamps against, indirected so

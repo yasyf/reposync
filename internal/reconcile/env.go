@@ -90,15 +90,17 @@ func (sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string
 // best-effort — a pass-level setup failure is logged and yields no results — so the git
 // converge that precedes it is never blocked by env sync.
 func convergeEnv(ctx context.Context, st *state.State, peers []string, origin string) []Result {
-	return convergeEnvWith(ctx, st, envFetch, envPeerStatus, peers, origin)
+	return convergeEnvWith(ctx, st, state.Load, envFetch, envPeerStatus, peers, origin)
 }
 
-// convergeEnvWith is convergeEnv with the fetcher and transition tracker injected so a
-// test can drive the pull-merge against a fake peer. Unlike the repo converge it does
-// NOT skip the notifying origin peer: for env the notifying host is the only holder of
-// the new content, and termination comes from the apply-stable digest, not an origin
-// skip. The trailing origin arg is therefore accepted for symmetry but never consulted.
-func convergeEnvWith(ctx context.Context, st *state.State, f envFetcher, status *converge.PeerStatus, peers []string, _ string) []Result {
+// convergeEnvWith is convergeEnv with the state reloader, fetcher, and transition
+// tracker injected so a test can drive the pull-merge against a fake peer. reload runs
+// under the flock to recompute the eligible set, so a repo removed or opted out during
+// the unlocked fetch window is never applied; dl and configDir stay from the pre-pass
+// state. Unlike the repo converge it does NOT skip the notifying origin peer — the
+// notifying host is the only holder of the new content — so the trailing origin arg is
+// accepted for symmetry but never consulted.
+func convergeEnvWith(ctx context.Context, st *state.State, reload func() (*state.State, error), f envFetcher, status *converge.PeerStatus, peers []string, _ string) []Result {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
 		slog.ErrorContext(ctx, "env converge: resolve default location", "err", err)
@@ -122,6 +124,11 @@ func convergeEnvWith(ctx context.Context, st *state.State, f envFetcher, status 
 
 	var results []Result
 	if err := state.WithLock(ctx, func() error {
+		fresh, err := reload()
+		if err != nil {
+			return fmt.Errorf("reload state: %w", err)
+		}
+		eligible := eligibleEnvRepos(fresh, dl)
 		results = make([]Result, len(eligible))
 		for i, repo := range eligible {
 			results[i] = convergeEnvRepo(ctx, dl, configDir, repo, peerStates[repo.Origin])
@@ -151,35 +158,61 @@ func eligibleEnvRepos(st *state.State, dl string) []state.Repo {
 }
 
 // fetchEnvPeers fetches and validates every peer's env state for origins, returning the
-// per-origin list of peer RepoStates to merge. A peer that is unreachable, old-version,
-// or serves an invalid payload is logged and skipped; the notifying origin peer is NOT
+// per-origin list of peer RepoStates to merge. Each peer's origins are fetched in
+// batches of at most env.MaxOrigins and the batch responses merged; a peer that is
+// unreachable, old-version, or serves an invalid payload in ANY batch is logged and
+// skipped whole, contributing nothing this pass. The notifying origin peer is NOT
 // skipped.
 func fetchEnvPeers(ctx context.Context, f envFetcher, status *converge.PeerStatus, peers, origins []string) map[string][]env.RepoState {
-	requested := make(map[string]bool, len(origins))
-	for _, o := range origins {
-		requested[o] = true
-	}
 	byOrigin := make(map[string][]env.RepoState)
 	for _, peer := range peers {
-		payload, err := f.FetchEnv(ctx, peer, origins)
-		if err != nil {
-			if status.Down(peer) {
-				slog.WarnContext(ctx, "env converge: peer skipped; suppressing until recovery", "peer", peer, "err", err)
-			}
+		collected, ok := fetchEnvPeerBatched(ctx, f, status, peer, origins)
+		if !ok {
 			continue
 		}
-		if _, recovered := status.Up(peer); recovered {
-			slog.InfoContext(ctx, "env converge: peer recovered", "peer", peer)
-		}
-		if err := validatePeerEnv(requested, payload); err != nil {
-			slog.WarnContext(ctx, "env converge: rejecting peer payload", "peer", peer, "err", err)
-			continue
-		}
-		for o, rs := range payload {
+		for o, rs := range collected {
 			byOrigin[o] = append(byOrigin[o], rs)
 		}
 	}
 	return byOrigin
+}
+
+// fetchEnvPeerBatched fetches peer's env state for origins in batches of at most
+// env.MaxOrigins, validating each batch against its own requested set and merging the
+// responses. ok is false when any batch errors or serves an invalid payload: the whole
+// peer is dropped for this pass — no partial trust of a peer whose later batch failed —
+// with an unreachable batch logged once per outage.
+func fetchEnvPeerBatched(ctx context.Context, f envFetcher, status *converge.PeerStatus, peer string, origins []string) (map[string]env.RepoState, bool) {
+	collected := make(map[string]env.RepoState)
+	for start := 0; start < len(origins); start += env.MaxOrigins {
+		end := start + env.MaxOrigins
+		if end > len(origins) {
+			end = len(origins)
+		}
+		batch := origins[start:end]
+		payload, err := f.FetchEnv(ctx, peer, batch)
+		if err != nil {
+			if status.Down(peer) {
+				slog.WarnContext(ctx, "env converge: peer skipped; suppressing until recovery", "peer", peer, "err", err)
+			}
+			return nil, false
+		}
+		requested := make(map[string]bool, len(batch))
+		for _, o := range batch {
+			requested[o] = true
+		}
+		if err := validatePeerEnv(requested, payload); err != nil {
+			slog.WarnContext(ctx, "env converge: rejecting peer payload", "peer", peer, "err", err)
+			return nil, false
+		}
+		for o, rs := range payload {
+			collected[o] = rs
+		}
+	}
+	if _, recovered := status.Up(peer); recovered {
+		slog.InfoContext(ctx, "env converge: peer recovered", "peer", peer)
+	}
+	return collected, true
 }
 
 // validatePeerEnv rejects a peer's ENTIRE payload on any wire violation: an origin the
@@ -203,7 +236,6 @@ func validatePeerEnv(requested map[string]bool, payload map[string]env.RepoState
 			if len(reg) > env.MaxWireKeys {
 				return fmt.Errorf("env file %q served %d entries, over the %d cap", name, len(reg), env.MaxWireKeys)
 			}
-			size := 0
 			for key, e := range reg {
 				if !env.ValidKey(key) {
 					return fmt.Errorf("invalid env key %q in %q", key, name)
@@ -214,9 +246,8 @@ func validatePeerEnv(requested map[string]bool, payload map[string]env.RepoState
 				if e.Added < 0 || e.Removed < 0 || e.Added > ceiling || e.Removed > ceiling {
 					return fmt.Errorf("env entry %q in %q has an out-of-range stamp", key, name)
 				}
-				size += len(key) + len(e.Value)
 			}
-			if size > env.MaxFileSize {
+			if size := env.AggregateSize(reg); size > env.MaxFileSize {
 				return fmt.Errorf("env file %q served %d aggregate bytes, over the %d cap", name, size, env.MaxFileSize)
 			}
 		}
@@ -225,9 +256,9 @@ func validatePeerEnv(requested map[string]bool, payload map[string]env.RepoState
 }
 
 // convergeEnvRepo merges one repo's root .env files: build the shared local state, join
-// with the peers' states, drop names this host must not sync, gate on the quiet window,
-// apply, prune tombstone-only names this host never held, and persist the sidecar as
-// the next merge base.
+// with the peers' states, drop names this host must not sync, apply under the two-pass
+// quiet-window gate, prune tombstone-only names this host never held, and persist the
+// sidecar as the next merge base.
 func convergeEnvRepo(ctx context.Context, dl, configDir string, repo state.Repo, peerStates []env.RepoState) Result {
 	abspath := repo.AbsPath(dl)
 	sidecarPath := env.SidecarPath(configDir, repo.Origin)
@@ -245,16 +276,12 @@ func convergeEnvRepo(ctx context.Context, dl, configDir string, repo state.Repo,
 	if err := dropUnsyncable(ctx, abspath, merged); err != nil {
 		return Result{Relpath: repo.Relpath, Err: err}
 	}
-	busy, err := envBusy(abspath, local, merged)
+	changed, busy, err := env.ApplyAll(abspath, merged)
 	if err != nil {
 		return Result{Relpath: repo.Relpath, Err: err}
 	}
 	if busy {
 		return Result{Relpath: repo.Relpath, Action: ActionEnvBusy}
-	}
-	changed, err := applyEnvFiles(abspath, merged)
-	if err != nil {
-		return Result{Relpath: repo.Relpath, Err: err}
 	}
 	if err := dropTombstoneOnlyAbsent(abspath, sc.Files, merged); err != nil {
 		return Result{Relpath: repo.Relpath, Err: err}
@@ -337,7 +364,41 @@ func dropUnsyncable(ctx context.Context, root string, merged env.RepoState) erro
 			delete(merged, name)
 		}
 	}
+	capMergedToWire(ctx, root, merged)
 	return nil
+}
+
+// capMergedToWire drops from merged whatever the merge grew past the wire caps every
+// peer enforces per payload, so a converged host never persists — and then serves — a
+// state its peers would reject whole. It mirrors validatePeerEnv: a file with more than
+// MaxWireKeys entries (tombstones counted) or an aggregate over MaxFileSize is dropped,
+// then if more than MaxWireFiles files remain only the lexicographically-smallest
+// MaxWireFiles names are kept. Every host computes this from the same merged state, so
+// all drop the same names.
+func capMergedToWire(ctx context.Context, root string, merged env.RepoState) {
+	for name, reg := range merged {
+		if len(reg) > env.MaxWireKeys {
+			slog.WarnContext(ctx, "env converge: dropping file over the wire-keys cap", "root", root, "name", name, "keys", len(reg), "cap", env.MaxWireKeys)
+			delete(merged, name)
+			continue
+		}
+		if size := env.AggregateSize(reg); size > env.MaxFileSize {
+			slog.WarnContext(ctx, "env converge: dropping file over the file-size cap", "root", root, "name", name, "bytes", size, "cap", env.MaxFileSize)
+			delete(merged, name)
+		}
+	}
+	if len(merged) <= env.MaxWireFiles {
+		return
+	}
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names[env.MaxWireFiles:] {
+		slog.WarnContext(ctx, "env converge: dropping file over the wire-files cap", "root", root, "name", name, "cap", env.MaxWireFiles)
+		delete(merged, name)
+	}
 }
 
 // dropTombstoneOnlyAbsent removes from merged every file name with no present keys, no
@@ -365,67 +426,6 @@ func dropTombstoneOnlyAbsent(root string, base, merged env.RepoState) error {
 		}
 	}
 	return nil
-}
-
-// envBusy reports whether applying merged would rewrite an existing file modified within
-// the quiet window — a concurrent local edit the converge must not race. A file whose
-// merged content matches its observed local content will not be rewritten, so it never
-// gates; a file that would be created has no edit to race and never gates either.
-func envBusy(root string, local, merged env.RepoState) (bool, error) {
-	now := time.Now()
-	for name, reg := range merged {
-		if !presentDiffers(local[name], reg) {
-			continue
-		}
-		info, err := os.Stat(filepath.Join(root, name))
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return false, fmt.Errorf("stat env file %s: %w", filepath.Join(root, name), err)
-		}
-		if now.Sub(info.ModTime()) < env.QuietWindow {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// applyEnvFiles reconciles every merged file to disk and reports whether any changed.
-func applyEnvFiles(root string, merged env.RepoState) (bool, error) {
-	names := make([]string, 0, len(merged))
-	for name := range merged {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	changed := false
-	for _, name := range names {
-		wrote, err := env.Apply(filepath.Join(root, name), merged[name])
-		if err != nil {
-			return changed, err
-		}
-		if wrote {
-			changed = true
-		}
-	}
-	return changed, nil
-}
-
-// presentDiffers reports whether a and b hold different present key/value content,
-// ignoring stamps and tombstones.
-func presentDiffers(a, b env.FileMap) bool {
-	return !maps.Equal(presentValues(a), presentValues(b))
-}
-
-// presentValues projects a registry to its present key/value map.
-func presentValues(reg env.FileMap) map[string]string {
-	m := make(map[string]string, len(reg))
-	for k, e := range reg {
-		if e.Present() {
-			m[k] = e.Value
-		}
-	}
-	return m
 }
 
 // sameRepoState reports whether two RepoStates are identical entry-for-entry, so an
