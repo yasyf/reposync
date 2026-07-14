@@ -63,6 +63,18 @@ func classify(raw string) (key, value string, eq int, ok bool) {
 	return name, raw[eq+1:], eq, true
 }
 
+// ValidKey reports whether k is a legal dotenv key: [A-Za-z_][A-Za-z0-9_]*. A merged
+// key must pass this so it can never inject an extra line on rewrite.
+func ValidKey(k string) bool {
+	return isName(k)
+}
+
+// ValidValue reports whether v holds no newline, which on rewrite would split into extra
+// lines. A merged value must pass this.
+func ValidValue(v string) bool {
+	return !strings.Contains(v, "\n")
+}
+
 // isName reports whether s matches [A-Za-z_][A-Za-z0-9_]*.
 func isName(s string) bool {
 	if s == "" {

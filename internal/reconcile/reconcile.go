@@ -69,7 +69,10 @@ func Reconcile(ctx context.Context, st *state.State, origin string) ([]Result, e
 	if err != nil {
 		return nil, err
 	}
-	return append(converged, local...), nil
+	results := append(converged, local...)
+	// The env pass rides the same tick and runs last, so a repo cloned above gets its
+	// env files materialized in the same reconcile.
+	return append(results, convergeEnv(ctx, st, mesh.Hosts, origin)...), nil
 }
 
 // localRepos returns the present local-only repos as the flat Repo view the
@@ -112,7 +115,7 @@ func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmp
 	defer cancel()
 
 	abspath := repo.AbsPath(dl)
-	if present(abspath) {
+	if Present(abspath) {
 		busy, err := idleSync(ctx, st, abspath)
 		if busy {
 			return Result{Relpath: repo.Relpath, Action: ActionBusy, Err: err}
@@ -202,8 +205,8 @@ func idleSync(ctx context.Context, st *state.State, abspath string) (bool, error
 	return busy, errors.Join(errs...)
 }
 
-// present reports whether a repo checkout (jj or git) already exists at abspath.
-func present(abspath string) bool {
+// Present reports whether a repo checkout (jj or git) already exists at abspath.
+func Present(abspath string) bool {
 	for _, marker := range []string{".jj", ".git"} {
 		if _, err := os.Stat(filepath.Join(abspath, marker)); err == nil {
 			return true

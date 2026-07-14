@@ -34,8 +34,17 @@ const (
 	// TombstoneTTL is how long a removed key is retained before sidecar GC drops it;
 	// resurrection requires a replica offline longer than this against the converge cadence.
 	TombstoneTTL = 90 * 24 * time.Hour
-	// MaxFileSize is the largest env file observed; larger files are skipped.
+	// MaxFileSize is the largest env file observed; larger files are skipped. It also
+	// caps a peer file's aggregate wire size (summed key+value bytes over its entries).
 	MaxFileSize = 256 << 10
+	// MaxStampSkew is how far past now a peer's env stamp may sit before the whole
+	// payload is rejected as poisoned. Keeping an out-of-range (e.g. MaxInt64) stamp out
+	// of local sidecars is what lets stampFor's floor+1 bump never overflow.
+	MaxStampSkew = 24 * time.Hour
+	// MaxWireFiles caps the env files one origin may carry in a single peer payload.
+	MaxWireFiles = 64
+	// MaxWireKeys caps the entries one env file may carry in a single peer payload.
+	MaxWireKeys = 4096
 )
 
 // Now is the clock the sidecar GC compares tombstone stamps against, indirected so

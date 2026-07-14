@@ -39,11 +39,23 @@ func ScanNames(root string) ([]string, error) {
 	return names, nil
 }
 
+// maxFileNameLen caps a wire file name at the common filesystem byte limit.
+const maxFileNameLen = 255
+
 // ValidateFileName guards a name arriving over the wire: it must be a bare filename
-// (no path separators, no "..") that matches the env pattern.
+// (no path separators, no "..") under maxFileNameLen bytes, free of control bytes,
+// that matches the env pattern.
 func ValidateFileName(name string) error {
 	if filepath.Base(name) != name {
 		return fmt.Errorf("env file name %q is not a bare filename", name)
+	}
+	if len(name) > maxFileNameLen {
+		return fmt.Errorf("env file name is %d bytes, over the %d limit", len(name), maxFileNameLen)
+	}
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c < 0x20 || c == 0x7f {
+			return fmt.Errorf("env file name %q contains a control byte", name)
+		}
 	}
 	if !matchesPattern(name) {
 		return fmt.Errorf("env file name %q does not match the .env pattern", name)
@@ -144,10 +156,17 @@ func Observe(sc Sidecar, root string, names []string) (RepoState, error) {
 		for k, e := range reg.Present() {
 			if _, inFile := kv[k]; !inFile {
 				reg.Remove(k, stampFor(mtime, e))
+				clearRemoved(reg, k)
 			}
 		}
 	}
 	return out, nil
+}
+
+func clearRemoved(reg FileMap, k string) {
+	e := reg[k]
+	e.Value = ""
+	reg[k] = e
 }
 
 // observeMissing tombstones the present keys of a file that has vanished from disk,
@@ -168,6 +187,7 @@ func observeMissing(out RepoState, name, root string) error {
 	mtime := info.ModTime()
 	for k, e := range present {
 		reg.Remove(k, stampFor(mtime, e))
+		clearRemoved(reg, k)
 	}
 	return nil
 }

@@ -69,17 +69,21 @@ func LoadSidecar(path, origin string) (Sidecar, error) {
 	return sc, nil
 }
 
-// Save GCs expired tombstones, drops emptied files, and atomically writes the
-// sidecar (dir 0700, file 0600). A tombstone is dropped once it is absent and its
-// newest stamp is older than TombstoneTTL.
+// Save GCs expired tombstones, blanks the value of every surviving tombstone so no
+// deleted secret is persisted, drops emptied files, and atomically writes the sidecar
+// (dir 0700, file 0600). A tombstone is dropped once it is absent and its newest stamp
+// is older than TombstoneTTL.
 func (sc Sidecar) Save(path string) error {
 	cutoff := cregistry.UnixMicros(Now().Add(-TombstoneTTL))
 	files := make(RepoState, len(sc.Files))
 	for name, reg := range sc.Files {
 		kept := make(FileMap, len(reg))
 		for k, e := range reg {
-			if !e.Present() && maxStamp(e) < cutoff {
-				continue
+			if !e.Present() {
+				if maxStamp(e) < cutoff {
+					continue
+				}
+				e.Value = ""
 			}
 			kept[k] = e
 		}

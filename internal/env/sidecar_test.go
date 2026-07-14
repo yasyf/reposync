@@ -132,7 +132,13 @@ func TestSidecarSaveGC(t *testing.T) {
 	if !reg["P"].Present() {
 		t.Error("present key P dropped, want kept")
 	}
+	if reg["P"].Value != "present" {
+		t.Errorf("present key P value = %q, want retained", reg["P"].Value)
+	}
 	if _, ok := reg["F"]; !ok || reg["F"].Present() {
 		t.Errorf("fresh tombstone F = %+v, want kept and absent", reg["F"])
+	}
+	if reg["F"].Value != "" {
+		t.Errorf("surviving tombstone F value = %q, want blanked in the persisted sidecar", reg["F"].Value)
 	}
 }

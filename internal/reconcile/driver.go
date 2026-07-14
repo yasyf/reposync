@@ -20,6 +20,10 @@ import (
 // design, no state is persisted across processes.
 var peerStatus = converge.NewPeerStatus()
 
+// repoFetcher is the peer registry fetcher Reconcile drives through convergeRepos; a
+// var so a test can inject a fake without a real ssh hop.
+var repoFetcher converge.Fetcher[state.RepoMeta] = sshFetcher{}
+
 // repoDriver implements synckit converge.Driver[state.RepoMeta] for the propagating
 // (origin-keyed) repo registry: it reads and writes that registry inside reposync's
 // state.json and clones-or-idle-syncs each present repo. It runs entirely inside the
@@ -84,7 +88,7 @@ func (sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[st
 // pull-merge every peer, persist the converged registry, then clone-or-sync each
 // present repo. state.WithLock wraps the whole pass.
 func convergeRepos(ctx context.Context, st *state.State, peers []string, origin string) ([]Result, error) {
-	return convergeReposWith(ctx, st, sshFetcher{}, peerStatus, peers, origin)
+	return convergeReposWith(ctx, st, repoFetcher, peerStatus, peers, origin)
 }
 
 // convergeReposWith is convergeRepos with the peer fetcher and transition tracker

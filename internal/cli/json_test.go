@@ -100,6 +100,28 @@ func serveConsumer(t *testing.T) *syncservice.Client {
 	return c
 }
 
+// servePipe wires the full rpc-serve dispatcher (typed contract plus env.get_state)
+// behind a ServeConn loop over a net.Pipe and returns the raw transport, so a test can
+// issue a raw request for a method the typed client does not know.
+func servePipe(t *testing.T) *pipeTransport {
+	t.Helper()
+	d := newServeDispatcher()
+
+	server, clientConn := net.Pipe()
+	srvCtx, srvCancel := context.WithCancel(context.Background())
+	srvDone := make(chan error, 1)
+	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
+	t.Cleanup(func() {
+		srvCancel()
+		_ = server.Close()
+		<-srvDone
+	})
+
+	tx := &pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)}
+	t.Cleanup(func() { _ = tx.Close() })
+	return tx
+}
+
 func TestSelfJSONShape(t *testing.T) {
 	seedRegistry(t, "yasyf@laptop", "yasyf@desktop")
 

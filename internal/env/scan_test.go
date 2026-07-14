@@ -83,6 +83,11 @@ func TestValidateFileName(t *testing.T) {
 		{"sub/.env", false},
 		{"", false},
 		{".env.d/x", false},
+		{".env." + strings.Repeat("a", 250), true},  // 255 bytes: at the limit
+		{".env." + strings.Repeat("a", 251), false}, // 256 bytes: over the limit
+		{".env.a\tb", false},                        // tab (0x09) is a control byte
+		{".env.\x01", false},                        // low control byte
+		{".env.\x7f", false},                        // DEL
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -137,6 +142,9 @@ func TestObserve(t *testing.T) {
 				}
 				if out[".env"]["A"].Removed != micros(tNew) {
 					t.Errorf("A.Removed = %d, want %d", out[".env"]["A"].Removed, micros(tNew))
+				}
+				if v := out[".env"]["A"].Value; v != "" {
+					t.Errorf("tombstoned A value = %q, want blanked", v)
 				}
 				if !out[".env"]["B"].Present() {
 					t.Error("B not present")
@@ -229,6 +237,9 @@ func TestObserveWholeFileDeletion(t *testing.T) {
 	}
 	if e.Removed != micros(tNew) {
 		t.Errorf("A.Removed = %d, want root dir mtime %d", e.Removed, micros(tNew))
+	}
+	if e.Value != "" {
+		t.Errorf("tombstoned A value = %q, want blanked", e.Value)
 	}
 }
 
