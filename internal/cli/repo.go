@@ -81,19 +81,21 @@ func newRepoDiscoverCmd() *cobra.Command {
 
 func newRepoAddCmd() *cobra.Command {
 	var localOnly bool
+	var noEnvSync bool
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Register a repo, propagate it to peers, and converge it everywhere.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoAdd(cmd.Context(), args[0], localOnly)
+			return runRepoAdd(cmd.Context(), args[0], localOnly, noEnvSync)
 		},
 	}
 	cmd.Flags().BoolVar(&localOnly, "local-only", false, "track this repo on this host only (no origin required, never propagated)")
+	cmd.Flags().BoolVar(&noEnvSync, "no-env-sync", false, "do not sync this repo's untracked root .env* files across hosts")
 	return cmd
 }
 
-func runRepoAdd(ctx context.Context, path string, localOnly bool) error {
+func runRepoAdd(ctx context.Context, path string, localOnly, noEnvSync bool) error {
 	abspath, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("resolve path %s: %w", path, err)
@@ -127,9 +129,9 @@ func runRepoAdd(ctx context.Context, path string, localOnly bool) error {
 		return err
 	}
 
-	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly}
+	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly, NoEnvSync: noEnvSync}
 	results, err := apply.Repos(ctx, apply.RepoSelection{
-		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly}},
+		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly, NoEnvSync: noEnvSync}},
 	})
 	if err != nil {
 		return err
@@ -176,9 +178,9 @@ func newRepoLsCmd() *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-			_, _ = fmt.Fprintln(w, "RELPATH\tORIGIN\tTRUNK\tLOCAL_ONLY")
+			_, _ = fmt.Fprintln(w, "RELPATH\tORIGIN\tTRUNK\tLOCAL_ONLY\tENV")
 			for _, r := range st.AllRepos() {
-				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\n", r.Relpath, originLabel(r), r.Trunk, r.LocalOnly)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%t\t%s\n", r.Relpath, originLabel(r), r.Trunk, r.LocalOnly, envLabel(r))
 			}
 			return w.Flush()
 		},
@@ -220,4 +222,11 @@ func originLabel(r state.Repo) string {
 		return "(local-only)"
 	}
 	return r.Origin
+}
+
+func envLabel(r state.Repo) string {
+	if r.NoEnvSync {
+		return "off"
+	}
+	return "on"
 }

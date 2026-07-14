@@ -360,6 +360,93 @@ func TestRemoveRepoTombstonesNotDrops(t *testing.T) {
 	}
 }
 
+// TestAddRepoThreadsNoEnvSync proves the opt-out flag reaches the registry payload
+// for both registries, and that its zero value keeps env sync on.
+func TestAddRepoThreadsNoEnvSync(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	origin := "https://example.com/optout.git"
+	s.AddRepo(Repo{Relpath: "optout", Origin: origin, Trunk: "main", NoEnvSync: true})
+	s.AddRepo(Repo{Relpath: "localopt", Trunk: "main", LocalOnly: true, NoEnvSync: true})
+	s.AddRepo(Repo{Relpath: "synced", Origin: "https://example.com/synced.git", Trunk: "main"})
+
+	if e := s.Repos[origin]; !e.Value.NoEnvSync {
+		t.Fatalf("propagating entry NoEnvSync = false, want true: %+v", e.Value)
+	}
+	if e := s.LocalRepos["localopt"]; !e.Value.NoEnvSync {
+		t.Fatalf("local-only entry NoEnvSync = false, want true: %+v", e.Value)
+	}
+	if e := s.Repos["https://example.com/synced.git"]; e.Value.NoEnvSync {
+		t.Fatalf("default NoEnvSync = true, want false (env sync on): %+v", e.Value)
+	}
+}
+
+// TestNoEnvSyncRoundTrip proves the opt-out flag survives a Save/Load through the flat
+// Repo view for a propagating repo, while an opted-in repo reads back with env sync on.
+func TestNoEnvSyncRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	origin := "https://example.com/optout.git"
+	want := New()
+	want.AddRepo(Repo{Relpath: "optout", Origin: origin, Trunk: "main", NoEnvSync: true})
+	want.AddRepo(Repo{Relpath: "synced", Origin: "https://example.com/synced.git", Trunk: "main"})
+	if err := want.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	optout, ok := got.FindRepoByOrigin(origin)
+	if !ok {
+		t.Fatal("optout missing after round-trip")
+	}
+	if !optout.NoEnvSync {
+		t.Fatal("optout NoEnvSync = false, want true after round-trip")
+	}
+	synced, ok := got.FindRepoByOrigin("https://example.com/synced.git")
+	if !ok {
+		t.Fatal("synced missing after round-trip")
+	}
+	if synced.NoEnvSync {
+		t.Fatal("synced NoEnvSync = true, want false (env sync on) after round-trip")
+	}
+}
+
+// TestRepoMetaNoEnvSyncJSON pins the wire form: the flag marshals under no_env_sync,
+// and a payload written before the field existed decodes to the sync-on zero value.
+func TestRepoMetaNoEnvSyncJSON(t *testing.T) {
+	out, err := json.Marshal(RepoMeta{Relpath: "a", Trunk: "main", NoEnvSync: true})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"no_env_sync":true`) {
+		t.Fatalf("marshal = %s, want it to carry no_env_sync:true", out)
+	}
+
+	cases := []struct {
+		id   string
+		raw  string
+		want bool
+	}{
+		{"present-true", `{"relpath":"a","trunk":"main","local_only":false,"no_env_sync":true}`, true},
+		{"present-false", `{"relpath":"a","trunk":"main","local_only":false,"no_env_sync":false}`, false},
+		{"absent-defaults-off", `{"relpath":"a","trunk":"main","local_only":false}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			var m RepoMeta
+			if err := json.Unmarshal([]byte(c.raw), &m); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if m.NoEnvSync != c.want {
+				t.Fatalf("NoEnvSync = %v, want %v", m.NoEnvSync, c.want)
+			}
+		})
+	}
+}
+
 func TestExpandHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

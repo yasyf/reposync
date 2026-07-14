@@ -59,24 +59,27 @@ type Settings struct {
 }
 
 // RepoMeta is the per-repo payload carried by the convergent registry: where the
-// repo lives (Relpath under the default location), its Trunk branch, and whether it
-// is local-only. The registry key carries the repo's identity — its origin for a
-// propagating repo, its relpath for a local-only one — so it is absent from this
-// payload.
+// repo lives (Relpath under the default location), its Trunk branch, whether it is
+// local-only, and whether it opts out of env-file sync. The registry key carries the
+// repo's identity — its origin for a propagating repo, its relpath for a local-only
+// one — so it is absent from this payload. NoEnvSync's zero value keeps env sync on.
 type RepoMeta struct {
 	Relpath   string `json:"relpath"`
 	Trunk     string `json:"trunk"`
 	LocalOnly bool   `json:"local_only"`
+	NoEnvSync bool   `json:"no_env_sync"`
 }
 
 // Repo is a tracked repository placed at Relpath under the host's default location.
 // It is the in-memory view the sync, reconcile, and watch loops consume, rebuilt
 // from a registry [RepoMeta] plus its key; Origin is empty for a local-only repo.
+// NoEnvSync opts the repo out of env-file sync; its zero value keeps env sync on.
 type Repo struct {
 	Relpath   string
 	Origin    string
 	Trunk     string
 	LocalOnly bool
+	NoEnvSync bool
 }
 
 // State is the reposync-owned slice of the shared on-disk configuration for this
@@ -112,7 +115,7 @@ func (r Repo) AbsPath(defaultLocationExpanded string) string {
 var Now = time.Now
 
 func repo(origin string, e cregistry.Entry[RepoMeta]) Repo {
-	return Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly}
+	return Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly, NoEnvSync: e.Value.NoEnvSync}
 }
 
 // AllRepos returns every tracked repo present on this host — propagating repos keyed
@@ -145,7 +148,7 @@ func (s *State) PropagatingRepos() []Repo {
 // joins the local registry keyed by relpath. A re-add after a tombstone carries a
 // strictly-later stamp, so the repo becomes present again.
 func (s *State) AddRepo(r Repo) {
-	meta := RepoMeta{Relpath: r.Relpath, Trunk: r.Trunk, LocalOnly: r.LocalOnly}
+	meta := RepoMeta{Relpath: r.Relpath, Trunk: r.Trunk, LocalOnly: r.LocalOnly, NoEnvSync: r.NoEnvSync}
 	at := cregistry.UnixMicros(Now())
 	if r.Origin == "" {
 		s.LocalRepos.Add(r.Relpath, meta, at)

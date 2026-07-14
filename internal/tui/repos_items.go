@@ -98,6 +98,11 @@ func renderRepoDetail(item list.Item) string {
 		origin = "(local-only)"
 	}
 
+	env := "on"
+	if c.NoEnvSync {
+		env = "off"
+	}
+
 	state := synckittui.BadgeTracked.Render("tracked")
 	if !c.Tracked {
 		state = synckittui.Dim.Render("untracked")
@@ -116,6 +121,7 @@ func renderRepoDetail(item list.Item) string {
 		"",
 		synckittui.DetailKey.Render("kind   ") + synckittui.BadgeKind.Render(c.Kind),
 		synckittui.DetailKey.Render("origin ") + origin,
+		synckittui.DetailKey.Render("env    ") + env,
 		synckittui.DetailKey.Render("state  ") + state,
 		synckittui.DetailKey.Render("status ") + status,
 		synckittui.DetailKey.Render("edited ") + relTime(it.sortKey()),

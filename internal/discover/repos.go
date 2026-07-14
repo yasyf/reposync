@@ -69,25 +69,29 @@ func classify(ctx context.Context, st *state.State, name, abs string) (Candidate
 	} else if err != nil {
 		return Candidate{}, &SkipNote{Name: name, Reason: err.Error()}, false
 	}
+	isTracked, noEnvSync := tracked(st, name, origin)
 	return Candidate{
 		Relpath:   name,
 		AbsPath:   abs,
 		Kind:      r.Kind(),
 		Origin:    origin,
 		LocalOnly: origin == "",
-		Tracked:   tracked(st, name, origin),
+		Tracked:   isTracked,
+		NoEnvSync: noEnvSync,
 	}, nil, true
 }
 
-// tracked reports whether st already registers this repo, matching on origin when
-// present and otherwise on relpath against the local-only registry.
-func tracked(st *state.State, name, origin string) bool {
+// tracked reports whether st already registers this repo — matching on origin when
+// present, otherwise on relpath against the local-only registry — and, when tracked,
+// whether it has opted out of env-file sync.
+func tracked(st *state.State, name, origin string) (isTracked, noEnvSync bool) {
 	if origin != "" {
-		_, ok := st.FindRepoByOrigin(origin)
-		return ok
+		r, ok := st.FindRepoByOrigin(origin)
+		return ok, ok && r.NoEnvSync
 	}
 	e, ok := st.LocalRepos[name]
-	return ok && e.Present()
+	present := ok && e.Present()
+	return present, present && e.Value.NoEnvSync
 }
 
 // isDir reports whether the entry resolves to a directory, following a symlink

@@ -227,6 +227,34 @@ func TestApplyReposEnableAddsPropagatingEntry(t *testing.T) {
 	}
 }
 
+// TestApplyReposThreadsNoEnvSync proves an enabled candidate's env opt-out reaches the
+// persisted registry payload, the flag `repo add --no-env-sync` carries.
+func TestApplyReposThreadsNoEnvSync(t *testing.T) {
+	h := newHarness(t)
+	h.seedState()
+
+	sel := RepoSelection{
+		Enable: []discover.Candidate{
+			{Relpath: "alpha", Origin: h.origin, Kind: "git", NoEnvSync: true},
+		},
+	}
+	if _, err := Repos(context.Background(), sel); err != nil {
+		t.Fatalf("ApplyRepos: %v", err)
+	}
+
+	st, err := state.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	entry, ok := st.Repos[h.origin]
+	if !ok {
+		t.Fatalf("enabled repo not in propagating registry: %v", st.Repos)
+	}
+	if !entry.Value.NoEnvSync {
+		t.Fatalf("apply did not thread NoEnvSync into the registry: %+v", entry.Value)
+	}
+}
+
 func TestApplyReposLocalOnlyStaysLocal(t *testing.T) {
 	h := newHarness(t)
 	h.seedState()

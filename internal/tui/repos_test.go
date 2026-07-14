@@ -128,6 +128,31 @@ func TestReposApplyNothingToApply(t *testing.T) {
 	}
 }
 
+// TestRenderRepoDetailShowsEnvSetting proves the detail pane surfaces the env-sync
+// opt-out as a settled on/off setting for the selected repo.
+func TestRenderRepoDetailShowsEnvSetting(t *testing.T) {
+	cases := []struct {
+		name      string
+		noEnvSync bool
+		want      string
+	}{
+		{"env sync on", false, "on"},
+		{"env sync off", true, "off"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			it := repoItem{cand: discover.Candidate{Relpath: "alpha", Kind: "git", NoEnvSync: tc.noEnvSync}}
+			detail := renderRepoDetail(it)
+			if !strings.Contains(detail, "env") {
+				t.Fatalf("detail missing env line:\n%s", detail)
+			}
+			if !strings.Contains(detail, tc.want) {
+				t.Fatalf("detail env value = missing %q:\n%s", tc.want, detail)
+			}
+		})
+	}
+}
+
 // sizedReposModel builds a loaded repos screen sized to a wxh terminal (the inner
 // size the router hands the screen) and stages the given rows. It drives the real
 // WindowSizeMsg path so the master-detail split is sized exactly as in production.

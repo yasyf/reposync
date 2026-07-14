@@ -233,6 +233,39 @@ func TestReposLocalOnlyTrackedByRelpath(t *testing.T) {
 	}
 }
 
+// TestReposSurfacesNoEnvSyncFromState proves classify carries a tracked repo's env
+// opt-out onto its Candidate for both registries, while untracked repos default to on.
+func TestReposSurfacesNoEnvSyncFromState(t *testing.T) {
+	h := newReposHarness(t)
+	const origin = "https://example.com/optout.git"
+	h.gitRepo("optout", origin)
+	h.gitRepo("localopt", "")
+	h.gitRepo("synced", "")
+
+	st := h.state(
+		state.Repo{Relpath: "optout", Origin: origin, Trunk: "main", NoEnvSync: true},
+		state.Repo{Relpath: "localopt", Trunk: "main", LocalOnly: true, NoEnvSync: true},
+	)
+
+	result, err := Repos(context.Background(), st)
+	if err != nil {
+		t.Fatalf("Repos: %v", err)
+	}
+
+	optout := candidateFor(t, result.Candidates, "optout")
+	if !optout.Tracked || !optout.NoEnvSync {
+		t.Fatalf("optout candidate = %+v, want tracked with NoEnvSync", optout)
+	}
+	localopt := candidateFor(t, result.Candidates, "localopt")
+	if !localopt.Tracked || !localopt.NoEnvSync {
+		t.Fatalf("localopt candidate = %+v, want tracked with NoEnvSync", localopt)
+	}
+	synced := candidateFor(t, result.Candidates, "synced")
+	if synced.NoEnvSync {
+		t.Fatal("untracked synced NoEnvSync = true, want false (env sync on)")
+	}
+}
+
 func TestReposMissingDefaultLocation(t *testing.T) {
 	requireGit(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())

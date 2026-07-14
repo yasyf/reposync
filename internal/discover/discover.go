@@ -27,6 +27,7 @@ type Candidate struct {
 	Origin    string // origin remote URL, or "" when local-only
 	LocalOnly bool   // true when the repo has no origin remote
 	Tracked   bool   // already present in state.Repos
+	NoEnvSync bool   // tracked repo opted out of env-file sync
 }
 
 // RepoResult is the outcome of scanning the default location for repositories.

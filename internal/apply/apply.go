@@ -28,7 +28,7 @@ type RepoSelection struct {
 func Repos(ctx context.Context, sel RepoSelection) ([]reconcile.Result, error) {
 	st, err := state.Update(ctx, func(s *state.State) error {
 		for _, c := range sel.Enable {
-			s.AddRepo(state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})
+			s.AddRepo(state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync})
 		}
 		for _, rp := range sel.Disable {
 			s.RemoveRepo(rp)
@@ -41,7 +41,7 @@ func Repos(ctx context.Context, sel RepoSelection) ([]reconcile.Result, error) {
 
 	enabled := make([]state.Repo, 0, len(sel.Enable))
 	for _, c := range sel.Enable {
-		enabled = append(enabled, state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly})
+		enabled = append(enabled, state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync})
 	}
 	results, err := reconcile.Repos(ctx, st, enabled)
 	if err != nil {

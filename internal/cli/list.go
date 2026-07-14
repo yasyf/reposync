@@ -20,10 +20,10 @@ import (
 func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string) []syncservice.WatchItem {
 	items := make([]syncservice.WatchItem, 0, len(st.Repos)+len(st.LocalRepos))
 	for origin, e := range st.Repos.Present() {
-		items = append(items, watchItem(ctx, errw, origin, state.Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly}, dl))
+		items = append(items, watchItem(ctx, errw, origin, state.Repo{Relpath: e.Value.Relpath, Origin: origin, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly, NoEnvSync: e.Value.NoEnvSync}, dl))
 	}
 	for relpath, e := range st.LocalRepos.Present() {
-		items = append(items, watchItem(ctx, errw, relpath, state.Repo{Relpath: e.Value.Relpath, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly}, dl))
+		items = append(items, watchItem(ctx, errw, relpath, state.Repo{Relpath: e.Value.Relpath, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly, NoEnvSync: e.Value.NoEnvSync}, dl))
 	}
 	return items
 }

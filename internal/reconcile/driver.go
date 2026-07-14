@@ -55,7 +55,7 @@ func (d *repoDriver) Reconcile(ctx context.Context, id string, entry cregistry.E
 
 // repoFor rebuilds the flat Repo view from a registry id (the origin) and its entry.
 func repoFor(origin string, entry cregistry.Entry[state.RepoMeta]) state.Repo {
-	return state.Repo{Relpath: entry.Value.Relpath, Origin: origin, Trunk: entry.Value.Trunk, LocalOnly: entry.Value.LocalOnly}
+	return state.Repo{Relpath: entry.Value.Relpath, Origin: origin, Trunk: entry.Value.Trunk, LocalOnly: entry.Value.LocalOnly, NoEnvSync: entry.Value.NoEnvSync}
 }
 
 // sshFetcher reads a peer's propagating repo registry over the typed sync contract:
