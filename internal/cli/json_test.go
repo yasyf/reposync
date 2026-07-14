@@ -219,7 +219,7 @@ func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
 
 // TestConsumerListCoversBothRegistries proves svc.list emits one watch item per repo
 // from BOTH registries — propagating repos keyed by origin and local-only repos keyed
-// by relpath — and reports an empty (not dropped) fingerprint for an uncloned repo.
+// by relpath — and reports empty (not dropped) fingerprint components for an uncloned repo.
 func TestConsumerListCoversBothRegistries(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
@@ -250,9 +250,9 @@ func TestConsumerListCoversBothRegistries(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("list emitted %d items, want 2 (both registries): %+v", len(items), items)
 	}
-	// An uncloned repo keeps its watch dirs but reports an empty fingerprint.
-	if prop.Fingerprint != "" {
-		t.Fatalf("uncloned repo fingerprint = %q, want empty", prop.Fingerprint)
+	// An uncloned repo keeps its watch dirs and the separator between empty components.
+	if prop.Fingerprint != "\n" {
+		t.Fatalf("uncloned repo fingerprint = %q, want newline", prop.Fingerprint)
 	}
 	if len(prop.WatchDirs) == 0 {
 		t.Fatalf("propagating repo has no watch dirs: %+v", prop)
