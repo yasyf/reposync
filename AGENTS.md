@@ -72,17 +72,6 @@ When you write a plan — in plan mode, or any "here's what I'll do" before you 
 - **Workflow Plan** — required in every plan; a plan without it is incomplete. One line on what the main agent alone does (track state, dispatch, decide, report), then a `Phase | Shape | Agents | Verification` table covering every fan-out the plan anticipates: Shape is `pipeline` / `parallel` / `loop`; Agents names each phase's model and effort per the Models table (e.g. `opus xhigh ×4`, `sonnet low → codex`); Verification names the check that gates each phase's output. When nothing fans out, one line saying everything stays at the main-agent level replaces the table.
 - **Verification** — how to prove it works end to end: the exact commands to run, tests to add, and behavior to observe.
 
-## Code Search
-
-`semble` is wired up via `.mcp.json` (project-scoped MCP server, runs via `uvx` — nothing to install). It's the default tool for any "find code by intent or symbol" question:
-
-1. **"How do we do X?" / "Where is the code that does Y?"** → `semble.search("...")`
-2. **"Where is `Foo` defined?"** → `semble.search("Foo")` (or `search("class Foo")` for a relevance boost)
-3. **"Show me other code like this"** → `semble.find_related` on a prior hit
-4. **Cross-repo lookup** → pass an `https://...git` URL as `repo`
-
-`repo` defaults to the current project root for local searches. Semble is purely semantic — it ranks by meaning, not substring, so it won't find literal strings that don't appear in nearby code.
-
 Reach for your **LSP** when the answer must be *exhaustive* or *structural*:
 
 1. **"Who calls X?" / "find every reference"** → `findReferences` / `incomingCalls`
@@ -106,7 +95,7 @@ Reach for **`Grep`** only for material neither tool indexes: literal *content* o
 
 **No defensive coding.** No fallbacks, shims, or backwards-compat layers; no guards against impossible states. If unused, delete it. Crash on the unexpected.
 
-**Search before writing.** Before creating a helper, query the codebase via `semble.search` (intent or symbol queries both work). Sibling modules and base classes win over re-implementation.
+**Search before writing.** Before creating a helper, query the codebase via `ccx code search` (intent or symbol queries both work). Sibling modules and base classes win over re-implementation.
 
 **Code stewardship.** When you touch a file, fix nearby bugs, style violations, and broken tests; don't wave them off as pre-existing or out of scope.
 
@@ -133,3 +122,34 @@ Reach for **`Grep`** only for material neither tool indexes: literal *content* o
 **Version control.** This repo is a colocated `jj` repo over git — prefer `jj` (`jj describe` / `jj commit`, `jj git push`) over raw `git` for day-to-day work. Commits stay atomic and scoped: one logical change each.
 
 **Watch CI after every push.** A push that kicks off CI isn't done until the run is green. After `jj git push` (or `git push`), watch the run to completion before you stop — `gh run watch "$(gh run list -L1 --json databaseId -q '.[0].databaseId')" --exit-status` — and never walk away from a red run: fix it or report it. (`--exit-status` exits non-zero when the run fails; give the run a moment to register before watching.)
+
+## Compact Context (ccx)
+
+`cc-context` — the `ccx` CLI and the `cc-context` MCP (its tools mirror the query surface — read, search, symbol, outline, diff, edit — plus `ccx_exec`/`ccx_exec_tools` for multi-call composition and `BashFormat` for JSON re-encoding) — is the first stop for TARGETED code questions: a file section, a symbol, a search, a diff. It returns token-bounded output (signatures + line numbers, explicit overflow, never silent truncation) instead of raw dumps, and the capt-hook `ccx` guard pack rewrites the mappable token-heavy commands (raw `grep`, bare `git diff`/`git show`, page-dump `curl`, oversized `Read`s) to their ccx equivalents in place and BLOCKS the rest. That budget discipline covers ccx itself: never re-truncate ccx output with `| head`/`| tail` — it re-introduces silent truncation and eats the overflow footer; raise `--budget`, narrow with `--section`/`--scope`, or compose with `ccx exec` (entry 14).
+
+1. **Orient a repo** → `ccx repo overview`
+2. **"How does X work / where is Y" (intent)** → `ccx code search "<question>"` (semantic, semble-backed)
+3. **A specific symbol (where + signature)** → `ccx code symbol <name>` (alias `ccx code grok`; terse by default with a counts trailer — `--callers`/`--callees`/`--body`/`--full` expand)
+4. **Literal or regex text** → `ccx code grep <text> [paths...] [--regex] [--glob G] [--scope dir] [-i] [-w]` (`--regex`/`-i`/`-w` and explicit file operands run on ripgrep; `--glob` filters within explicit paths; system `grep` fills in when `rg` is missing; a glob or scope anchored at a real path — `.venv/…/pkg/*.py` — is searched even where ignore rules would hide it)
+5. **List files** → `ccx repo find "<glob>" [--scope dir] [--budget N]` (gitignore-honoring, VCS stores skipped, sorted; budget-capped with a footer counting withheld rows and ignore-hidden files; a glob anchored at a real path — `.venv/**/*.py` — lists files ignore rules would hide; orientation is entry 1, not `"**/*"`)
+6. **Read a file** → `ccx code outline <file-or-dir>` first (ast-grep structural map for the languages it outlines and any directory, a markdown heading outline or an honest head window otherwise; top-level by default — `--deep` expands members, `--section A-B` windows a file), then `ccx code read <file> --section A-B` for the part you need (whole file: `ccx code read <file> --full`)
+7. **Edit a file** → `ccx code edit <file> --at A-B#hash --content <text>` (hash-verified write: refuses on anchor mismatch, re-anchors moved content, returns the new anchor so edits chain; `--content -` reads stdin, `--delete` removes the range; `--match <text>` addresses by exact bytes instead of a span — an ambiguous match errors listing candidate anchors, `--at` scopes the scan, `--all` replaces every occurrence)
+8. **Review changes** → `ccx vcs diff [src]` (structural, jj-aware; exact hunks: `git diff -- <file>`)
+9. **Inspect one commit** → `ccx vcs show [ref]` (message + structural per-file diff; default `@-`/HEAD)
+10. **How a file evolved** → `ccx vcs history <path> [-n N]` (per-commit sha · date · subject + changed symbols)
+11. **Locate a repo/module/package on disk** → `ccx repo locate <name>` (sibling repo, Go module, or Python package by import or dist name; prints tab-separated `kind`/`path`/`version` rows — an installed Python package yields both its sibling `repo` row and its installed `package` row; exit 3 when nothing resolves)
+12. **Read installed dependency source** (`.venv`, site-packages, vendored) → spawn the `cc-context:dep-reader` agent with the package and your question — cited conclusions come back, the source never enters your context. Inline: `ccx repo locate <pkg>` for the on-disk path, then entries 4/6 with that path (`--scope <path>` or an anchored glob) — never raw `rg` into `.venv`
+13. **Commit, push, watch CI** → `ccx vcs ship -m "<msg>" [paths...]` (jj-aware commit + push + a watch over every workflow run on the pushed commit, in one call — per-run `workflow · conclusion · duration · url` report, plus failing jobs and a `--budget`-capped log excerpt when a run goes red; trailing paths scope the commit to just those files, leaving the rest of a shared working copy untouched; scoping goes below the file too — `ccx vcs hunks [paths...]` lists every pending hunk as a stable `file:A-B#hash` ref, and repeatable `--skip-hunk <ref>`/`--only-hunk <ref>` commit a file partially without ever rewriting it on disk, leaving excluded hunks (a concurrent session's, say) uncommitted in `@`, and refusing outright when a selection would cut an empty commit or a ref has drifted; and the push only auto-advances the trunk bookmark — advancing any other needs an explicit `--bookmark <name>`; an updated remote is handled in-call — ship fetches first and rebases the stack onto the target bookmark, rolling back and reporting a rebase that would conflict). A red run hands off to the `cc-context:ci-triage` agent — spawn it with the run id for root cause, a minimal excerpt, and the next step instead of the full log
+14. **Compose several calls / post-process any output** → `ccx exec '<python>'` — a sandboxed script whose async host functions are every ccx query op, a gated `sh(cmd)`, and every stateless MCP server's tools (auto-reflected, no flag needed); only the script's return value enters context. Rule of thumb: one question → one ccx call (entries 1–13, 15–18); a pipeline, filter, fan-out, or any output you'd immediately post-process (project a JSON blob, sweep signatures across files, join search hits) → exec. Discover the host functions and the Python-subset rules with `ccx exec --list-tools` (MCP: `ccx_exec_tools`), once per session.
+15. **Re-encode JSON tool output** → `ccx format -- <cmd>` (or `… | ccx format`) — a shape classifier picks the leanest encoding (prose, markdown table, CSV/TSV, TOON, TRON, JSONL, or compact JSON), never larger than compact JSON by bytes; `--format=X` forces one encoder
+16. **Map a web page** → `ccx web outline <url>` (heading tree with stable `§` section refs; pages cache 24h, `--refresh` refetches)
+17. **Read one section of a page** → `ccx web read <url> --section <ref>` (budget-capped section subtree + prev/next nav; whole page: `--full`)
+18. **Ask a question of a page** → `ccx web search <url> "<question>"` (top-k relevant chunks with `<url> §2.3#hash` cites; hybrid BM25 + local embeddings, BM25-only with a note when `uv` is absent)
+
+Entries 9–13 are CLI-only (entry 12's `locate` step included) — the MCP mirrors the query surface (1–8) plus exec (14), format (15, as `BashFormat`), and web (16–18, as `ccx_web_outline`/`ccx_web_read`/`ccx_web_search`), not these.
+
+A one-shot question about a page → spawn the `cc-context:web-fetch` agent with the URL and your prompt verbatim (the WebFetch drop-in: cited answer out, the page never enters your context); research spanning several pages → `cc-context:web-researcher`.
+
+Durable prose — plans, reviews, memory files — cites code as `path:line#hash` (e.g. `internal/render/finalize.go:31#k2fa`); any later session resolves the cite statelessly with ccx, because the hash re-anchors by content even after the file drifts.
+
+Reach for your **LSP** when the answer must be exhaustive/structural (findReferences, rename, goToImplementation) — and verify any complete-set answer ("every subclass", "every importer") by reading the candidate files: bounded views optimize for precision, not exhaustiveness — or spawn the `cc-context:enumerator` agent, which packages that gather-and-verify loop and returns the verified set with cites and named blind spots. Use **Grep/Glob** or `rg` only for literal content in non-source files (logs, JSON, YAML) — on source, raw `rg` is gated the same as raw `grep`.

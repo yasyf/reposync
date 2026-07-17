@@ -1,3 +1,7 @@
 fragments = [
   "reposync",
+  "cc-skills:ccx",
 ]
+
+[sources.cc-skills]
+source = "github:yasyf/cc-skills@main"

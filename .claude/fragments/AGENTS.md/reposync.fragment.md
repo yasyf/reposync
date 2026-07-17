@@ -71,17 +71,6 @@ When you write a plan — in plan mode, or any "here's what I'll do" before you 
 - **Workflow Plan** — required in every plan; a plan without it is incomplete. One line on what the main agent alone does (track state, dispatch, decide, report), then a `Phase | Shape | Agents | Verification` table covering every fan-out the plan anticipates: Shape is `pipeline` / `parallel` / `loop`; Agents names each phase's model and effort per the Models table (e.g. `opus xhigh ×4`, `sonnet low → codex`); Verification names the check that gates each phase's output. When nothing fans out, one line saying everything stays at the main-agent level replaces the table.
 - **Verification** — how to prove it works end to end: the exact commands to run, tests to add, and behavior to observe.
 
-## Code Search
-
-`semble` is wired up via `.mcp.json` (project-scoped MCP server, runs via `uvx` — nothing to install). It's the default tool for any "find code by intent or symbol" question:
-
-1. **"How do we do X?" / "Where is the code that does Y?"** → `semble.search("...")`
-2. **"Where is `Foo` defined?"** → `semble.search("Foo")` (or `search("class Foo")` for a relevance boost)
-3. **"Show me other code like this"** → `semble.find_related` on a prior hit
-4. **Cross-repo lookup** → pass an `https://...git` URL as `repo`
-
-`repo` defaults to the current project root for local searches. Semble is purely semantic — it ranks by meaning, not substring, so it won't find literal strings that don't appear in nearby code.
-
 Reach for your **LSP** when the answer must be *exhaustive* or *structural*:
 
 1. **"Who calls X?" / "find every reference"** → `findReferences` / `incomingCalls`
@@ -105,7 +94,7 @@ Reach for **`Grep`** only for material neither tool indexes: literal *content* o
 
 **No defensive coding.** No fallbacks, shims, or backwards-compat layers; no guards against impossible states. If unused, delete it. Crash on the unexpected.
 
-**Search before writing.** Before creating a helper, query the codebase via `semble.search` (intent or symbol queries both work). Sibling modules and base classes win over re-implementation.
+**Search before writing.** Before creating a helper, query the codebase via `ccx code search` (intent or symbol queries both work). Sibling modules and base classes win over re-implementation.
 
 **Code stewardship.** When you touch a file, fix nearby bugs, style violations, and broken tests; don't wave them off as pre-existing or out of scope.
 
