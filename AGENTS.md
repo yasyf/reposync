@@ -72,15 +72,6 @@ When you write a plan — in plan mode, or any "here's what I'll do" before you 
 - **Workflow Plan** — required in every plan; a plan without it is incomplete. One line on what the main agent alone does (track state, dispatch, decide, report), then a `Phase | Shape | Agents | Verification` table covering every fan-out the plan anticipates: Shape is `pipeline` / `parallel` / `loop`; Agents names each phase's model and effort per the Models table (e.g. `opus xhigh ×4`, `sonnet low → codex`); Verification names the check that gates each phase's output. When nothing fans out, one line saying everything stays at the main-agent level replaces the table.
 - **Verification** — how to prove it works end to end: the exact commands to run, tests to add, and behavior to observe.
 
-Reach for your **LSP** when the answer must be *exhaustive* or *structural*:
-
-1. **"Who calls X?" / "find every reference"** → `findReferences` / `incomingCalls`
-2. **"Rename X → Y"** → `findReferences` first to enumerate every call site
-3. **"What's the type of X?"** → `hover`
-4. **"What implements Protocol P?"** → `goToImplementation`
-
-Reach for **`Grep`** only for material neither tool indexes: literal *content* of strings/comments/docstrings (error messages, hard-coded URLs, env-var names, TODOs) and non-source files (logs, JSON, YAML, fixtures). File-pattern questions ("all `*.json` under `src/`") go through `Glob`.
-
 ## Style
 
 **Comments are terse and used sparingly — the code documents itself** through names, types, and organization. The one exception is documentation-generation comments: godoc on exported types, funcs, and the package, each starting with the identifier's name (`// NewRootCmd builds …`); unexported helpers get none. Beyond godoc, comment only for TODOs, non-obvious workarounds, or disabled code — never to restate the signature.
