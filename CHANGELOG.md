@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `rpc-serve` now uses Synckit's daemonkit-owned exact spawned-session transport,
+  and installation emits only the strict current service manifest schema.
+
 ## [0.15.1] - 2026-07-14
 
 ### Fixed

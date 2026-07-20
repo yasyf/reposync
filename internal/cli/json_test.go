@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -48,76 +47,57 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	return out.String(), errBuf.String(), err
 }
 
-// pipeTransport frames typed rpc over one end of a net.Pipe so a test can drive the
-// repoConsumer through the real dispatcher + ServeConn serving path, reading responses
-// with a persistent bufio.Reader so buffered bytes survive between calls.
-type pipeTransport struct {
-	conn net.Conn
-	r    *bufio.Reader
-}
+// pipeTransport adapts the exact persistent rpc client to syncservice's typed
+// response envelope for in-process dispatcher tests.
+type pipeTransport struct{ client *rpc.Client }
 
-func (t *pipeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
-	line, err := json.Marshal(req)
+func (t *pipeTransport) Do(ctx context.Context, req *rpc.Request) (*syncservice.Response, error) {
+	response, err := t.client.Call(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := t.conn.Write(append(line, '\n')); err != nil {
-		return nil, err
-	}
-	respLine, err := rpc.ReadLine(t.r, rpc.MaxLine)
-	if err != nil {
-		return nil, err
-	}
-	var resp syncservice.Response
-	if err := json.Unmarshal(respLine, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return &syncservice.Response{
+		OK: response.OK, Result: response.Result, Error: response.Error,
+	}, nil
 }
 
-func (t *pipeTransport) Close() error { return t.conn.Close() }
+func (t *pipeTransport) Close() error { return t.client.Close() }
 
-// serveConsumer wires a repoConsumer behind a ServeConn loop over a net.Pipe and
-// returns a typed client speaking to it, the same machinery `reposync rpc-serve`
-// exposes to synckitd.
+// serveConsumer wires a repoConsumer behind the exact spawned-session engine
+// and returns a typed client speaking to it.
 func serveConsumer(t *testing.T) *syncservice.Client {
 	t.Helper()
 	d := rpc.NewDispatcher()
 	syncservice.RegisterConsumer(d, repoConsumer{})
-
-	server, clientConn := net.Pipe()
-	srvCtx, srvCancel := context.WithCancel(context.Background())
-	srvDone := make(chan error, 1)
-	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
-	t.Cleanup(func() {
-		srvCancel()
-		_ = server.Close()
-		<-srvDone
-	})
-
-	c := syncservice.NewClient(&pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)})
+	c := syncservice.NewClient(servePipeDispatcher(t, d))
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
 
 // servePipe wires the full rpc-serve dispatcher (typed contract plus env.get_state)
-// behind a ServeConn loop over a net.Pipe and returns the raw transport, so a test can
-// issue a raw request for a method the typed client does not know.
+// behind the exact spawned-session engine and returns the raw transport.
 func servePipe(t *testing.T) *pipeTransport {
 	t.Helper()
-	d := newServeDispatcher()
+	return servePipeDispatcher(t, newServeDispatcher())
+}
 
+func servePipeDispatcher(t *testing.T, dispatcher *rpc.Dispatcher) *pipeTransport {
+	t.Helper()
 	server, clientConn := net.Pipe()
 	srvCtx, srvCancel := context.WithCancel(context.Background())
 	srvDone := make(chan error, 1)
-	go func() { srvDone <- rpc.ServeConn(srvCtx, server, d) }()
+	go func() {
+		srvDone <- rpc.NewServer(dispatcher).ServeSession(srvCtx, server, server)
+	}()
 	t.Cleanup(func() {
 		srvCancel()
 		_ = server.Close()
 		<-srvDone
 	})
-
-	tx := &pipeTransport{conn: clientConn, r: bufio.NewReader(clientConn)}
+	tx := &pipeTransport{client: rpc.NewClient(rpc.ClientConfig{
+		Build: rpc.Build,
+		Dial:  func(context.Context) (net.Conn, error) { return clientConn, nil },
+	})}
 	t.Cleanup(func() { _ = tx.Close() })
 	return tx
 }

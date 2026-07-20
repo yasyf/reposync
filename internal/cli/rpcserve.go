@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 
@@ -32,11 +31,7 @@ func newRPCServeCmd() *cobra.Command {
 			// stray log line never corrupts a response frame.
 			log.SetOutput(os.Stderr)
 
-			rw := struct {
-				io.Reader
-				io.Writer
-			}{os.Stdin, os.Stdout}
-			return rpc.ServeConn(cmd.Context(), rw, newServeDispatcher())
+			return rpc.NewServer(newServeDispatcher()).ServeSession(cmd.Context(), os.Stdin, os.Stdout)
 		},
 	}
 	return cmd

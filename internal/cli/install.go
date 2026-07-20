@@ -28,8 +28,8 @@ const manifestsDirName = "manifests"
 const watchDebounce = 15 * time.Second
 
 // reposyncManifest is the declarative registration synckitd reads to drive reposync:
-// the watch backend it subscribes through and the stdio service it starts to reach
-// reposync's typed sync contract. synckitd spawns `reposync rpc-serve` over stdio and
+// the watch debounce and stdio service it uses to reach reposync's typed sync
+// contract. synckitd spawns `reposync rpc-serve` over stdio and
 // drives list/reconcile/sync/get-state over that typed RPC, so no argv template or
 // shell interpolation is involved. reposync has no resident helper or launchd agent.
 func reposyncManifest() manifest.Manifest {
@@ -38,7 +38,6 @@ func reposyncManifest() manifest.Manifest {
 		Binary: state.ToolName,
 		Brew:   "yasyf/tap/reposync",
 		Watch: manifest.WatchSpec{
-			Backend:  "fsnotify",
 			Debounce: codec.Duration(watchDebounce),
 		},
 		Service: manifest.ServiceSpec{
