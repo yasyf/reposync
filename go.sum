@@ -83,8 +83,8 @@ github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae h1:4hwBBUfQCFe3C
 github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae/go.mod h1:DD4vA1DwXk04H54A1oHXtwZmA0grkVMdPxx/VGLCah0=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
-github.com/yasyf/daemonkit v0.3.0 h1:hnWkheB5ly6qQE8hBX1oQqe/vL53vMk3S53AobV8qfc=
-github.com/yasyf/daemonkit v0.3.0/go.mod h1:nJvh9FlJ3XPTuDkUb3PMcW0ZupIXsJJCkTGzfE40r/I=
+github.com/yasyf/daemonkit v0.3.2 h1:+u9jwUFRVe+Kk8xE8N9/DMNQFh+yNXGB++62oTYygsc=
+github.com/yasyf/daemonkit v0.3.2/go.mod h1:nJvh9FlJ3XPTuDkUb3PMcW0ZupIXsJJCkTGzfE40r/I=
 github.com/yasyf/synckit v0.24.0 h1:MqZCNYYPXFz+fP6/6JkF/4t+8yrrLnRt+85G4N09U4E=
 github.com/yasyf/synckit v0.24.0/go.mod h1:1jS5F43q9TO5oE8Jax8pAZxGEToyhfo75sCMZQ4tT70=
 go.etcd.io/bbolt v1.5.0 h1:S7GAl7Fxv12yohbwFfIbQCGDWbQbtDGPET4P/bD4lxU=
