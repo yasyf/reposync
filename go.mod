@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646
+	github.com/yasyf/synckit v0.24.0
 	golang.org/x/term v0.45.0
 )
 
@@ -39,7 +39,7 @@ require (
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/yasyf/daemonkit v0.1.1-0.20260721044346-f090a23cf11f // indirect
+	github.com/yasyf/daemonkit v0.2.0 // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
