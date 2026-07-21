@@ -65,9 +65,8 @@ func TestSSHEnvFetcherRequiresExactV1Capabilities(t *testing.T) {
 		caps syncservice.Capabilities
 		want string
 	}{
-		{"foreign consumer", syncservice.Capabilities{Name: "other", ProtocolVersion: 1, Methods: []string{env.MethodGetState}}, `consumer "other"`},
-		{"foreign protocol", syncservice.Capabilities{Name: state.ToolName, ProtocolVersion: 2, Methods: []string{env.MethodGetState}}, "protocol 2"},
-		{"missing method", syncservice.Capabilities{Name: state.ToolName, ProtocolVersion: 1}, "is not advertised"},
+		{"foreign consumer", syncservice.Capabilities{Name: "other", Methods: []string{env.MethodGetState}}, `consumer "other"`},
+		{"missing method", syncservice.Capabilities{Name: state.ToolName}, "is not advertised"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &envHandshakeTransport{caps: tc.caps}
@@ -87,7 +86,7 @@ func TestSSHEnvFetcherRequestsStateAfterExactHandshake(t *testing.T) {
 	want := env.RepoState{".env": oneKey("TOKEN", "secret", peerStamp())}
 	tx := &envHandshakeTransport{
 		caps: syncservice.Capabilities{
-			Name: state.ToolName, ProtocolVersion: syncservice.ProtocolVersion,
+			Name:    state.ToolName,
 			Methods: []string{env.MethodGetState},
 		},
 		repos: map[string]env.RepoState{"origin": want},

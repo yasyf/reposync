@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/synckit v0.23.1-0.20260721021401-fd0421d78a30
+	github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646
 	golang.org/x/term v0.45.0
 )
 

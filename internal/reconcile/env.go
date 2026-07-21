@@ -69,9 +69,6 @@ func (f sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []stri
 	if caps.Name != state.ToolName {
 		return nil, fmt.Errorf("env capabilities from %s: consumer %q, want %q", peer, caps.Name, state.ToolName)
 	}
-	if caps.ProtocolVersion != syncservice.ProtocolVersion {
-		return nil, fmt.Errorf("env capabilities from %s: protocol %d, want %d", peer, caps.ProtocolVersion, syncservice.ProtocolVersion)
-	}
 	if !slices.Contains(caps.Methods, env.MethodGetState) {
 		return nil, fmt.Errorf("env capabilities from %s: method %q is not advertised", peer, env.MethodGetState)
 	}

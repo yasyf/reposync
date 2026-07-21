@@ -240,8 +240,8 @@ func TestConsumerListCoversBothRegistries(t *testing.T) {
 	}
 }
 
-// TestConsumerCapabilities proves svc.capabilities reports reposync's identity and the
-// current protocol version, the handshake synckitd checks before driving the contract.
+// TestConsumerCapabilities proves svc.capabilities reports reposync's identity and
+// exact method surface after the wire-level build handshake.
 func TestConsumerCapabilities(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
@@ -251,9 +251,6 @@ func TestConsumerCapabilities(t *testing.T) {
 	}
 	if caps.Name != state.ToolName {
 		t.Fatalf("capabilities name = %q, want %q", caps.Name, state.ToolName)
-	}
-	if caps.ProtocolVersion != syncservice.ProtocolVersion {
-		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, syncservice.ProtocolVersion)
 	}
 	wantMethods := append(append([]string(nil), syncservice.AllMethods...), env.MethodGetState)
 	if strings.Join(caps.Methods, ",") != strings.Join(wantMethods, ",") {

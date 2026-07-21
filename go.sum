@@ -87,6 +87,8 @@ github.com/yasyf/daemonkit v0.1.1-0.20260721013056-c39154cdbd0a h1:7VR17Wh0qR5/y
 github.com/yasyf/daemonkit v0.1.1-0.20260721013056-c39154cdbd0a/go.mod h1:nJvh9FlJ3XPTuDkUb3PMcW0ZupIXsJJCkTGzfE40r/I=
 github.com/yasyf/synckit v0.23.1-0.20260721021401-fd0421d78a30 h1:5s38mNvssaGt+fyFsSko+HoYnxYqH2OAkDVSioOUbpw=
 github.com/yasyf/synckit v0.23.1-0.20260721021401-fd0421d78a30/go.mod h1:OyPgkXBwl2P2Puy4sWRRizEVzfdjsVCn6aRxeQQ54as=
+github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646 h1:LSCKGCtGCWJLIRLiEV2bE8PaKI9vl/GV4/NbmY+DXlc=
+github.com/yasyf/synckit v0.23.1-0.20260721024529-9b633bf21646/go.mod h1:OyPgkXBwl2P2Puy4sWRRizEVzfdjsVCn6aRxeQQ54as=
 go.etcd.io/bbolt v1.5.0 h1:S7GAl7Fxv12yohbwFfIbQCGDWbQbtDGPET4P/bD4lxU=
 go.etcd.io/bbolt v1.5.0/go.mod h1:mkltfYE5aUHQxUct9N9V+Kp7aSjFqjgrhcXIS70Lrdk=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
