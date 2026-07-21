@@ -39,7 +39,7 @@ require (
 	github.com/vishvananda/netlink v1.2.1-beta.2 // indirect
 	github.com/vishvananda/netns v0.0.0-20200728191858-db3c7e526aae // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/yasyf/daemonkit v0.1.1-0.20260721013056-c39154cdbd0a // indirect
+	github.com/yasyf/daemonkit v0.1.1-0.20260721044346-f090a23cf11f // indirect
 	go.etcd.io/bbolt v1.5.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
