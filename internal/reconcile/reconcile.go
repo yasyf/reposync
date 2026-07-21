@@ -59,7 +59,7 @@ func Reconcile(ctx context.Context, st *state.State, origin string) ([]Result, e
 		return nil, err
 	}
 	if len(mesh.Hosts) == 0 {
-		log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to migrate this host)")
+		log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to register this host)")
 	}
 	converged, err := convergeRepos(ctx, st, mesh.Hosts, origin)
 	if err != nil {

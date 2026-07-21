@@ -2,11 +2,13 @@ package reconcile
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/rpc"
+	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/env"
 	"github.com/yasyf/reposync/internal/state"
@@ -22,21 +26,90 @@ import (
 
 // fakeEnvFetcher serves a fixed per-peer, per-origin env state and records every peer it
 // was asked for, so a test drives the pull-merge without real ssh. fail models an
-// offline peer; unknown models an old-version peer that does not serve env.get_state.
+// offline peer.
 type fakeEnvFetcher struct {
-	states  map[string]map[string]env.RepoState
-	fail    map[string]bool
-	unknown map[string]bool
-	called  []string
+	states map[string]map[string]env.RepoState
+	fail   map[string]bool
+	called []string
+}
+
+type envHandshakeTransport struct {
+	caps     syncservice.Capabilities
+	repos    map[string]env.RepoState
+	requests []string
+}
+
+func (t *envHandshakeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
+	t.requests = append(t.requests, req.Method)
+	var result any
+	switch req.Method {
+	case syncservice.MethodCapabilities:
+		result = t.caps
+	case env.MethodGetState:
+		result = map[string]any{"repos": t.repos}
+	default:
+		return &syncservice.Response{OK: false, Error: "unknown method"}, nil
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	return &syncservice.Response{OK: true, Result: raw}, nil
+}
+
+func (*envHandshakeTransport) Close() error { return nil }
+
+func TestSSHEnvFetcherRequiresExactV1Capabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps syncservice.Capabilities
+		want string
+	}{
+		{"foreign consumer", syncservice.Capabilities{Name: "other", ProtocolVersion: 1, Methods: []string{env.MethodGetState}}, `consumer "other"`},
+		{"foreign protocol", syncservice.Capabilities{Name: state.ToolName, ProtocolVersion: 2, Methods: []string{env.MethodGetState}}, "protocol 2"},
+		{"missing method", syncservice.Capabilities{Name: state.ToolName, ProtocolVersion: 1}, "is not advertised"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &envHandshakeTransport{caps: tc.caps}
+			fetcher := sshEnvFetcher{transport: func(string) syncservice.Transport { return tx }}
+			_, err := fetcher.FetchEnv(t.Context(), "peer", []string{"origin"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("FetchEnv error = %v, want %q", err, tc.want)
+			}
+			if len(tx.requests) != 1 || tx.requests[0] != syncservice.MethodCapabilities {
+				t.Fatalf("requests = %v, want capabilities only", tx.requests)
+			}
+		})
+	}
+}
+
+func TestSSHEnvFetcherRequestsStateAfterExactHandshake(t *testing.T) {
+	want := env.RepoState{".env": oneKey("TOKEN", "secret", peerStamp())}
+	tx := &envHandshakeTransport{
+		caps: syncservice.Capabilities{
+			Name: state.ToolName, ProtocolVersion: syncservice.ProtocolVersion,
+			Methods: []string{env.MethodGetState},
+		},
+		repos: map[string]env.RepoState{"origin": want},
+	}
+	fetcher := sshEnvFetcher{transport: func(string) syncservice.Transport { return tx }}
+	got, err := fetcher.FetchEnv(t.Context(), "peer", []string{"origin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maps.EqualFunc(got["origin"], want, func(a, b cregistry.Registry[string]) bool { return maps.Equal(a, b) }) {
+		t.Fatalf("state = %#v, want %#v", got, want)
+	}
+	wantRequests := []string{syncservice.MethodCapabilities, env.MethodGetState}
+	if !slices.Equal(tx.requests, wantRequests) {
+		t.Fatalf("requests = %v, want %v", tx.requests, wantRequests)
+	}
 }
 
 func (f *fakeEnvFetcher) FetchEnv(_ context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
 	f.called = append(f.called, peer)
 	if f.fail[peer] {
 		return nil, errors.New("offline")
-	}
-	if f.unknown[peer] {
-		return nil, errUnknownMethod
 	}
 	out := map[string]env.RepoState{}
 	for _, o := range origins {
@@ -262,26 +335,6 @@ func TestConvergeEnvOfflinePeerSelfHeals(t *testing.T) {
 	}
 	if got := h.readFile(dest, ".env"); !strings.Contains(got, "API_KEY=secret") {
 		t.Fatalf(".env = %q, want the reachable peer's key applied", got)
-	}
-}
-
-// TestConvergeEnvOldVersionPeerSkips proves an old-version peer (unknown-method error)
-// skips cleanly: no Result error, the repo still converges its local state.
-func TestConvergeEnvOldVersionPeerSkips(t *testing.T) {
-	h := newHarness(t)
-	dest := h.cloneRepo("alpha")
-	writeEnvFile(t, dest, ".env", "LOCAL=1\n", backdated())
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-
-	f := &fakeEnvFetcher{unknown: map[string]bool{"old": true}}
-	results := convergeEnvWith(context.Background(), st, staticState(st), f, converge.NewPeerStatus(), []string{"old"}, "")
-
-	res := resultFor(t, results, "alpha")
-	if res.Err != nil {
-		t.Fatalf("old-version peer errored the repo: %v", res.Err)
-	}
-	if got := h.readFile(dest, ".env"); got != "LOCAL=1\n" {
-		t.Fatalf(".env = %q, want untouched local state", got)
 	}
 }
 

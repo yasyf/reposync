@@ -2,20 +2,17 @@ package reconcile
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
-	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/env"
@@ -36,17 +33,15 @@ const (
 // envFetchTimeout bounds one peer's env get_state exchange.
 const envFetchTimeout = 60 * time.Second
 
-// errUnknownMethod marks a peer whose rpc-serve predates env sync; it answers
-// env.get_state with an unknown-method error and degrades to a skipped peer.
-var errUnknownMethod = errors.New("peer does not serve env.get_state")
-
-// envPeerStatus is the process-lived tracker the env converge logs unreachable and
-// old-version peers against, so an outage warns once rather than every pass.
+// envPeerStatus is the process-lived tracker the env converge logs unreachable
+// peers against, so an outage warns once rather than every pass.
 var envPeerStatus = converge.NewPeerStatus()
 
 // envFetch is the peer env fetcher the reconcile env pass drives; a var so a test can
 // inject a fake without a real ssh hop.
-var envFetch envFetcher = sshEnvFetcher{}
+var envFetch envFetcher = sshEnvFetcher{transport: func(peer string) syncservice.Transport {
+	return syncservice.SSHStdio(peer, "reposync rpc-serve")
+}}
 
 // envFetcher reads a peer's stamped env state for the requested origins, read-only.
 type envFetcher interface {
@@ -56,31 +51,35 @@ type envFetcher interface {
 // sshEnvFetcher fetches a peer's env state over the same ssh-stdio rpc-serve bridge the
 // repo registry uses, issuing a raw env.get_state request the typed client does not
 // know. It is the pull side of pull-merge and never writes to the peer.
-type sshEnvFetcher struct{}
+type sshEnvFetcher struct {
+	transport func(peer string) syncservice.Transport
+}
 
-// FetchEnv issues env.get_state to peer for origins and returns the served RepoState per
-// origin. A peer that does not know the method returns errUnknownMethod.
-func (sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
+// FetchEnv requires the exact reposync v1 capability contract before requesting
+// env.get_state and returns the served RepoState per origin.
+func (f sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
 	ctx, cancel := context.WithTimeout(ctx, envFetchTimeout)
 	defer cancel()
-	tx := syncservice.SSHStdio(peer, "reposync rpc-serve")
-	defer func() { _ = tx.Close() }()
-
-	resp, err := tx.Do(ctx, &rpc.Request{Method: env.MethodGetState, Params: map[string]any{"origins": origins}})
+	client := syncservice.NewClient(f.transport(peer))
+	defer func() { _ = client.Close() }()
+	caps, err := client.Capabilities(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("env get_state from %s: %w", peer, err)
+		return nil, fmt.Errorf("env capabilities from %s: %w", peer, err)
 	}
-	if !resp.OK {
-		if strings.Contains(resp.Error, "unknown method") {
-			return nil, fmt.Errorf("%s: %w", peer, errUnknownMethod)
-		}
-		return nil, fmt.Errorf("env get_state from %s: %s", peer, resp.Error)
+	if caps.Name != state.ToolName {
+		return nil, fmt.Errorf("env capabilities from %s: consumer %q, want %q", peer, caps.Name, state.ToolName)
+	}
+	if caps.ProtocolVersion != syncservice.ProtocolVersion {
+		return nil, fmt.Errorf("env capabilities from %s: protocol %d, want %d", peer, caps.ProtocolVersion, syncservice.ProtocolVersion)
+	}
+	if !slices.Contains(caps.Methods, env.MethodGetState) {
+		return nil, fmt.Errorf("env capabilities from %s: method %q is not advertised", peer, env.MethodGetState)
 	}
 	var payload struct {
 		Repos map[string]env.RepoState `json:"repos"`
 	}
-	if err := json.Unmarshal(resp.Result, &payload); err != nil {
-		return nil, fmt.Errorf("decode env get_state from %s: %w", peer, err)
+	if err := client.Call(ctx, env.MethodGetState, map[string]any{"origins": origins}, &payload); err != nil {
+		return nil, fmt.Errorf("env get_state from %s: %w", peer, err)
 	}
 	return payload.Repos, nil
 }
@@ -160,7 +159,7 @@ func eligibleEnvRepos(st *state.State, dl string) []state.Repo {
 // fetchEnvPeers fetches and validates every peer's env state for origins, returning the
 // per-origin list of peer RepoStates to merge. Each peer's origins are fetched in
 // batches of at most env.MaxOrigins and the batch responses merged; a peer that is
-// unreachable, old-version, or serves an invalid payload in ANY batch is logged and
+// unreachable or serves an invalid payload in ANY batch is logged and
 // skipped whole, contributing nothing this pass. The notifying origin peer is NOT
 // skipped.
 func fetchEnvPeers(ctx context.Context, f envFetcher, status *converge.PeerStatus, peers, origins []string) map[string][]env.RepoState {

@@ -148,7 +148,9 @@ type repoConsumer struct{}
 // Capabilities reports reposync's name, the protocol version it speaks, and its
 // methods.
 func (repoConsumer) Capabilities(_ context.Context) (syncservice.Capabilities, error) {
-	return syncservice.DefaultCapabilities(state.ToolName), nil
+	caps := syncservice.DefaultCapabilities(state.ToolName)
+	caps.Methods = append(caps.Methods, env.MethodGetState)
+	return caps, nil
 }
 
 // List enumerates every tracked repo as a watch item: propagating repos keyed by

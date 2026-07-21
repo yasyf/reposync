@@ -14,6 +14,7 @@ import (
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 
+	"github.com/yasyf/reposync/internal/env"
 	"github.com/yasyf/reposync/internal/state"
 )
 
@@ -254,8 +255,9 @@ func TestConsumerCapabilities(t *testing.T) {
 	if caps.ProtocolVersion != syncservice.ProtocolVersion {
 		t.Fatalf("protocol version = %d, want %d", caps.ProtocolVersion, syncservice.ProtocolVersion)
 	}
-	if strings.Join(caps.Methods, ",") != strings.Join(syncservice.AllMethods, ",") {
-		t.Fatalf("methods = %v, want %v", caps.Methods, syncservice.AllMethods)
+	wantMethods := append(append([]string(nil), syncservice.AllMethods...), env.MethodGetState)
+	if strings.Join(caps.Methods, ",") != strings.Join(wantMethods, ",") {
+		t.Fatalf("methods = %v, want %v", caps.Methods, wantMethods)
 	}
 }
 
