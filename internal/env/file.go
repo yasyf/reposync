@@ -2,6 +2,7 @@ package env
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -326,11 +327,27 @@ func atomicWrite(path string, data []byte, mode os.FileMode, prefix string) (err
 		_ = tmp.Close()
 		return fmt.Errorf("chmod temp for %s: %w", path, err)
 	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp for %s: %w", path, err)
+	}
 	if err = tmp.Close(); err != nil {
 		return fmt.Errorf("close temp for %s: %w", path, err)
 	}
 	if err = os.Rename(name, path); err != nil {
 		return fmt.Errorf("rename temp over %s: %w", path, err)
 	}
+	if err = syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync directory for %s: %w", path, err)
+	}
 	return nil
+}
+
+func syncDirectory(path string) (err error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, dir.Close()) }()
+	return dir.Sync()
 }
