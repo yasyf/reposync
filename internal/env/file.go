@@ -344,6 +344,7 @@ func atomicWrite(path string, data []byte, mode os.FileMode, prefix string) (err
 }
 
 func syncDirectory(path string) (err error) {
+	// #nosec G304 -- path is the directory containing the caller-selected state file.
 	dir, err := os.Open(path)
 	if err != nil {
 		return err

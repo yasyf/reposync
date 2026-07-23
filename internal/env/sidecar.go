@@ -157,7 +157,7 @@ func decodeSidecar(data []byte) (Sidecar, error) {
 	}
 	files := make(RepoState, len(persisted.Files))
 	for name, entries := range persisted.Files {
-		if entries == nil || len(entries) == 0 {
+		if len(entries) == 0 {
 			return Sidecar{}, fmt.Errorf("sidecar file %q is empty or null", name)
 		}
 		reg := make(FileMap, len(entries))
@@ -226,6 +226,7 @@ func (sc Sidecar) Save(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("sidecar dir %s is not a directory", dir)
 	}
+	// #nosec G302 -- directories require execute permission; 0700 is owner-only.
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("secure sidecar dir %s: %w", dir, err)
 	}

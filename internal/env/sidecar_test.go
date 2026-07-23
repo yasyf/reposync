@@ -49,9 +49,11 @@ func TestSidecarPerms(t *testing.T) {
 	pinNow(t, tNew)
 	origin := "o"
 	path := SidecarPath(t.TempDir(), origin)
+	// #nosec G301 -- deliberately create a permissive fixture to verify tightening.
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G302 -- deliberately weaken the fixture to verify tightening.
 	if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -216,6 +218,7 @@ func TestLoadSidecarRejectsInsecureFile(t *testing.T) {
 	}).Save(path); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G302 -- deliberately weaken the fixture to verify fail-closed loading.
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
