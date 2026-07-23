@@ -24,11 +24,10 @@ archives:
   - formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
-# Developer-ID sign + notarize the darwin binaries (quill, runs on the linux runner) when the
-# MACOS_* secrets are set; no-op otherwise. See yasyf/cc-skills repo-bootstrap go-ci-and-release.md.
+# Developer-ID sign and notarize every Darwin binary before publication.
 notarize:
   macos:
-    - enabled: '{{ if envOrDefault "MACOS_SIGN_P12" "" }}true{{ else }}false{{ end }}'
+    - enabled: true
       ids:
         - reposync
       sign:
@@ -62,12 +61,6 @@ homebrew_casks:
     # The sync path shells out to jj for jj-colocated repos.
     dependencies:
       - formula: jj
-    # Strip the quarantine attribute so the unsigned binary runs on first launch.
-    hooks:
-      post:
-        install: |
-          if OS.mac? && Hardware::CPU.arm?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/reposync"]
           end
 
 release:

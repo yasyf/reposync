@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-23
+
+### Security
+- Darwin binaries are now required to carry the expected Developer ID signature
+  and notarization before release publication. Release configuration no longer
+  disables signing when credentials are missing or strips quarantine after install.
+
+## [0.21.0] - 2026-07-23
+
 ### Changed
 - Pin Synckit v0.29.0 and its daemonkit v0.9.0 runtime as the exact fleet hard-cut dependencies.
 - Environment sidecars now use one exact v1 identity, schema fingerprint, and
@@ -174,7 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/yasyf/reposync/compare/v0.21.0...v0.21.1
+[0.21.0]: https://github.com/yasyf/reposync/compare/v0.15.1...v0.21.0
+[0.15.1]: https://github.com/yasyf/reposync/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/yasyf/reposync/releases/tag/v0.15.0
 [0.14.0]: https://github.com/yasyf/reposync/releases/tag/v0.14.0
 [0.13.0]: https://github.com/yasyf/reposync/releases/tag/v0.13.0
