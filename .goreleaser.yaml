@@ -61,7 +61,6 @@ homebrew_casks:
     # The sync path shells out to jj for jj-colocated repos.
     dependencies:
       - formula: jj
-          end
 
 release:
   prerelease: auto
