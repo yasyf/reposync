@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Pin Synckit v0.29.0 and its daemonkit v0.9.0 runtime as the exact fleet hard-cut dependencies.
+- Environment sidecars now use one exact v1 identity, schema fingerprint, and
+  closed field set; legacy or extended sidecars fail closed with no in-code importer.
 - `rpc-serve` now uses Synckit's daemonkit-owned exact spawned-session transport,
   and installation emits only the strict current service manifest schema.
 
