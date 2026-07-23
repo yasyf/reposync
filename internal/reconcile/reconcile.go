@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/yasyf/synckit/hostregistry"
+	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/sync"
@@ -54,25 +55,29 @@ type Result struct {
 // converge pass can skip the redundant return hop; the whole pass is daemon-independent
 // and self-heals when a peer is unreachable.
 func Reconcile(ctx context.Context, st *state.State, origin string) ([]Result, error) {
-	mesh, err := hostregistry.Mesh.Load()
-	if err != nil {
-		return nil, err
-	}
-	if len(mesh.Hosts) == 0 {
-		log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to register this host)")
-	}
-	converged, err := convergeRepos(ctx, st, mesh.Hosts, origin)
-	if err != nil {
-		return nil, err
-	}
-	local, err := Repos(ctx, st, localRepos(st))
-	if err != nil {
-		return nil, err
-	}
-	results := append(converged, local...)
-	// The env pass rides the same tick and runs last, so a repo cloned above gets its
-	// env files materialized in the same reconcile.
-	return append(results, convergeEnv(ctx, st, mesh.Hosts, origin)...), nil
+	var results []Result
+	err := syncservice.WithTransportRunner(ctx, func(runner syncservice.TransportRunner) error {
+		mesh, err := hostregistry.Mesh.Load()
+		if err != nil {
+			return err
+		}
+		if len(mesh.Hosts) == 0 {
+			log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to register this host)")
+		}
+		converged, err := convergeRepos(ctx, st, runner, mesh.Hosts, origin)
+		if err != nil {
+			return err
+		}
+		local, err := Repos(ctx, st, localRepos(st))
+		if err != nil {
+			return err
+		}
+		// The env pass rides the same tick and runs last, so a repo cloned above gets its
+		// env files materialized in the same reconcile.
+		results = append(append(converged, local...), convergeEnv(ctx, st, runner, mesh.Hosts, origin)...)
+		return nil
+	})
+	return results, err
 }
 
 // localRepos returns the present local-only repos as the flat Repo view the

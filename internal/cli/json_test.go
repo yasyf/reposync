@@ -96,8 +96,8 @@ func servePipeDispatcher(t *testing.T, dispatcher *rpc.Dispatcher) *pipeTranspor
 		<-srvDone
 	})
 	tx := &pipeTransport{client: rpc.NewClient(rpc.ClientConfig{
-		Build: rpc.Build,
-		Dial:  func(context.Context) (net.Conn, error) { return clientConn, nil },
+		WireBuild: rpc.WireBuild,
+		Dial:      func(context.Context) (net.Conn, error) { return clientConn, nil },
 	})}
 	t.Cleanup(func() { _ = tx.Close() })
 	return tx

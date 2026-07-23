@@ -20,9 +20,11 @@ import (
 // design, no state is persisted across processes.
 var peerStatus = converge.NewPeerStatus()
 
-// repoFetcher is the peer registry fetcher Reconcile drives through convergeRepos; a
-// var so a test can inject a fake without a real ssh hop.
-var repoFetcher converge.Fetcher[state.RepoMeta] = sshFetcher{}
+// repoFetcher builds the peer registry fetcher Reconcile drives through convergeRepos;
+// a var so a test can inject a fake without a real ssh hop.
+var repoFetcher = func(runner syncservice.TransportRunner) converge.Fetcher[state.RepoMeta] {
+	return sshFetcher{runner: runner}
+}
 
 // repoDriver implements synckit converge.Driver[state.RepoMeta] for the propagating
 // (origin-keyed) repo registry: it reads and writes that registry inside reposync's
@@ -66,12 +68,12 @@ func repoFor(origin string, entry cregistry.Entry[state.RepoMeta]) state.Repo {
 // it spawns `reposync rpc-serve` on the peer over ssh and calls svc.get-state —
 // READ-ONLY, the pull side of pull-merge. It never writes to the peer. The transport
 // self-heals while a peer's daemon is down, since rpc-serve reads state.json directly.
-type sshFetcher struct{}
+type sshFetcher struct{ runner syncservice.TransportRunner }
 
 // Fetch returns peer's propagating repo registry, read over a one-shot ssh-stdio rpc
 // session to the peer's rpc-serve bridge.
-func (sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[state.RepoMeta], error) {
-	c := syncservice.NewClient(syncservice.SSHStdio(peer, "reposync rpc-serve"))
+func (f sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[state.RepoMeta], error) {
+	c := syncservice.NewClient(f.runner.SSHStdio(peer, "reposync rpc-serve"))
 	defer func() { _ = c.Close() }()
 	raw, err := c.GetState(ctx)
 	if err != nil {
@@ -87,8 +89,8 @@ func (sshFetcher) Fetch(ctx context.Context, peer string) (cregistry.Registry[st
 // convergeRepos runs one convergent-reconcile pass over the propagating registry:
 // pull-merge every peer, persist the converged registry, then clone-or-sync each
 // present repo. state.WithLock wraps the whole pass.
-func convergeRepos(ctx context.Context, st *state.State, peers []string, origin string) ([]Result, error) {
-	return convergeReposWith(ctx, st, repoFetcher, peerStatus, peers, origin)
+func convergeRepos(ctx context.Context, st *state.State, runner syncservice.TransportRunner, peers []string, origin string) ([]Result, error) {
+	return convergeReposWith(ctx, st, repoFetcher(runner), peerStatus, peers, origin)
 }
 
 // convergeReposWith is convergeRepos with the peer fetcher and transition tracker

@@ -37,11 +37,11 @@ const envFetchTimeout = 60 * time.Second
 // peers against, so an outage warns once rather than every pass.
 var envPeerStatus = converge.NewPeerStatus()
 
-// envFetch is the peer env fetcher the reconcile env pass drives; a var so a test can
-// inject a fake without a real ssh hop.
-var envFetch envFetcher = sshEnvFetcher{transport: func(peer string) syncservice.Transport {
-	return syncservice.SSHStdio(peer, "reposync rpc-serve")
-}}
+// envFetch builds the peer env fetcher the reconcile env pass drives; a var so a test
+// can inject a fake without a real ssh hop.
+var envFetch = func(runner syncservice.TransportRunner) envFetcher {
+	return sshEnvFetcher{runner: runner}
+}
 
 // envFetcher reads a peer's stamped env state for the requested origins, read-only.
 type envFetcher interface {
@@ -52,7 +52,7 @@ type envFetcher interface {
 // repo registry uses, issuing a raw env.get_state request the typed client does not
 // know. It is the pull side of pull-merge and never writes to the peer.
 type sshEnvFetcher struct {
-	transport func(peer string) syncservice.Transport
+	runner syncservice.TransportRunner
 }
 
 // FetchEnv requires the exact reposync v1 capability contract before requesting
@@ -60,7 +60,7 @@ type sshEnvFetcher struct {
 func (f sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
 	ctx, cancel := context.WithTimeout(ctx, envFetchTimeout)
 	defer cancel()
-	client := syncservice.NewClient(f.transport(peer))
+	client := syncservice.NewClient(f.runner.SSHStdio(peer, "reposync rpc-serve"))
 	defer func() { _ = client.Close() }()
 	caps, err := client.Capabilities(ctx)
 	if err != nil {
@@ -85,8 +85,8 @@ func (f sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []stri
 // key-level 3-way merge each eligible repo's root .env files under the flock. It is
 // best-effort — a pass-level setup failure is logged and yields no results — so the git
 // converge that precedes it is never blocked by env sync.
-func convergeEnv(ctx context.Context, st *state.State, peers []string, origin string) []Result {
-	return convergeEnvWith(ctx, st, state.Load, envFetch, envPeerStatus, peers, origin)
+func convergeEnv(ctx context.Context, st *state.State, runner syncservice.TransportRunner, peers []string, origin string) []Result {
+	return convergeEnvWith(ctx, st, state.Load, envFetch(runner), envPeerStatus, peers, origin)
 }
 
 // convergeEnvWith is convergeEnv with the state reloader, fetcher, and transition

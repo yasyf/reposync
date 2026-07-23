@@ -39,6 +39,12 @@ type envHandshakeTransport struct {
 	requests []string
 }
 
+type staticTransportRunner struct{ transport syncservice.Transport }
+
+func (r staticTransportRunner) Stdio(string, ...string) syncservice.Transport { return r.transport }
+
+func (r staticTransportRunner) SSHStdio(string, string) syncservice.Transport { return r.transport }
+
 func (t *envHandshakeTransport) Do(_ context.Context, req *rpc.Request) (*syncservice.Response, error) {
 	t.requests = append(t.requests, req.Method)
 	var result any
@@ -70,7 +76,7 @@ func TestSSHEnvFetcherRequiresExactV1Capabilities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &envHandshakeTransport{caps: tc.caps}
-			fetcher := sshEnvFetcher{transport: func(string) syncservice.Transport { return tx }}
+			fetcher := sshEnvFetcher{runner: staticTransportRunner{transport: tx}}
 			_, err := fetcher.FetchEnv(t.Context(), "peer", []string{"origin"})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("FetchEnv error = %v, want %q", err, tc.want)
@@ -91,7 +97,7 @@ func TestSSHEnvFetcherRequestsStateAfterExactHandshake(t *testing.T) {
 		},
 		repos: map[string]env.RepoState{"origin": want},
 	}
-	fetcher := sshEnvFetcher{transport: func(string) syncservice.Transport { return tx }}
+	fetcher := sshEnvFetcher{runner: staticTransportRunner{transport: tx}}
 	got, err := fetcher.FetchEnv(t.Context(), "peer", []string{"origin"})
 	if err != nil {
 		t.Fatal(err)
@@ -518,18 +524,28 @@ func TestReconcileFreshCloneMaterializesEnv(t *testing.T) {
 	h := newHarness(t)
 	seedMesh(t, "yasyf@self", "yasyf@peer")
 
+	var repoRunner, envRunner syncservice.TransportRunner
 	oldRepo := repoFetcher
-	repoFetcher = newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
+	repoFetcher = func(runner syncservice.TransportRunner) converge.Fetcher[state.RepoMeta] {
+		repoRunner = runner
+		return newPeerFetcher(peerRegistry(h.origin, state.RepoMeta{Relpath: "alpha", Trunk: "main"}, 100))
+	}
 	t.Cleanup(func() { repoFetcher = oldRepo })
 
 	oldEnv := envFetch
-	envFetch = &fakeEnvFetcher{states: envState("yasyf@peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
+	envFetch = func(runner syncservice.TransportRunner) envFetcher {
+		envRunner = runner
+		return &fakeEnvFetcher{states: envState("yasyf@peer", h.origin, env.RepoState{".env": oneKey("API_KEY", "secret", peerStamp())})}
+	}
 	t.Cleanup(func() { envFetch = oldEnv })
 
 	st := h.state() // local host tracks nothing; the peer advertises the repo
 	results, err := Reconcile(context.Background(), st, "")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+	if repoRunner == nil || repoRunner != envRunner {
+		t.Fatalf("transport runners repo=%p env=%p, want one shared scope", repoRunner, envRunner)
 	}
 
 	dest := filepath.Join(h.dataLoc, "alpha")
