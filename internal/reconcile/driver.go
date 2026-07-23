@@ -42,9 +42,9 @@ func (d *repoDriver) LoadRegistry(context.Context) (cregistry.Registry[state.Rep
 	return d.st.Repos, nil
 }
 
-// SaveRegistry writes the merged propagating registry back into state.json,
-// foreign-key-preserving every other key, via the lock-free writer (the pass holds
-// the flock). Local-only repos and the merged propagating set are both persisted.
+// SaveRegistry writes the merged propagating registry back into the exact
+// repo_sync payload via the lock-free writer; the pass holds the flock. Local-only
+// repos and the merged propagating set are both persisted.
 func (d *repoDriver) SaveRegistry(_ context.Context, reg cregistry.Registry[state.RepoMeta]) error {
 	d.st.Repos = reg
 	return d.st.SaveReposUnlocked()

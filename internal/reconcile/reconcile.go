@@ -36,8 +36,6 @@ const (
 	ActionBusy = "busy"
 	// ActionSkippedLocalOnly means a local-only repo was absent and cannot be cloned.
 	ActionSkippedLocalOnly = "skipped-local-only"
-	// ActionSkippedNoOrigin means an absent repo has no origin and cannot be cloned.
-	ActionSkippedNoOrigin = "skipped-no-origin"
 )
 
 // Result reports what Reconcile did for one registered repo.
@@ -129,9 +127,6 @@ func reconcileOne(ctx context.Context, st *state.State, repo state.Repo, dl, tmp
 	}
 	if repo.LocalOnly {
 		return Result{Relpath: repo.Relpath, Action: ActionSkippedLocalOnly}
-	}
-	if repo.Origin == "" {
-		return Result{Relpath: repo.Relpath, Action: ActionSkippedNoOrigin}
 	}
 	if err := clone(ctx, repo, abspath, tmpRoot); err != nil {
 		return Result{Relpath: repo.Relpath, Action: ActionCloned, Err: err}

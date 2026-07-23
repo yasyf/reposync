@@ -36,6 +36,7 @@ func TestEnvGetStateOverWire(t *testing.T) {
 		t.Fatalf("write beta .env: %v", err)
 	}
 
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = dl
 		s.AddRepo(state.Repo{Relpath: "alpha", Origin: fx.Origin, Trunk: "main"})
@@ -110,6 +111,7 @@ func TestEnvGetStateOmitsTrackedFile(t *testing.T) {
 	// Stage .env so vcs.TrackedNames reports it tracked.
 	fx.RunGit(alpha, "add", ".env")
 
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = dl
 		s.AddRepo(state.Repo{Relpath: "alpha", Origin: fx.Origin, Trunk: "main"})
@@ -180,6 +182,7 @@ func TestEnvGetStateDedupesOrigins(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(alpha, ".env"), []byte("API_KEY=secret\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = dl
 		s.AddRepo(state.Repo{Relpath: "alpha", Origin: fx.Origin, Trunk: "main"})

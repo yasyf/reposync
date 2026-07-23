@@ -13,6 +13,7 @@ import (
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/vcs"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 const jjTestConfig = `[user]
@@ -43,6 +44,12 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("JJ_CONFIG", cfg)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
 	requireJJ(t)
+	if err := state.Initialize(t.Context()); err != nil {
+		t.Fatalf("initialize repo-sync state: %v", err)
+	}
+	if err := hostregistry.Mesh.InitializeState(t.Context()); err != nil {
+		t.Fatalf("initialize mesh state: %v", err)
+	}
 
 	h := &harness{
 		t:       t,
@@ -85,6 +92,7 @@ func (h *harness) state(repos ...state.Repo) *state.State {
 	st.Settings = state.Settings{
 		IdleThreshold: state.Duration(time.Nanosecond),
 		RepoOpTimeout: state.Duration(time.Minute),
+		PushAfter:     state.Duration(time.Hour),
 	}
 	for _, r := range repos {
 		st.AddRepo(r)
@@ -328,41 +336,18 @@ func TestReconcileClearsStaleLockAndSyncs(t *testing.T) {
 
 func TestReconcileSkipsLocalOnly(t *testing.T) {
 	h := newHarness(t)
-	st := h.state(state.Repo{Relpath: "local", Origin: h.origin, Trunk: "main", LocalOnly: true})
+	st := h.state(state.Repo{Relpath: "local", Trunk: "main", LocalOnly: true})
 
 	results, err := Reconcile(context.Background(), st, "")
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	res := resultFor(t, results, "local")
-	if res.Err != nil {
-		t.Fatalf("local err: %v", res.Err)
-	}
-	if res.Action != ActionSkippedLocalOnly {
-		t.Fatalf("action = %q, want skipped-local-only", res.Action)
+	if res.Err != nil || res.Action != ActionSkippedLocalOnly {
+		t.Fatalf("local result = %+v, want skipped-local-only", res)
 	}
 	if h.exists(filepath.Join(h.dataLoc, "local")) {
 		t.Fatal("local-only repo was cloned")
-	}
-}
-
-func TestReconcileSkipsNoOrigin(t *testing.T) {
-	h := newHarness(t)
-	st := h.state(state.Repo{Relpath: "noorigin", Origin: "", Trunk: "main"})
-
-	results, err := Reconcile(context.Background(), st, "")
-	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	res := resultFor(t, results, "noorigin")
-	if res.Err != nil {
-		t.Fatalf("noorigin err: %v", res.Err)
-	}
-	if res.Action != ActionSkippedNoOrigin {
-		t.Fatalf("action = %q, want skipped-no-origin", res.Action)
-	}
-	if h.exists(filepath.Join(h.dataLoc, "noorigin")) {
-		t.Fatal("no-origin repo was cloned")
 	}
 }
 

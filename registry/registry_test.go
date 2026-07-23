@@ -120,6 +120,9 @@ func TestLoad(t *testing.T) {
 
 func seedState(t *testing.T, defaultLocation string, repos ...state.Repo) {
 	t.Helper()
+	if err := state.Initialize(t.Context()); err != nil {
+		t.Fatalf("initialize state: %v", err)
+	}
 	_, err := state.Update(context.Background(), func(st *state.State) error {
 		st.DefaultLocation = defaultLocation
 		for _, repo := range repos {

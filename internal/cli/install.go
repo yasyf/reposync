@@ -63,6 +63,9 @@ func newInstallCmd() *cobra.Command {
 		Short: "Register reposync's synckitd manifest so the daemon drives its sync.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := state.Initialize(cmd.Context()); err != nil {
+				return fmt.Errorf("initialize repo-sync state: %w", err)
+			}
 			m := reposyncManifest()
 			if err := m.Validate(); err != nil {
 				return err

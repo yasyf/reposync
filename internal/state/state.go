@@ -1,21 +1,10 @@
-// Package state loads and persists the reposync-owned slice of the shared JSON
-// state file: the repos, settings, and default_location keys the registration
-// commands mutate and the sync, watch, and reconcile commands read.
-//
-// The host-identity slice of that file (self, hosts) is owned by the public
-// github.com/yasyf/synckit/hostregistry package, which reposync drives through
-// state.Config; this package never reads or writes those keys. Every write here
-// goes through hostregistry's foreign-key-preserving Config.UpdateRaw, so a
-// reposync write leaves self/hosts byte-for-byte intact and a hostregistry write
-// leaves repos/settings/default_location intact — both share one flock and one
-// on-disk schema. The path/lock primitives also live in hostregistry; this
-// package forwards to them.
+// Package state owns repo-sync's exact schema v1 product payload inside the
+// shared hostregistry state envelope.
 package state
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,11 +27,20 @@ const (
 	defaultIdleThreshold = 30 * time.Minute
 	defaultRepoOpTimeout = 5 * time.Minute
 	defaultPushAfter     = 24 * time.Hour
+	stateIdentity        = "repo-sync-state-v1"
+	stateNamespace       = "repo_sync"
+	stateDeclaration     = "schema:{identity:string,version:uint64,fingerprint:string};host_registry:{self:string,hosts:array<string>,addrs:map<string,array<string>>};repo_sync:{default_location:string,repos:map<string,{added_at:int64,removed_at:int64,value:{relpath:string,trunk:string,local_only:bool,no_env_sync:bool}}>,local_repos:map<string,{added_at:int64,removed_at:int64,value:{relpath:string,trunk:string,local_only:bool,no_env_sync:bool}}>,settings:{idle_threshold:duration,repo_op_timeout:duration,push_after:duration}}"
 )
 
 // Config is reposync's host-registry handle, naming the tool so hostregistry
 // resolves the config dir and the ssh probes. State and host both drive it.
-var Config = hostregistry.Config{Name: ToolName}
+var Config = hostregistry.Config{Name: ToolName, State: hostregistry.StateContract{
+	Identity:         stateIdentity,
+	Fingerprint:      hostregistry.SchemaFingerprint(stateIdentity, stateDeclaration),
+	ProductNamespace: stateNamespace,
+	InitialProduct:   mustEncodeProduct(New()),
+	ValidateProduct:  validateProduct,
+}}
 
 // ErrLockBusy is returned when the reconcile lock is held past the caller's deadline.
 var ErrLockBusy = hostregistry.ErrLockBusy
@@ -96,6 +94,13 @@ type State struct {
 	Repos           cregistry.Registry[RepoMeta]
 	LocalRepos      cregistry.Registry[RepoMeta]
 	Settings        Settings
+}
+
+type stateJSON struct {
+	DefaultLocation string                       `json:"default_location"`
+	Repos           cregistry.Registry[RepoMeta] `json:"repos"`
+	LocalRepos      cregistry.Registry[RepoMeta] `json:"local_repos"`
+	Settings        Settings                     `json:"settings"`
 }
 
 // New returns a State with empty registries and defaults applied, ready for AddRepo.
@@ -197,59 +202,32 @@ func DecodeRepoRegistry(data []byte) (cregistry.Registry[RepoMeta], error) {
 	return reg, nil
 }
 
-// Save persists this host's reposync-owned keys under the shared reconcile lock,
-// foreign-key-preserving the self/hosts identity that hostregistry owns. It runs
-// the one write codepath (Config.UpdateRaw) the package exposes.
+// Save persists a complete exact repo-sync payload. It explicitly initializes
+// an absent v1 envelope but never repairs an existing file.
 func (s *State) Save() error {
-	return Config.UpdateRaw(context.Background(), s.writeOwnedKeys)
-}
-
-// SaveReposUnlocked persists the propagating and local repo registries WITHOUT
-// acquiring the reconcile lock, foreign-key-preserving every other key in the file
-// (self, hosts, settings, default_location). It is for the convergent-reconcile
-// pass, which already holds the lock around the whole pass and must not re-enter the
-// non-reentrant flock; ordinary callers use Update/Save. The flock is the caller's
-// responsibility.
-func (s *State) SaveReposUnlocked() error {
-	return Config.UpdateRawUnlocked(func(raw map[string]json.RawMessage) error {
-		repos, err := json.Marshal(s.Repos)
-		if err != nil {
-			return fmt.Errorf("encode repos: %w", err)
-		}
-		localRepos, err := json.Marshal(s.LocalRepos)
-		if err != nil {
-			return fmt.Errorf("encode local_repos: %w", err)
-		}
-		raw["repos"] = repos
-		raw["local_repos"] = localRepos
-		return nil
+	if err := Config.InitializeState(context.Background()); err != nil {
+		return err
+	}
+	return Config.UpdateProduct(context.Background(), func(json.RawMessage) (json.RawMessage, error) {
+		return encodeProduct(s)
 	})
 }
 
-// writeOwnedKeys marshals the reposync-owned keys into the shared raw state map,
-// leaving every other key (self, hosts) untouched.
-func (s *State) writeOwnedKeys(raw map[string]json.RawMessage) error {
-	location, err := json.Marshal(s.DefaultLocation)
-	if err != nil {
-		return fmt.Errorf("encode default_location: %w", err)
-	}
-	repos, err := json.Marshal(s.Repos)
-	if err != nil {
-		return fmt.Errorf("encode repos: %w", err)
-	}
-	localRepos, err := json.Marshal(s.LocalRepos)
-	if err != nil {
-		return fmt.Errorf("encode local_repos: %w", err)
-	}
-	settings, err := json.Marshal(s.Settings)
-	if err != nil {
-		return fmt.Errorf("encode settings: %w", err)
-	}
-	raw["default_location"] = location
-	raw["repos"] = repos
-	raw["local_repos"] = localRepos
-	raw["settings"] = settings
-	return nil
+// SaveReposUnlocked persists the propagating and local repo registries without
+// acquiring the reconcile lock. It preserves the other declared fields in the
+// exact repo_sync payload. The convergent-reconcile pass already holds the lock
+// around the whole pass and must not re-enter the non-reentrant flock; ordinary
+// callers use Update or Save. The flock is the caller's responsibility.
+func (s *State) SaveReposUnlocked() error {
+	return Config.UpdateProductUnlocked(func(raw json.RawMessage) (json.RawMessage, error) {
+		persisted, err := decodeProduct(raw)
+		if err != nil {
+			return nil, err
+		}
+		persisted.Repos = s.Repos
+		persisted.LocalRepos = s.LocalRepos
+		return encodeProduct(persisted)
+	})
 }
 
 // DefaultLocationExpanded resolves the default location to an absolute path with ~ expanded.
@@ -297,77 +275,92 @@ func SockPath() (string, error) {
 	return Config.SockPath()
 }
 
-// Load reads reposync's owned keys from the state file, returning defaults when it
-// does not yet exist. It decodes through the same stateFromRaw path as Update, so
-// the self/hosts identity keys that share the file are ignored here.
+// Load reads the exact schema v1 repo-sync payload.
 func Load() (*State, error) {
-	path, err := Path()
+	raw, err := Config.LoadProduct()
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path is reposync's own state file under the fixed config dir, not user-supplied.
-	if errors.Is(err, os.ErrNotExist) {
-		return New(), nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read state %s: %w", path, err)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse state %s: %w", path, err)
-	}
-	return stateFromRaw(raw)
+	return decodeProduct(raw)
 }
 
 // Update runs fn against a freshly loaded State under the reconcile-lock flock,
-// then persists only reposync's owned keys, leaving the self/hosts identity that
-// hostregistry owns byte-for-byte intact. It serializes read-modify-write across
-// processes through the one canonical flock that hostregistry writers also hold.
+// then replaces the exact repo_sync payload while preserving the declared
+// host_registry payload. It serializes read-modify-write across processes through
+// the one canonical flock that hostregistry writers also hold.
 func Update(ctx context.Context, fn func(*State) error) (*State, error) {
 	var out *State
-	err := Config.UpdateRaw(ctx, func(raw map[string]json.RawMessage) error {
-		st, err := stateFromRaw(raw)
+	err := Config.UpdateProduct(ctx, func(raw json.RawMessage) (json.RawMessage, error) {
+		st, err := decodeProduct(raw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := fn(st); err != nil {
-			return err
-		}
-		if err := st.writeOwnedKeys(raw); err != nil {
-			return err
+			return nil, err
 		}
 		out = st
-		return nil
+		return encodeProduct(st)
 	})
 	return out, err
 }
 
-// stateFromRaw decodes reposync's owned keys out of the shared raw state map and
-// applies defaults, leaving self/hosts to hostregistry.
-func stateFromRaw(raw map[string]json.RawMessage) (*State, error) {
-	s := &State{}
-	if v, ok := raw["default_location"]; ok {
-		if err := json.Unmarshal(v, &s.DefaultLocation); err != nil {
-			return nil, fmt.Errorf("parse default_location: %w", err)
-		}
+// Initialize creates a fresh complete v1 envelope when none exists.
+func Initialize(ctx context.Context) error { return Config.InitializeState(ctx) }
+
+func decodeProduct(raw json.RawMessage) (*State, error) {
+	var persisted stateJSON
+	if err := hostregistry.DecodeExactJSON(raw, &persisted); err != nil {
+		return nil, fmt.Errorf("decode repo_sync: %w", err)
 	}
-	if v, ok := raw["repos"]; ok {
-		if err := json.Unmarshal(v, &s.Repos); err != nil {
-			return nil, fmt.Errorf("parse repos: %w", err)
-		}
+	s := &State{DefaultLocation: persisted.DefaultLocation, Repos: persisted.Repos, LocalRepos: persisted.LocalRepos, Settings: persisted.Settings}
+	if err := validateState(s); err != nil {
+		return nil, err
 	}
-	if v, ok := raw["local_repos"]; ok {
-		if err := json.Unmarshal(v, &s.LocalRepos); err != nil {
-			return nil, fmt.Errorf("parse local_repos: %w", err)
-		}
-	}
-	if v, ok := raw["settings"]; ok {
-		if err := json.Unmarshal(v, &s.Settings); err != nil {
-			return nil, fmt.Errorf("parse settings: %w", err)
-		}
-	}
-	s.applyDefaults()
 	return s, nil
+}
+
+func validateProduct(raw json.RawMessage) error {
+	_, err := decodeProduct(raw)
+	return err
+}
+
+func validateState(s *State) error {
+	if s.DefaultLocation == "" || s.Repos == nil || s.LocalRepos == nil {
+		return fmt.Errorf("repo_sync requires default_location, repos, and local_repos")
+	}
+	if s.Settings.IdleThreshold <= 0 || s.Settings.RepoOpTimeout <= 0 || s.Settings.PushAfter <= 0 {
+		return fmt.Errorf("repo_sync settings durations must be positive")
+	}
+	for key, entry := range s.Repos {
+		if key == "" || entry.Value.Relpath == "" || entry.Value.LocalOnly || (entry.Added <= 0 && entry.Removed <= 0) {
+			return fmt.Errorf("invalid propagating repo entry %q", key)
+		}
+	}
+	for key, entry := range s.LocalRepos {
+		if key == "" || entry.Value.Relpath != key || !entry.Value.LocalOnly || (entry.Added <= 0 && entry.Removed <= 0) {
+			return fmt.Errorf("invalid local repo entry %q", key)
+		}
+	}
+	return nil
+}
+
+func encodeProduct(s *State) (json.RawMessage, error) {
+	if err := validateState(s); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(stateJSON{DefaultLocation: s.DefaultLocation, Repos: s.Repos, LocalRepos: s.LocalRepos, Settings: s.Settings})
+	if err != nil {
+		return nil, fmt.Errorf("encode repo_sync: %w", err)
+	}
+	return data, nil
+}
+
+func mustEncodeProduct(s *State) json.RawMessage {
+	raw, err := encodeProduct(s)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // WithLock runs fn while holding an exclusive flock on the reconcile lock file,

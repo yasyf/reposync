@@ -1106,6 +1106,9 @@ func TestFetchEnvPeersBatchesOrigins(t *testing.T) {
 // sees peers.
 func seedMesh(t *testing.T, self string, hosts ...string) {
 	t.Helper()
+	if err := hostregistry.Mesh.InitializeState(t.Context()); err != nil {
+		t.Fatalf("initialize mesh: %v", err)
+	}
 	if _, err := hostregistry.Mesh.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {

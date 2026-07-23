@@ -15,6 +15,7 @@ import (
 // per-repo env-sync setting: "on" by default, "off" for an opted-out repo.
 func TestRepoLsShowsEnvColumn(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.AddRepo(state.Repo{Relpath: "synced", Origin: "https://example.com/synced.git", Trunk: "main"})
 		s.AddRepo(state.Repo{Relpath: "optout", Origin: "https://example.com/optout.git", Trunk: "main", NoEnvSync: true})
@@ -61,6 +62,7 @@ func TestRepoAddNoEnvSyncPersistsFlag(t *testing.T) {
 	if err := os.MkdirAll(dl, 0o750); err != nil {
 		t.Fatalf("mkdir data loc: %v", err)
 	}
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = dl
 		s.Settings.IdleThreshold = state.Duration(time.Nanosecond)

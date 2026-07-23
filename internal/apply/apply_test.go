@@ -12,6 +12,7 @@ import (
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/synckit/hostregistry"
 )
 
 const jjTestConfig = `[user]
@@ -43,6 +44,9 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("JJ_CONFIG", cfg)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
 	requireJJ(t)
+	if err := hostregistry.Mesh.InitializeState(context.Background()); err != nil {
+		t.Fatalf("initialize mesh state: %v", err)
+	}
 
 	h := &harness{
 		t:       t,
@@ -87,6 +91,7 @@ func (h *harness) seedState(repos ...state.Repo) {
 	st.Settings = state.Settings{
 		IdleThreshold: state.Duration(time.Nanosecond),
 		RepoOpTimeout: state.Duration(time.Minute),
+		PushAfter:     state.Duration(time.Hour),
 	}
 	for _, r := range repos {
 		st.AddRepo(r)

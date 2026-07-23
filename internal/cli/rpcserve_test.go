@@ -18,6 +18,7 @@ func TestConsumerCountsBusyOutOfConverged(t *testing.T) {
 	seedRegistry(t, "yasyf@laptop")
 	dl := filepath.Join(f.Root, "data")
 	dest := f.GitClone(filepath.Join(dl, "alpha"))
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = dl
 		// A fresh clone always looks recently active; drop the recency gate so

@@ -22,28 +22,21 @@ const (
 	lockFile     = "reconcile.lock"
 )
 
-func TestLoadMissingReturnsDefaults(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	s, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if s.DefaultLocation != "~/Code" {
-		t.Errorf("DefaultLocation = %q, want ~/Code", s.DefaultLocation)
-	}
-	if got := time.Duration(s.Settings.IdleThreshold); got != 30*time.Minute {
-		t.Errorf("IdleThreshold = %s, want 30m", got)
-	}
-	if got := time.Duration(s.Settings.RepoOpTimeout); got != 5*time.Minute {
-		t.Errorf("RepoOpTimeout = %s, want 5m", got)
-	}
-	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
-		t.Errorf("PushAfter = %s, want 24h", got)
+func initializeState(t *testing.T) {
+	t.Helper()
+	if err := Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
 	}
 }
 
-func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
+func TestLoadMissingRejectsUninitializedState(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if _, err := Load(); !errors.Is(err, hostregistry.ErrStateMissing) {
+		t.Fatalf("Load missing = %v, want ErrStateMissing", err)
+	}
+}
+
+func TestLoadRejectsOldFlatPartialState(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	cfg := filepath.Join(dir, configSubdir)
@@ -55,21 +48,8 @@ func TestLoadAppliesDefaultsToZeroSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if s.DefaultLocation != "~/Work" {
-		t.Errorf("DefaultLocation = %q, want ~/Work", s.DefaultLocation)
-	}
-	if got := time.Duration(s.Settings.IdleThreshold); got != 10*time.Minute {
-		t.Errorf("IdleThreshold = %s, want explicit 10m", got)
-	}
-	if got := time.Duration(s.Settings.RepoOpTimeout); got != 5*time.Minute {
-		t.Errorf("RepoOpTimeout = %s, want default 5m", got)
-	}
-	if got := time.Duration(s.Settings.PushAfter); got != 24*time.Hour {
-		t.Errorf("PushAfter = %s, want default 24h", got)
+	if _, err := Load(); !errors.Is(err, hostregistry.ErrStateSchema) {
+		t.Fatalf("Load old flat partial = %v, want ErrStateSchema", err)
 	}
 }
 
@@ -503,6 +483,7 @@ func TestRepoAbsPath(t *testing.T) {
 
 func TestUpdatePersistsMutation(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeState(t)
 
 	origin := "https://example.com/cc-review.git"
 	out, err := Update(context.Background(), func(s *State) error {
@@ -527,6 +508,7 @@ func TestUpdatePersistsMutation(t *testing.T) {
 
 func TestUpdateFnErrorAbortsSave(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeState(t)
 
 	sentinel := errors.New("boom")
 	out, err := Update(context.Background(), func(s *State) error {
@@ -551,6 +533,7 @@ func TestUpdateFnErrorAbortsSave(t *testing.T) {
 
 func TestUpdateConcurrentNoLostUpdates(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeState(t)
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -590,13 +573,9 @@ func TestUpdateConcurrentNoLostUpdates(t *testing.T) {
 	}
 }
 
-// TestUpdatePreservesIdentityKeysBothDirections is the lost-update regression: a
-// reposync write (state.Update / Save) must leave the self/hosts identity that
-// hostregistry owns byte-for-byte intact, and a hostregistry write must leave
-// reposync's repos/settings/default_location intact. Both writers share one file
-// through the FK-preserving Config.UpdateRaw, so neither clobbers the other.
-func TestUpdatePreservesIdentityKeysBothDirections(t *testing.T) {
+func TestExactEnvelopeOwnersDoNotClobberEachOther(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeState(t)
 
 	// Seed the identity slice via hostregistry, then reposync's slice via Update.
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
@@ -614,10 +593,6 @@ func TestUpdatePreservesIdentityKeysBothDirections(t *testing.T) {
 		t.Fatalf("seed reposync state: %v", err)
 	}
 
-	identityKeys := []string{"self", "hosts"}
-	domainKeys := []string{"repos", "local_repos", "settings", "default_location"}
-
-	// Direction 1: a reposync write mutates only its keys; self/hosts stay byte-identical.
 	before := readRawState(t)
 	if _, err := Update(context.Background(), func(s *State) error {
 		s.AddRepo(Repo{Relpath: "notes", Origin: "https://example.com/notes.git", Trunk: "main"})
@@ -626,10 +601,9 @@ func TestUpdatePreservesIdentityKeysBothDirections(t *testing.T) {
 		t.Fatalf("reposync Update: %v", err)
 	}
 	after := readRawState(t)
-	assertRawKeysEqual(t, "reposync write", before, after, identityKeys)
-	assertRawKeysChanged(t, "reposync write", before, after, []string{"repos"})
+	assertRawKeysEqual(t, "repo-sync write", before, after, []string{"schema", "host_registry"})
+	assertRawKeysChanged(t, "repo-sync write", before, after, []string{stateNamespace})
 
-	// Direction 2: a hostregistry write mutates only self/hosts; reposync's keys stay byte-identical.
 	before = readRawState(t)
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.UpsertHost("yasyf@peer2")
@@ -639,8 +613,8 @@ func TestUpdatePreservesIdentityKeysBothDirections(t *testing.T) {
 		t.Fatalf("hostregistry Update: %v", err)
 	}
 	after = readRawState(t)
-	assertRawKeysEqual(t, "hostregistry write", before, after, domainKeys)
-	assertRawKeysChanged(t, "hostregistry write", before, after, identityKeys)
+	assertRawKeysEqual(t, "hostregistry write", before, after, []string{"schema", stateNamespace})
+	assertRawKeysChanged(t, "hostregistry write", before, after, []string{"host_registry"})
 
 	// Sanity: the final file still parses into a coherent reposync State and Registry.
 	st, err := Load()

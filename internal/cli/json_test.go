@@ -23,6 +23,7 @@ import (
 func seedRegistry(t *testing.T, self string, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeMeshState(t)
 	if _, err := hostregistry.Mesh.Update(t.Context(), func(g *hostregistry.Registry) error {
 		g.Self = self
 		for _, h := range hosts {
@@ -165,6 +166,7 @@ func TestStatePathUnderTempConfig(t *testing.T) {
 // repos never cross hosts.
 func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
 		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
@@ -203,6 +205,7 @@ func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
 // by relpath — and reports empty (not dropped) fingerprint components for an uncloned repo.
 func TestConsumerListCoversBothRegistries(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = t.TempDir() // empty location: no repo is cloned
 		s.AddRepo(state.Repo{Relpath: "cc-review", Origin: "https://example.com/cc-review.git", Trunk: "main"})
@@ -266,6 +269,7 @@ func TestApplyPreservesLocalReposAndSettings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// Seed a host that already tracks a local-only repo and a non-default location.
+	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
 		s.DefaultLocation = "~/work"
 		s.AddRepo(state.Repo{Relpath: "scratch", LocalOnly: true})
