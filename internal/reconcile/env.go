@@ -7,13 +7,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"time"
 
-	"github.com/yasyf/synckit/converge"
 	"github.com/yasyf/synckit/cregistry"
-	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/env"
 	"github.com/yasyf/reposync/internal/state"
@@ -30,109 +27,36 @@ const (
 	ActionEnvBusy = "env-busy"
 )
 
-// envFetchTimeout bounds one peer's env get_state exchange.
-const envFetchTimeout = 60 * time.Second
-
-// envPeerStatus is the process-lived tracker the env converge logs unreachable
-// peers against, so an outage warns once rather than every pass.
-var envPeerStatus = converge.NewPeerStatus()
-
-// envFetch builds the peer env fetcher the reconcile env pass drives; a var so a test
-// can inject a fake without a real ssh hop.
-var envFetch = func(runner syncservice.TransportRunner) envFetcher {
-	return sshEnvFetcher{runner: runner}
-}
-
-// envFetcher reads a peer's stamped env state for the requested origins, read-only.
-type envFetcher interface {
-	FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error)
-}
-
-// sshEnvFetcher fetches a peer's env state over the same ssh-stdio rpc-serve bridge the
-// repo registry uses, issuing a raw env.get_state request the typed client does not
-// know. It is the pull side of pull-merge and never writes to the peer.
-type sshEnvFetcher struct {
-	runner syncservice.TransportRunner
-}
-
-// FetchEnv requires the exact reposync v1 capability contract before requesting
-// env.get_state and returns the served RepoState per origin.
-func (f sshEnvFetcher) FetchEnv(ctx context.Context, peer string, origins []string) (map[string]env.RepoState, error) {
-	ctx, cancel := context.WithTimeout(ctx, envFetchTimeout)
-	defer cancel()
-	client := syncservice.NewClient(f.runner.SSHStdio(peer, "reposync rpc-serve"))
-	defer func() { _ = client.Close() }()
-	caps, err := client.Capabilities(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("env capabilities from %s: %w", peer, err)
-	}
-	if caps.Name != state.ToolName {
-		return nil, fmt.Errorf("env capabilities from %s: consumer %q, want %q", peer, caps.Name, state.ToolName)
-	}
-	if !slices.Contains(caps.Methods, env.MethodGetState) {
-		return nil, fmt.Errorf("env capabilities from %s: method %q is not advertised", peer, env.MethodGetState)
-	}
-	var payload struct {
-		Repos map[string]env.RepoState `json:"repos"`
-	}
-	if err := client.Call(ctx, env.MethodGetState, map[string]any{"origins": origins}, &payload); err != nil {
-		return nil, fmt.Errorf("env get_state from %s: %w", peer, err)
-	}
-	return payload.Repos, nil
-}
-
-// convergeEnv runs the reconcile env pass: fetch every peer's stamped env state, then
-// key-level 3-way merge each eligible repo's root .env files under the flock. It is
-// best-effort — a pass-level setup failure is logged and yields no results — so the git
-// converge that precedes it is never blocked by env sync.
-func convergeEnv(ctx context.Context, st *state.State, runner syncservice.TransportRunner, peers []string, origin string) []Result {
-	return convergeEnvWith(ctx, st, state.Load, envFetch(runner), envPeerStatus, peers, origin)
-}
-
-// convergeEnvWith is convergeEnv with the state reloader, fetcher, and transition
-// tracker injected so a test can drive the pull-merge against a fake peer. reload runs
-// under the flock to recompute the eligible set, so a repo removed or opted out during
-// the unlocked fetch window is never applied; dl and configDir stay from the pre-pass
-// state. Unlike the repo converge it does NOT skip the notifying origin peer — the
-// notifying host is the only holder of the new content — so the trailing origin arg is
-// accepted for symmetry but never consulted.
-func convergeEnvWith(ctx context.Context, st *state.State, reload func() (*state.State, error), f envFetcher, status *converge.PeerStatus, peers []string, _ string) []Result {
-	dl, err := st.DefaultLocationExpanded()
-	if err != nil {
-		slog.ErrorContext(ctx, "env converge: resolve default location", "err", err)
-		return nil
-	}
-	configDir, err := state.Dir()
-	if err != nil {
-		slog.ErrorContext(ctx, "env converge: resolve config dir", "err", err)
-		return nil
-	}
-	eligible := eligibleEnvRepos(st, dl)
-	if len(eligible) == 0 {
-		return nil
-	}
-	origins := make([]string, len(eligible))
-	for i, r := range eligible {
-		origins[i] = r.Origin
-	}
-	// Fetch every peer BEFORE the flock so a slow peer never holds this host's lock.
-	peerStates := fetchEnvPeers(ctx, f, status, peers, origins)
-
+// ApplyEnvSnapshot merges one delivered env snapshot into current local state.
+// Nil records local observations only. Synckit owns peer transport and delivery.
+func ApplyEnvSnapshot(ctx context.Context, incoming map[string]env.RepoState) []Result {
 	var results []Result
-	if err := state.WithLock(ctx, func() error {
-		fresh, err := reload()
+	err := state.WithLock(ctx, func() error {
+		st, err := state.Load()
 		if err != nil {
-			return fmt.Errorf("reload state: %w", err)
+			return err
 		}
-		eligible := eligibleEnvRepos(fresh, dl)
+		dl, err := st.DefaultLocationExpanded()
+		if err != nil {
+			return err
+		}
+		configDir, err := state.Dir()
+		if err != nil {
+			return err
+		}
+		eligible := eligibleEnvRepos(st, dl)
 		results = make([]Result, len(eligible))
 		for i, repo := range eligible {
-			results[i] = convergeEnvRepo(ctx, dl, configDir, repo, peerStates[repo.Origin])
+			var sources []env.RepoState
+			if remote, ok := incoming[repo.Origin]; ok {
+				sources = []env.RepoState{remote}
+			}
+			results[i] = convergeEnvRepo(ctx, dl, configDir, repo, sources)
 		}
 		return nil
-	}); err != nil {
-		slog.ErrorContext(ctx, "env converge: lock", "err", err)
-		return nil
+	})
+	if err != nil {
+		return []Result{{Err: err}}
 	}
 	return results
 }
@@ -153,74 +77,12 @@ func eligibleEnvRepos(st *state.State, dl string) []state.Repo {
 	return out
 }
 
-// fetchEnvPeers fetches and validates every peer's env state for origins, returning the
-// per-origin list of peer RepoStates to merge. Each peer's origins are fetched in
-// batches of at most env.MaxOrigins and the batch responses merged; a peer that is
-// unreachable or serves an invalid payload in ANY batch is logged and
-// skipped whole, contributing nothing this pass. The notifying origin peer is NOT
-// skipped.
-func fetchEnvPeers(ctx context.Context, f envFetcher, status *converge.PeerStatus, peers, origins []string) map[string][]env.RepoState {
-	byOrigin := make(map[string][]env.RepoState)
-	for _, peer := range peers {
-		collected, ok := fetchEnvPeerBatched(ctx, f, status, peer, origins)
-		if !ok {
-			continue
-		}
-		for o, rs := range collected {
-			byOrigin[o] = append(byOrigin[o], rs)
-		}
-	}
-	return byOrigin
-}
-
-// fetchEnvPeerBatched fetches peer's env state for origins in batches of at most
-// env.MaxOrigins, validating each batch against its own requested set and merging the
-// responses. ok is false when any batch errors or serves an invalid payload: the whole
-// peer is dropped for this pass — no partial trust of a peer whose later batch failed —
-// with an unreachable batch logged once per outage.
-func fetchEnvPeerBatched(ctx context.Context, f envFetcher, status *converge.PeerStatus, peer string, origins []string) (map[string]env.RepoState, bool) {
-	collected := make(map[string]env.RepoState)
-	for start := 0; start < len(origins); start += env.MaxOrigins {
-		end := start + env.MaxOrigins
-		if end > len(origins) {
-			end = len(origins)
-		}
-		batch := origins[start:end]
-		payload, err := f.FetchEnv(ctx, peer, batch)
-		if err != nil {
-			if status.Down(peer) {
-				slog.WarnContext(ctx, "env converge: peer skipped; suppressing until recovery", "peer", peer, "err", err)
-			}
-			return nil, false
-		}
-		requested := make(map[string]bool, len(batch))
-		for _, o := range batch {
-			requested[o] = true
-		}
-		if err := validatePeerEnv(requested, payload); err != nil {
-			slog.WarnContext(ctx, "env converge: rejecting peer payload", "peer", peer, "err", err)
-			return nil, false
-		}
-		for o, rs := range payload {
-			collected[o] = rs
-		}
-	}
-	if _, recovered := status.Up(peer); recovered {
-		slog.InfoContext(ctx, "env converge: peer recovered", "peer", peer)
-	}
-	return collected, true
-}
-
-// validatePeerEnv rejects a peer's ENTIRE payload on any wire violation: an origin the
-// pass did not request, a file name that fails ValidateFileName, an entry whose key or
-// value could inject an extra line, a stamp outside [0, now+MaxStampSkew], or a count
-// or aggregate size over the wire caps. Rejecting whole avoids a partially-applied
-// malicious payload and keeps a poisoned stamp out of the local sidecar entirely.
-func validatePeerEnv(requested map[string]bool, payload map[string]env.RepoState) error {
+// ValidateEnvSnapshot rejects a delivered snapshot on any wire violation.
+func ValidateEnvSnapshot(payload map[string]env.RepoState) error {
 	ceiling := cregistry.UnixMicros(time.Now().Add(env.MaxStampSkew))
 	for origin, rs := range payload {
-		if !requested[origin] {
-			return fmt.Errorf("peer served unrequested origin %q", origin)
+		if origin == "" {
+			return fmt.Errorf("env snapshot contains an empty origin")
 		}
 		if len(rs) > env.MaxWireFiles {
 			return fmt.Errorf("origin %q served %d env files, over the %d cap", origin, len(rs), env.MaxWireFiles)

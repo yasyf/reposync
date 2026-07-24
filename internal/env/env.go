@@ -34,8 +34,6 @@ import (
 )
 
 const (
-	// MethodGetState is the rpc method a host calls to fetch a peer's stamped env state.
-	MethodGetState = "env.get_state"
 	// QuietWindow is how long a target file must sit unmodified before an apply may
 	// write it. It does not close the check-to-write race, only narrows it: a converge
 	// defers a file written within the window, shrinking the unavoidable gap between the
@@ -55,10 +53,6 @@ const (
 	MaxWireFiles = 64
 	// MaxWireKeys caps the entries one env file may carry in a single peer payload.
 	MaxWireKeys = 4096
-	// MaxOrigins caps the origins one env.get_state request may ask for, bounding the
-	// work a single peer request can force. A converge with more eligible repos than
-	// this chunks its per-peer fetch into batches of at most MaxOrigins.
-	MaxOrigins = 256
 )
 
 // Now is the clock the sidecar GC compares tombstone stamps against, indirected so

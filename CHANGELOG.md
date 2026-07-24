@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Replace the spawned stdio and product-owned SSH pull paths with one resident
+  `rpc-serve-v1` service. Synckit now owns exact sessions and durable delivery;
+  reposync exports and applies an immutable revisioned `reposync-transfer-v1`
+  payload with base fencing, digest binding, and idempotent acknowledgements.
+- Remove the custom registry and `env.get_state` peer methods. Repository CRDT
+  state and `.env` state now converge through the same bounded snapshot/delta.
+
 ## [0.22.0] - 2026-07-23
 
 ### Changed

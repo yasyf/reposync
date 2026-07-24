@@ -578,9 +578,15 @@ func TestExactEnvelopeOwnersDoNotClobberEachOther(t *testing.T) {
 	initializeState(t)
 
 	// Seed the identity slice via hostregistry, then reposync's slice via Update.
+	peer, err := hostregistry.NewSSHHostFact("yasyf@peer", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatalf("peer fact: %v", err)
+	}
+	if err := Config.RegisterHost(context.Background(), peer); err != nil {
+		t.Fatalf("register peer: %v", err)
+	}
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
 		g.Self = "yasyf@self"
-		g.UpsertHost("yasyf@peer")
 		return nil
 	}); err != nil {
 		t.Fatalf("seed registry: %v", err)
@@ -604,9 +610,15 @@ func TestExactEnvelopeOwnersDoNotClobberEachOther(t *testing.T) {
 	assertRawKeysEqual(t, "repo-sync write", before, after, []string{"schema", "host_registry"})
 	assertRawKeysChanged(t, "repo-sync write", before, after, []string{stateNamespace})
 
+	peer2, err := hostregistry.NewSSHHostFact("yasyf@peer2", "/opt/homebrew/bin/synckitd", nil)
+	if err != nil {
+		t.Fatalf("peer2 fact: %v", err)
+	}
+	if err := Config.RegisterHost(context.Background(), peer2); err != nil {
+		t.Fatalf("register peer2: %v", err)
+	}
 	before = readRawState(t)
 	if _, err := Config.Update(context.Background(), func(g *hostregistry.Registry) error {
-		g.UpsertHost("yasyf@peer2")
 		g.Self = "yasyf@self2"
 		return nil
 	}); err != nil {

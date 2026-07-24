@@ -15,6 +15,7 @@ import (
 	"github.com/yasyf/synckit/manifest"
 
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/reposync/internal/transfer"
 )
 
 // manifestsDirName is the subdirectory of the shared synckit config dir where
@@ -28,10 +29,8 @@ const manifestsDirName = "manifests"
 const watchDebounce = 15 * time.Second
 
 // reposyncManifest is the declarative registration synckitd reads to drive reposync:
-// the watch debounce and stdio service it uses to reach reposync's typed sync
-// contract. synckitd spawns `reposync rpc-serve` over stdio and
-// drives list/reconcile/sync/get-state over that typed RPC, so no argv template or
-// shell interpolation is involved. reposync has no resident helper or launchd agent.
+// the watch debounce and resident revisioned service it uses to reach reposync's
+// typed sync contract.
 func reposyncManifest() manifest.Manifest {
 	return manifest.Manifest{
 		Name:   state.ToolName,
@@ -41,9 +40,10 @@ func reposyncManifest() manifest.Manifest {
 			Debounce: codec.Duration(watchDebounce),
 		},
 		Service: manifest.ServiceSpec{
-			Transport: "stdio",
-			ServeArgs: []string{"rpc-serve"},
+			Kind: "resident", Socket: "~/.config/reposync/rpc.sock",
+			SchemaFingerprint: transfer.Fingerprint,
 		},
+		Helper: &manifest.HelperSpec{Command: "rpc-serve-v1", SessionType: manifest.SessionTypeBackground},
 	}
 }
 

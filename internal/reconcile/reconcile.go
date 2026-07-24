@@ -10,13 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/yasyf/synckit/hostregistry"
-	"github.com/yasyf/synckit/syncservice"
 
 	"github.com/yasyf/reposync/internal/state"
 	"github.com/yasyf/reposync/internal/sync"
@@ -45,47 +41,14 @@ type Result struct {
 	Err     error
 }
 
-// Reconcile converges the propagating repo registry with every peer and then brings
-// this host into line: it pull-merges each peer's registry, persists the converged
-// set, clones every absent propagating repo and idle-syncs every present one, then
-// idle-syncs the local-only repos (which never converge across hosts). The peer list
-// comes from the shared synckit host mesh, and origin tags the notifying peer so the
-// converge pass can skip the redundant return hop; the whole pass is daemon-independent
-// and self-heals when a peer is unreachable.
-func Reconcile(ctx context.Context, st *state.State, origin string) ([]Result, error) {
-	var results []Result
-	err := syncservice.WithTransportRunner(ctx, func(runner syncservice.TransportRunner) error {
-		mesh, err := hostregistry.Mesh.Load()
-		if err != nil {
-			return err
-		}
-		if len(mesh.Hosts) == 0 {
-			log.Print("reconcile: WARNING the shared host mesh has no peers; converging nothing across hosts (run `synckitd host add` to register this host)")
-		}
-		converged, err := convergeRepos(ctx, st, runner, mesh.Hosts, origin)
-		if err != nil {
-			return err
-		}
-		local, err := Repos(ctx, st, localRepos(st))
-		if err != nil {
-			return err
-		}
-		// The env pass rides the same tick and runs last, so a repo cloned above gets its
-		// env files materialized in the same reconcile.
-		results = append(append(converged, local...), convergeEnv(ctx, st, runner, mesh.Hosts, origin)...)
-		return nil
-	})
-	return results, err
-}
-
-// localRepos returns the present local-only repos as the flat Repo view the
-// reconcile sweep iterates.
-func localRepos(st *state.State) []state.Repo {
-	repos := make([]state.Repo, 0, len(st.LocalRepos))
-	for _, e := range st.LocalRepos.Present() {
-		repos = append(repos, state.Repo{Relpath: e.Value.Relpath, Trunk: e.Value.Trunk, LocalOnly: e.Value.LocalOnly})
+// Reconcile brings this host's already-converged product state onto disk. Synckit
+// owns peer transport and durable delivery; reposync never opens a peer session.
+func Reconcile(ctx context.Context, st *state.State) ([]Result, error) {
+	repos, err := Repos(ctx, st, st.AllRepos())
+	if err != nil {
+		return nil, err
 	}
-	return repos
+	return append(repos, ApplyEnvSnapshot(ctx, nil)...), nil
 }
 
 // Repos clones every absent repo and idle-syncs every present one among the given

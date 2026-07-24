@@ -89,9 +89,9 @@ Run `reposync --help` for the full command tree and flags.
 
 ## How convergence works
 
-reposync itself is not a daemon. `reposync install` registers a manifest with [synckitd](https://github.com/yasyf/synckit), the shared sync daemon, which spawns `reposync rpc-serve` over stdio and drives it through a typed contract — no shell templates, no per-tool launchd agent. Repos are tracked by path relative to `default_location`, so each lands at the same place on every host, and the registry is a last-writer-wins CRDT: adds and removals pull-merge across peers, removals as tombstones. Adding a peer on the Hosts tab ssh-bootstraps it, brew-installing synckitd and reposync and cloning every tracked repo. A sync is pull-first: fetch plus a safe fast-forward, anchored to the git HEAD the fetch observed, so a `git commit` racing the advance aborts it instead of losing work.
+`reposync install` registers a fixed resident `rpc-serve-v1` service with [synckitd](https://github.com/yasyf/synckit). Synckit owns every local and SSH session plus the durable delivery outbox; reposync owns one exact revisioned snapshot/delta payload, CRDT merge, materialization, and idempotent acknowledgement. Repos are tracked by path relative to `default_location`, so each lands at the same place on every host. Adds and removals converge as a last-writer-wins registry, with removals retained as tombstones. Adding a peer on the Hosts tab SSH-bootstraps it, brew-installing synckitd and reposync and cloning every tracked repo. A sync is pull-first: fetch plus a safe fast-forward, anchored to the git HEAD the fetch observed, so a `git commit` racing the advance aborts it instead of losing work.
 
-`.env` files ride the same reconcile pass. Each host pulls every peer's stamped per-key map over the same ssh channel, merges last-writer-wins per key on file mtimes, and rewrites its own files in place — a write within the last five seconds defers the whole repo to the next pass.
+`.env` files are part of the same immutable revisioned payload. Reposync merges their stamped per-key maps last-writer-wins and rewrites its own files in place; a write within the last five seconds defers acknowledgement so Synckit's outbox retries the delivery.
 
 ## Configuration
 

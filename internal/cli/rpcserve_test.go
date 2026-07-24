@@ -10,7 +10,7 @@ import (
 	"github.com/yasyf/reposync/internal/vcs/vcstest"
 )
 
-// TestConsumerCountsBusyOutOfConverged proves svc.sync and svc.reconcile report a
+// TestConsumerCountsBusyOutOfConverged proves svc.reconcile reports a
 // busy-gated repo in SkippedBusy — not Converged and not an error — and count it
 // converged again once the live operation ends.
 func TestConsumerCountsBusyOutOfConverged(t *testing.T) {
@@ -36,13 +36,6 @@ func TestConsumerCountsBusyOutOfConverged(t *testing.T) {
 	}
 
 	c := serveConsumer(t)
-	sres, err := c.Sync(t.Context(), "")
-	if err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	if sres.Converged != 0 || sres.SkippedBusy != 1 {
-		t.Fatalf("locked sync = %+v, want Converged 0, SkippedBusy 1", sres)
-	}
 	rres, err := c.Reconcile(t.Context(), "")
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -54,11 +47,11 @@ func TestConsumerCountsBusyOutOfConverged(t *testing.T) {
 	if err := os.Remove(lock); err != nil {
 		t.Fatalf("remove lock: %v", err)
 	}
-	sres, err = c.Sync(t.Context(), "")
+	rres, err = c.Reconcile(t.Context(), "")
 	if err != nil {
-		t.Fatalf("post-release sync: %v", err)
+		t.Fatalf("post-release reconcile: %v", err)
 	}
-	if sres.Converged != 1 || sres.SkippedBusy != 0 {
-		t.Fatalf("idle sync = %+v, want Converged 1, SkippedBusy 0", sres)
+	if rres.Converged != 1 || rres.SkippedBusy != 0 {
+		t.Fatalf("idle reconcile = %+v, want Converged 1, SkippedBusy 0", rres)
 	}
 }

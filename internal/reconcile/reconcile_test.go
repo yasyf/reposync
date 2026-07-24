@@ -156,7 +156,7 @@ func TestReconcileClonesAbsentRepo(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestReconcileNestedRelpathClone(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "Forge/private-ai", Origin: h.origin, Trunk: "main"})
 
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestReconcilePresentRepoNotRecloned(t *testing.T) {
 	identityBefore := strings.TrimSpace(h.runGit(dest, "-C", dest, "rev-parse", "HEAD"))
 
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestReconcileBusyRepoReportedBusyAndIntact(t *testing.T) {
 	headBefore := strings.TrimSpace(h.runGit(dest, "rev-parse", "HEAD"))
 
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestReconcileClearsStaleLockAndSyncs(t *testing.T) {
 	}
 
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestReconcileSkipsLocalOnly(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "local", Trunk: "main", LocalOnly: true})
 
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestReconcileNonRepoDirCollisionNotOverwritten(t *testing.T) {
 	h.writeFile(dest, "PRECIOUS.txt", "keep me\n")
 
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
-	results, err := Reconcile(context.Background(), st, "")
+	results, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestReconcileIdempotent(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
-	first, err := Reconcile(context.Background(), st, "")
+	first, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestReconcileIdempotent(t *testing.T) {
 		t.Fatalf("first action = %q, want cloned", resultFor(t, first, "alpha").Action)
 	}
 
-	second, err := Reconcile(context.Background(), st, "")
+	second, err := Reconcile(context.Background(), st)
 	if err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
@@ -487,13 +487,13 @@ func TestReconcileReleasesLock(t *testing.T) {
 	h := newHarness(t)
 	st := h.state(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
 
-	if _, err := Reconcile(context.Background(), st, ""); err != nil {
+	if _, err := Reconcile(context.Background(), st); err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
 	// If the flock were not released, this second call would deadlock; the test
 	// timeout would catch it. Completing proves the lock was released.
 	done := make(chan error, 1)
-	go func() { _, err := Reconcile(context.Background(), st, ""); done <- err }()
+	go func() { _, err := Reconcile(context.Background(), st); done <- err }()
 	select {
 	case err := <-done:
 		if err != nil {

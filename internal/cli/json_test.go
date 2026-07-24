@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,8 +13,8 @@ import (
 	"github.com/yasyf/synckit/rpc"
 	"github.com/yasyf/synckit/syncservice"
 
-	"github.com/yasyf/reposync/internal/env"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/reposync/internal/transfer"
 )
 
 // seedRegistry points the state file at a temp config dir and writes a known
@@ -24,11 +23,17 @@ func seedRegistry(t *testing.T, self string, hosts ...string) {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeMeshState(t)
+	for _, identity := range hosts {
+		fact, err := hostregistry.NewSSHHostFact(identity, "/opt/homebrew/bin/synckitd", nil)
+		if err != nil {
+			t.Fatalf("host fact: %v", err)
+		}
+		if err := hostregistry.Mesh.RegisterHost(t.Context(), fact); err != nil {
+			t.Fatalf("register host: %v", err)
+		}
+	}
 	if _, err := hostregistry.Mesh.Update(t.Context(), func(g *hostregistry.Registry) error {
 		g.Self = self
-		for _, h := range hosts {
-			g.UpsertHost(h)
-		}
 		return nil
 	}); err != nil {
 		t.Fatalf("seed registry: %v", err)
@@ -51,19 +56,16 @@ func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 
 // pipeTransport adapts the exact persistent rpc client to syncservice's typed
 // response envelope for in-process dispatcher tests.
-type pipeTransport struct{ client *rpc.Client }
+type pipeTransport struct{ dispatcher *rpc.Dispatcher }
 
 func (t *pipeTransport) Do(ctx context.Context, req *rpc.Request) (*syncservice.Response, error) {
-	response, err := t.client.Call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
+	response := t.dispatcher.Dispatch(ctx, req)
 	return &syncservice.Response{
 		OK: response.OK, Result: response.Result, Error: response.Error,
 	}, nil
 }
 
-func (t *pipeTransport) Close() error { return t.client.Close() }
+func (*pipeTransport) Close() error { return nil }
 
 // serveConsumer wires a repoConsumer behind the exact spawned-session engine
 // and returns a typed client speaking to it.
@@ -76,8 +78,7 @@ func serveConsumer(t *testing.T) *syncservice.Client {
 	return c
 }
 
-// servePipe wires the full rpc-serve dispatcher (typed contract plus env.get_state)
-// behind the exact spawned-session engine and returns the raw transport.
+// servePipe wires the exact resident service dispatcher to an in-process transport.
 func servePipe(t *testing.T) *pipeTransport {
 	t.Helper()
 	return servePipeDispatcher(t, newServeDispatcher())
@@ -85,23 +86,7 @@ func servePipe(t *testing.T) *pipeTransport {
 
 func servePipeDispatcher(t *testing.T, dispatcher *rpc.Dispatcher) *pipeTransport {
 	t.Helper()
-	server, clientConn := net.Pipe()
-	srvCtx, srvCancel := context.WithCancel(context.Background())
-	srvDone := make(chan error, 1)
-	go func() {
-		srvDone <- rpc.NewServer(dispatcher).ServeSession(srvCtx, server, server)
-	}()
-	t.Cleanup(func() {
-		srvCancel()
-		_ = server.Close()
-		<-srvDone
-	})
-	tx := &pipeTransport{client: rpc.NewClient(rpc.ClientConfig{
-		WireBuild: rpc.WireBuild,
-		Dial:      func(context.Context) (net.Conn, error) { return clientConn, nil },
-	})}
-	t.Cleanup(func() { _ = tx.Close() })
-	return tx
+	return &pipeTransport{dispatcher: dispatcher}
 }
 
 func TestSelfJSONShape(t *testing.T) {
@@ -161,10 +146,9 @@ func TestStatePathUnderTempConfig(t *testing.T) {
 	}
 }
 
-// TestConsumerGetStateEmitsPropagatingRegistryOnly proves svc.get-state, served over
-// rpc-serve, returns the propagating (origin-keyed) registry alone — the local-only
-// repos never cross hosts.
-func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
+// TestConsumerExportEmitsPropagatingRegistryOnly proves transfer payloads never
+// include local-only repos.
+func TestConsumerExportEmitsPropagatingRegistryOnly(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	initializeProductState(t)
 	if _, err := state.Update(t.Context(), func(s *state.State) error {
@@ -175,28 +159,31 @@ func TestConsumerGetStateEmitsPropagatingRegistryOnly(t *testing.T) {
 		t.Fatalf("seed repos: %v", err)
 	}
 
-	raw, err := serveConsumer(t).GetState(t.Context())
+	change, err := serveConsumer(t).Export(t.Context(), syncservice.ExportRequest{
+		ServiceID: state.ToolName, SchemaFingerprint: transfer.Fingerprint,
+		SinceRevision: syncservice.NewRevision(0),
+	})
 	if err != nil {
-		t.Fatalf("get-state: %v", err)
+		t.Fatalf("export: %v", err)
 	}
-
-	var reg map[string]struct {
-		AddedAt   int64 `json:"added_at"`
-		RemovedAt int64 `json:"removed_at"`
-		Value     struct {
-			Relpath   string `json:"relpath"`
-			LocalOnly bool   `json:"local_only"`
-		} `json:"value"`
+	var body struct {
+		Repos map[string]struct {
+			AddedAt   int64 `json:"added_at"`
+			RemovedAt int64 `json:"removed_at"`
+			Value     struct {
+				Relpath   string `json:"relpath"`
+				LocalOnly bool   `json:"local_only"`
+			} `json:"value"`
+		} `json:"repos"`
 	}
-	if err := json.Unmarshal(raw, &reg); err != nil {
-		t.Fatalf("get-state output is not a registry object: %v\n%s", err, raw)
+	if err := json.Unmarshal(change.Payload, &body); err != nil {
+		t.Fatalf("export payload: %v\n%s", err, change.Payload)
 	}
-	if _, ok := reg["https://example.com/cc-review.git"]; !ok {
-		t.Fatalf("propagating repo missing from get-state: %s", raw)
+	if _, ok := body.Repos["https://example.com/cc-review.git"]; !ok {
+		t.Fatalf("propagating repo missing from export: %s", change.Payload)
 	}
-	// Local-only repos must never appear in the cross-host wire form.
-	if strings.Contains(string(raw), "scratch") {
-		t.Fatalf("local-only repo leaked into get-state: %s", raw)
+	if strings.Contains(string(change.Payload), "scratch") {
+		t.Fatalf("local-only repo leaked into export: %s", change.Payload)
 	}
 }
 
@@ -255,7 +242,7 @@ func TestConsumerCapabilities(t *testing.T) {
 	if caps.Name != state.ToolName {
 		t.Fatalf("capabilities name = %q, want %q", caps.Name, state.ToolName)
 	}
-	wantMethods := append(append([]string(nil), syncservice.AllMethods...), env.MethodGetState)
+	wantMethods := syncservice.AllMethods
 	if strings.Join(caps.Methods, ",") != strings.Join(wantMethods, ",") {
 		t.Fatalf("methods = %v, want %v", caps.Methods, wantMethods)
 	}
