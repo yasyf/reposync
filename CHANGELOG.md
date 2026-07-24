@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Pin daemonkit v0.14.0 and Synckit v0.31.0 as the exact resident runtime and
+  revision-delivery dependencies.
 - Replace the spawned stdio and product-owned SSH pull paths with one resident
   `rpc-serve-v1` service. Synckit now owns exact sessions and durable delivery;
   reposync exports and applies an immutable revisioned `reposync-transfer-v1`

@@ -7,8 +7,8 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.10.1-0.20260724034553-236f4a89a851
-	github.com/yasyf/synckit v0.28.1-0.20260724035829-e989076933a5
+	github.com/yasyf/daemonkit v0.14.0
+	github.com/yasyf/synckit v0.31.0
 	golang.org/x/term v0.45.0
 )
 
