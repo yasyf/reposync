@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.17.4 so resident runtime drain settles admitted requests and
+  terminal transport acknowledgements before socket teardown.
+
+## [0.25.0] - 2026-07-24
+
 ### Changed
 - Pin daemonkit v0.17.2 and Synckit v0.33.0. Resident helpers now supply the
   dispatcher resolved for each exact admitted publication.
