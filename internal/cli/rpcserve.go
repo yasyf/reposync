@@ -75,7 +75,7 @@ func runResidentService(ctx context.Context, build string) error {
 	}
 	runtime, err := helperruntime.New(helperruntime.Config{
 		App: helperruntime.App{Name: state.ToolName, RuntimeBuild: build}, Socket: socket,
-		Server: rpc.NewServer(newServeDispatcher()), Workers: workers, Children: children,
+		Dispatcher: newServeDispatcher(), Workers: workers, Children: children,
 		StopStore: &proc.FileStore{Path: filepath.Join(directory, "resident-stop.db")},
 		Prepare:   func(dkdaemon.Activation) (helperruntime.Product, error) { return residentProduct{}, nil },
 	})

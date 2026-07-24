@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Pin daemonkit v0.17.2 and Synckit v0.33.0. Resident helpers now supply the
+  dispatcher resolved for each exact admitted publication.
+
 ## [0.24.0] - 2026-07-23
 
 ### Changed
