@@ -78,12 +78,6 @@ func serveConsumer(t *testing.T) *syncservice.Client {
 	return c
 }
 
-// servePipe wires the exact resident service dispatcher to an in-process transport.
-func servePipe(t *testing.T) *pipeTransport {
-	t.Helper()
-	return servePipeDispatcher(t, newServeDispatcher())
-}
-
 func servePipeDispatcher(t *testing.T, dispatcher *rpc.Dispatcher) *pipeTransport {
 	t.Helper()
 	return &pipeTransport{dispatcher: dispatcher}
