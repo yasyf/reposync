@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-23
+
+### Changed
+- Pin daemonkit v0.15.0 as the exact resident runtime dependency.
+
+## [0.23.0] - 2026-07-23
+
 ### Changed
 - Pin daemonkit v0.14.0 and Synckit v0.31.0 as the exact resident runtime and
   revision-delivery dependencies.
