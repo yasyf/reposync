@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-24
+
+### Changed
+- Pin daemonkit v0.18.0 and synckit v0.35.0, adopting the self-sizing trust
+  verifier lane end to end.
+
 ## [0.26.0] - 2026-07-24
 
 ### Changed
