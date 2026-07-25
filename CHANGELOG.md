@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.3] - 2026-07-24
+
+### Fixed
+- Pin daemonkit v0.19.1 and synckit v0.35.2 so a terminalized runtime worker
+  claim tears down the resident service instead of leaving a process that
+  cannot admit trusted work.
+- Require an annotated tag signed by the fleet release key before any release
+  artifact or Homebrew cask is built or published.
+
 ## [0.27.2] - 2026-07-24
 
 ### Changed
@@ -230,7 +239,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.27.2...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.27.3...HEAD
+[0.27.3]: https://github.com/yasyf/reposync/compare/v0.27.2...v0.27.3
 [0.27.2]: https://github.com/yasyf/reposync/compare/v0.27.1...v0.27.2
 [0.24.0]: https://github.com/yasyf/reposync/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/yasyf/reposync/compare/v0.22.0...v0.23.0
