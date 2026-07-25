@@ -6,6 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Pin synckit v0.35.1 so the shipped binary uses the fleet's final runtime
+  dependency set.
+
 ## [0.27.0] - 2026-07-24
 
 ### Changed
