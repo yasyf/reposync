@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.5] - 2026-07-27
+
+### Fixed
+- Pin daemonkit v0.20.9 so the helper resolves its real home from the passwd
+  database: an install run under Homebrew postinstall's sandboxed temp HOME
+  now registers with launchd against the true home, a `launchctl` exit 5 is
+  reported instead of retried as transient, and recovery-mode reconcile
+  clears an install that wedged itself.
+
 ## [0.27.4] - 2026-07-25
 
 ### Fixed
@@ -246,7 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.27.4...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.27.5...HEAD
+[0.27.5]: https://github.com/yasyf/reposync/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/yasyf/reposync/compare/v0.27.3...v0.27.4
 [0.27.3]: https://github.com/yasyf/reposync/compare/v0.27.2...v0.27.3
 [0.27.2]: https://github.com/yasyf/reposync/compare/v0.27.1...v0.27.2
