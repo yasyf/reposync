@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yasyf/daemonkit/durable"
 	"github.com/yasyf/synckit/hostregistry"
 )
 
@@ -26,6 +27,23 @@ func initializeState(t *testing.T) {
 	t.Helper()
 	if err := Initialize(context.Background()); err != nil {
 		t.Fatalf("Initialize: %v", err)
+	}
+}
+
+// TestErrLockBusyAliasesDurable pins the cross-module identity the TUI's
+// busy-lock branch matches on: daemonkit's durable.ErrLockBusy through
+// hostregistry's alias to this package's. Re-declaring any link as a fresh
+// errors.New breaks every errors.Is across the fleet without a compile error.
+func TestErrLockBusyAliasesDurable(t *testing.T) {
+	if !errors.Is(ErrLockBusy, durable.ErrLockBusy) {
+		t.Fatal("ErrLockBusy no longer resolves to durable.ErrLockBusy")
+	}
+	if !errors.Is(hostregistry.ErrLockBusy, durable.ErrLockBusy) {
+		t.Fatal("hostregistry.ErrLockBusy no longer aliases durable.ErrLockBusy")
+	}
+	wrapped := fmt.Errorf("acquire reconcile lock: %w", ErrLockBusy)
+	if !errors.Is(wrapped, durable.ErrLockBusy) {
+		t.Fatal("a wrapped ErrLockBusy no longer matches durable.ErrLockBusy")
 	}
 }
 

@@ -40,7 +40,7 @@ func reposyncManifest() manifest.Manifest {
 			Debounce: codec.Duration(watchDebounce),
 		},
 		Service: manifest.ServiceSpec{
-			Kind: "resident", Socket: "~/.config/reposync/rpc.sock",
+			Kind:              "resident",
 			SchemaFingerprint: transfer.Fingerprint,
 		},
 		Helper: &manifest.HelperSpec{Command: "rpc-serve-v1", SessionType: manifest.SessionTypeBackground},

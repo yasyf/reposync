@@ -5,12 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+# PRs only: cancelling in-progress runs on main leaves landed commits with no
+# CI verdict.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
+# Timeouts kill a wedged test in minutes instead of GitHub's 6-hour cap.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # macOS only: daemonkit is a macOS library as of v0.21.0 and no longer
+    # compiles off darwin, so every job that builds this module needs a darwin
+    # host.
+    runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -20,7 +31,7 @@ jobs:
       - name: Install jj
         run: |
           version=0.42.0
-          tarball=jj-v${version}-x86_64-unknown-linux-musl.tar.gz
+          tarball=jj-v${version}-aarch64-apple-darwin.tar.gz
           curl -fsSL -o /tmp/jj.tar.gz \
             "https://github.com/jj-vcs/jj/releases/download/v${version}/${tarball}"
           sudo tar -xzf /tmp/jj.tar.gz -C /usr/local/bin ./jj
@@ -32,8 +43,14 @@ jobs:
       - name: Build
         run: go build ./...
 
+  # Static analysis type-checks the tree, so it runs for darwin. GOOS/GOARCH
+  # keep it on a cheap linux runner instead of billing macOS minutes 10x.
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -47,6 +64,10 @@ jobs:
 
   vuln:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOS: darwin
+      GOARCH: arm64
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -55,5 +76,5 @@ jobs:
           cache: true
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOOS='' GOARCH='' go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...

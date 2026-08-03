@@ -4,7 +4,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.28.0] - 2026-08-03
+
+### Removed
+- Linux builds. The release ships `darwin/amd64` and `darwin/arm64` alone.
+  reposync's mesh was always Mac-only in practice: synckitd runs as a launchd
+  LaunchAgent, install is a Homebrew cask, and host state shares a flock with
+  synckit's host identity. A Linux host could hold the binary but never join a
+  mesh. Pinning the macOS-only daemonkit v0.21.2 makes that explicit.
+
+### Changed
+- Re-run `reposync install` after upgrading. The resident service's socket now
+  derives from its launchd label instead of sitting at
+  `~/.config/reposync/rpc.sock`, so `service.socket` is gone from the
+  registered manifest. synckitd decodes manifests strictly and skips one that
+  still carries that key, logging the skip and surfacing it in status. Other
+  tools keep syncing; reposync sits out until its manifest is regenerated.
+- Pin daemonkit v0.21.2 and synckit v0.37.0. daemonkit's surface dropped from
+  1,272 exported symbols to 510: the transfer ledger's lock and write move to
+  `durable.AcquireLock` and `durable.WriteFile`, the resident service drops its
+  worker pool and child manager for the process ownership daemonkit hands the
+  product, and the trust verifier-child re-exec branch goes away with the
+  package that dispatched it.
 
 ## [0.27.5] - 2026-07-27
 
@@ -255,7 +276,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.27.5...HEAD
+[0.28.0]: https://github.com/yasyf/reposync/compare/v0.27.5...v0.28.0
 [0.27.5]: https://github.com/yasyf/reposync/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/yasyf/reposync/compare/v0.27.3...v0.27.4
 [0.27.3]: https://github.com/yasyf/reposync/compare/v0.27.2...v0.27.3

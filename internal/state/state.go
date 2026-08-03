@@ -270,11 +270,6 @@ func Path() (string, error) {
 	return Config.Path()
 }
 
-// SockPath returns the absolute path to the daemon's RPC unix socket.
-func SockPath() (string, error) {
-	return Config.SockPath()
-}
-
 // Load reads the exact schema v1 repo-sync payload.
 func Load() (*State, error) {
 	raw, err := Config.LoadProduct()

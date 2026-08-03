@@ -22,7 +22,8 @@ func TestReposyncManifestUsesStrictSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if bytes.Contains(payload, []byte(`"backend"`)) || bytes.Contains(payload, []byte(`"launchd"`)) {
+	if bytes.Contains(payload, []byte(`"backend"`)) || bytes.Contains(payload, []byte(`"launchd"`)) ||
+		bytes.Contains(payload, []byte(`"socket"`)) {
 		t.Fatalf("manifest contains removed fields: %s", payload)
 	}
 	path := filepath.Join(t.TempDir(), "reposync.json")
@@ -36,8 +37,8 @@ func TestReposyncManifestUsesStrictSchema(t *testing.T) {
 	if time.Duration(loaded.Watch.Debounce) != watchDebounce {
 		t.Fatalf("watch debounce = %v, want %v", time.Duration(loaded.Watch.Debounce), watchDebounce)
 	}
-	if loaded.Service.Kind != "resident" || loaded.Service.Socket != "~/.config/reposync/rpc.sock" {
-		t.Fatalf("service = %+v, want resident socket", loaded.Service)
+	if loaded.Service.Kind != "resident" {
+		t.Fatalf("service = %+v, want resident", loaded.Service)
 	}
 	if loaded.Service.SchemaFingerprint != transfer.Fingerprint {
 		t.Fatalf("schema fingerprint = %q, want %q", loaded.Service.SchemaFingerprint, transfer.Fingerprint)

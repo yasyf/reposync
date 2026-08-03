@@ -15,8 +15,7 @@ import (
 	"strings"
 	"time"
 
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
+	"github.com/yasyf/daemonkit/durable"
 
 	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
@@ -259,10 +258,9 @@ func withLedger(ctx context.Context, write bool, apply func(*ledger) error) erro
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	lock, err := (proc.FileLockSpec{
-		Path: filepath.Join(directory, lockFile), Mode: proc.FileLockExclusive,
-		Deadline: 30 * time.Second,
-	}).Acquire(ctx)
+	lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	lock, err := durable.AcquireLock(lockCtx, filepath.Join(directory, lockFile))
 	if err != nil {
 		return err
 	}
@@ -291,7 +289,7 @@ func withLedger(ctx context.Context, write bool, apply func(*ledger) error) erro
 	if err != nil {
 		return err
 	}
-	return dkdaemon.WriteFileDurable(path, append(raw, '\n'), 0o600)
+	return durable.WriteFile(path, append(raw, '\n'), 0o600)
 }
 
 func readLedger(path string) (*ledger, error) {

@@ -4,13 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
-	dkdaemon "github.com/yasyf/daemonkit/daemon"
-	"github.com/yasyf/daemonkit/proc"
-	"github.com/yasyf/daemonkit/worker"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/helperruntime"
 	"github.com/yasyf/synckit/rpc"
@@ -21,15 +17,13 @@ import (
 	"github.com/yasyf/reposync/internal/transfer"
 )
 
-const residentProcessLimit = 16
-
-func newRPCServeCmd(build string) *cobra.Command {
+func newRPCServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rpc-serve-v1",
 		Short: "Run the resident revisioned sync service for synckitd.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runResidentService(cmd.Context(), build)
+			return runResidentService(cmd.Context())
 		},
 	}
 	return cmd
@@ -40,44 +34,19 @@ type residentProduct struct{}
 func (residentProduct) Drain(context.Context) error { return nil }
 func (residentProduct) Close(context.Context) error { return nil }
 
-func runResidentService(ctx context.Context, build string) error {
+func runResidentService(ctx context.Context) error {
 	if err := state.Initialize(ctx); err != nil {
 		return err
 	}
-	directory, err := state.Dir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return err
-	}
-	generation, err := proc.ProcessGeneration()
-	if err != nil {
-		return err
-	}
-	workers, err := worker.NewPool(worker.Config{
-		Capacity: residentProcessLimit, QueueCapacity: residentProcessLimit,
-		MaxTotalRun: 12 * time.Minute, MaxStdinBytes: 16 << 20,
-		MaxStdoutBytes: 16 << 20, MaxStderrBytes: 1 << 20,
-	}, &proc.Reaper{Store: &proc.FileStore{Path: filepath.Join(directory, "resident-workers.db")}, Generation: generation})
-	if err != nil {
-		return err
-	}
-	children, err := proc.NewManager(residentProcessLimit, &proc.Reaper{
-		Store: &proc.FileStore{Path: filepath.Join(directory, "resident-children.db")}, Generation: generation,
-	})
-	if err != nil {
-		return err
-	}
-	socket, err := state.SockPath()
+	program, err := daemonkit.Stable()
 	if err != nil {
 		return err
 	}
 	runtime, err := helperruntime.New(helperruntime.Config{
-		App: helperruntime.App{Name: state.ToolName, RuntimeBuild: build}, Socket: socket,
-		Dispatcher: newServeDispatcher(), Workers: workers, Children: children,
-		StopStore: &proc.FileStore{Path: filepath.Join(directory, "resident-stop.db")},
-		Prepare:   func(dkdaemon.Activation) (helperruntime.Product, error) { return residentProduct{}, nil },
+		App:        helperruntime.App{Name: state.ToolName},
+		Program:    program,
+		Dispatcher: newServeDispatcher(),
+		Prepare:    func(daemonkit.Ctx) (helperruntime.Product, error) { return residentProduct{}, nil },
 	})
 	if err != nil {
 		return err
