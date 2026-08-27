@@ -2,12 +2,14 @@ module github.com/yasyf/reposync
 
 go 1.26.5
 
+toolchain go1.26.6
+
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
-	github.com/yasyf/daemonkit v0.21.2
+	github.com/yasyf/daemonkit v0.22.0
 	github.com/yasyf/synckit v0.37.0
 	golang.org/x/term v0.45.0
 )
