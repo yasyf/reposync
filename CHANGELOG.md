@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.29.0] - 2026-08-29
+
+### Changed
+- Pin daemonkit v0.23.0. Per-daemon state moves to `~/.daemonkit/a/<label>`,
+  shortening the state root so labels with long nonce hashes clear darwin's
+  104-byte `sun_path` limit. State is abandoned, not migrated, by decision:
+  daemonkit reads nothing under the old root, so any directory reposync
+  created there before this release is dead and safe to remove by hand.
+
 ## [0.28.0] - 2026-08-03
 
 ### Removed
@@ -276,6 +287,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/yasyf/reposync/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/yasyf/reposync/compare/v0.27.5...v0.28.0
 [0.27.5]: https://github.com/yasyf/reposync/compare/v0.27.4...v0.27.5
 [0.27.4]: https://github.com/yasyf/reposync/compare/v0.27.3...v0.27.4
