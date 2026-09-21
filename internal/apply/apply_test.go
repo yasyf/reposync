@@ -101,6 +101,21 @@ func (h *harness) seedState(repos ...state.Repo) {
 	}
 }
 
+// branchOrigin seeds a second bare origin whose default branch is branch.
+func (h *harness) branchOrigin(name, branch string) string {
+	h.t.Helper()
+	origin := filepath.Join(h.root, name+".git")
+	seed := filepath.Join(h.root, name+"-seed")
+	h.runGit(h.root, "init", "--bare", "-b", branch, origin)
+	h.runGit(h.root, "clone", origin, seed)
+	h.configGit(seed)
+	h.writeFile(seed, "README.md", "hello\n")
+	h.runGit(seed, "add", "README.md")
+	h.runGit(seed, "commit", "-q", "-m", "init")
+	h.runGit(seed, "push", "-q", "origin", branch)
+	return origin
+}
+
 func (h *harness) configGit(dir string) {
 	h.t.Helper()
 	h.runGit(dir, "config", "user.name", "Test User")
@@ -197,6 +212,33 @@ func TestApplyReposEnableClonesAndPersists(t *testing.T) {
 	}
 	if repo.LocalOnly {
 		t.Fatal("persisted alpha marked local-only, want tracked-with-origin")
+	}
+}
+
+// TestApplyReposDetectsTrunkFromOrigin proves the registered trunk comes from the
+// checkout's origin at enable time rather than a hardcoded "main": a repo already
+// on disk whose origin defaults to `release` is registered on that branch.
+func TestApplyReposDetectsTrunkFromOrigin(t *testing.T) {
+	h := newHarness(t)
+	h.seedState()
+	origin := h.branchOrigin("release", "release")
+	h.runGit(h.root, "clone", origin, filepath.Join(h.dataLoc, "beta"))
+
+	sel := RepoSelection{
+		Enable: []discover.Candidate{
+			{Relpath: "beta", Origin: origin, Kind: "git"},
+		},
+	}
+	if _, err := Repos(context.Background(), sel); err != nil {
+		t.Fatalf("ApplyRepos: %v", err)
+	}
+
+	repo, ok := loadRepo(t, "beta")
+	if !ok {
+		t.Fatal("beta not present in persisted state after enable")
+	}
+	if repo.Trunk != "release" {
+		t.Fatalf("persisted trunk = %q, want release (origin's default branch)", repo.Trunk)
 	}
 }
 

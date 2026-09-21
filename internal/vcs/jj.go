@@ -492,8 +492,9 @@ func (r *jjRepo) conflictList(ctx context.Context) ([]string, error) {
 		}
 		return nil, err
 	}
-	var paths []string
-	for _, line := range strings.Split(out, "\n") {
+	lines := strings.Split(out, "\n")
+	paths := make([]string, 0, len(lines))
+	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}

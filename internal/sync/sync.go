@@ -1,14 +1,18 @@
 // Package sync runs the idle-safe per-repo fetch-and-advance flow over every
 // registered repo, composing internal/vcs. It never clobbers in-progress work: a
 // busy or non-trunk repo is left untouched. It pushes local trunk back to origin
-// only as a clean fast-forward, and only once a repo has been quiet past PushAfter.
+// only as a clean fast-forward, only once a repo has been quiet past PushAfter,
+// and only to a GitHub repo this host's gh login owns.
 package sync
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,10 +38,9 @@ type Result struct {
 }
 
 // Sync advances every registered repo onto its trunk, idle-safe, and fast-forward
-// pushes local trunk back to origin once a repo has been quiet past PushAfter.
-// When repoFilter is non-empty only the repo whose absolute path or relpath
-// matches it is synced; an unmatched filter is an error. origin is the optional
-// anti-echo provenance tag from the watcher, currently advisory.
+// pushes trunk back to the origins this host's gh login owns, once quiet past
+// PushAfter. A non-empty repoFilter selects one repo by absolute path or relpath;
+// an unmatched filter is an error. origin is the watcher's anti-echo tag, advisory.
 func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result, error) {
 	dl, err := st.DefaultLocationExpanded()
 	if err != nil {
@@ -52,6 +55,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 	idle := time.Duration(st.Settings.IdleThreshold)
 	pushAfter := time.Duration(st.Settings.PushAfter)
 	repoOpTimeout := time.Duration(st.Settings.RepoOpTimeout)
+	allowed := ownedBy(githubLogin(ctx, repoOpTimeout))
 	results := make([]Result, len(targets))
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -61,7 +65,7 @@ func Sync(ctx context.Context, st *state.State, repoFilter, _ string) ([]Result,
 		go func(i int, repo state.Repo) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle, pushAfter, repoOpTimeout)
+			results[i] = syncOne(ctx, repo, repo.AbsPath(dl), idle, pushAfter, repoOpTimeout, allowed)
 		}(i, repo)
 	}
 	wg.Wait()
@@ -85,7 +89,7 @@ func selectRepos(st *state.State, dl, repoFilter string) ([]state.Repo, error) {
 	return nil, fmt.Errorf("repo not registered: %s", repoFilter)
 }
 
-func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAfter, repoOpTimeout time.Duration) Result {
+func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAfter, repoOpTimeout time.Duration, allowed pushPolicy) Result {
 	ctx, cancel := context.WithTimeout(ctx, repoOpTimeout)
 	defer cancel()
 
@@ -141,11 +145,24 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 	if outcome != vcs.OutcomeUpToDate && outcome != vcs.OutcomeAdvanced {
 		return res
 	}
+	if repo.Origin == "" {
+		return res
+	}
 	busy, _, err = r.InUse(ctx, pushAfter)
 	if err != nil {
 		return failure(res, err)
 	}
 	if busy {
+		return res
+	}
+	// The registry origin authorizes nothing: the push follows the checkout's own
+	// remote, pushurl included, so that is what has to clear the policy.
+	urls, err := vcs.PushURLs(ctx, abspath)
+	if err != nil {
+		log.Printf("sync: %s: push skipped, cannot resolve where origin pushes: %v", repo.Relpath, err)
+		return res
+	}
+	if !allowed(urls) {
 		return res
 	}
 	pushed, err := r.PushTrunk(ctx)
@@ -156,6 +173,91 @@ func syncOne(ctx context.Context, repo state.Repo, abspath string, idle, pushAft
 		res.Outcome = vcs.OutcomePushed
 	}
 	return res
+}
+
+// pushPolicy decides whether a repo's resolved push destinations may be pushed to.
+type pushPolicy func(urls []string) bool
+
+// ownedBy approves a push only when every destination is a GitHub repo login
+// owns. A destination it cannot read as owned — another owner, another host, a
+// local path — and an empty destination list approve nothing.
+func ownedBy(login string) pushPolicy {
+	return func(urls []string) bool {
+		if len(urls) == 0 {
+			return false
+		}
+		for _, u := range urls {
+			if !ownsOrigin(u, login) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// githubLogin resolves this host's GitHub login through gh, returning "" when gh
+// is missing or unauthenticated: an unresolvable identity owns nothing.
+func githubLogin(ctx context.Context, timeout time.Duration) string {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// remoteSchemes are the network URL schemes a github.com remote can carry. A
+// local path or file:// URL names no GitHub repo, whatever it spells.
+var remoteSchemes = map[string]bool{"https": true, "http": true, "ssh": true, "git": true}
+
+// ownsOrigin reports whether origin is a GitHub repo owned by login. Anything
+// else — another owner, another host, a local path, an unresolved login — is
+// never pushed to.
+func ownsOrigin(origin, login string) bool {
+	if login == "" {
+		return false
+	}
+	return strings.EqualFold(originOwner(origin), login)
+}
+
+// originOwner extracts the owner from a github.com remote URL, or "" when origin
+// names no github.com repo.
+func originOwner(origin string) string {
+	host, path := splitRemote(origin)
+	if !strings.EqualFold(host, "github.com") {
+		return ""
+	}
+	owner, repo, ok := strings.Cut(strings.TrimPrefix(path, "/"), "/")
+	if !ok || owner == "" || repo == "" {
+		return ""
+	}
+	return owner
+}
+
+// splitRemote separates a remote URL into host and path, covering the two shapes
+// git accepts over the network: scheme://[user@]host[:port]/path, and scp-style
+// [user@]host:path. Anything else — a local path, a file:// URL, an unknown
+// scheme — has no host and splits to "".
+func splitRemote(origin string) (host, path string) {
+	if scheme, _, ok := strings.Cut(origin, "://"); ok {
+		if !remoteSchemes[strings.ToLower(scheme)] {
+			return "", ""
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return "", ""
+		}
+		return u.Hostname(), u.Path
+	}
+	hostPart, p, ok := strings.Cut(origin, ":")
+	if !ok || strings.Contains(hostPart, "/") {
+		return "", ""
+	}
+	if _, after, hasUser := strings.Cut(hostPart, "@"); hasUser {
+		hostPart = after
+	}
+	return hostPart, p
 }
 
 // failure fills res for a failed repo op, mapping working-copy contention —

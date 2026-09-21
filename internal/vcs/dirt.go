@@ -5,49 +5,79 @@ import (
 	"strings"
 )
 
-// dirtState classifies a git working tree's uncommitted changes. clean is true
-// when nothing is dirty; generatedOnly is true when the tree is dirty and every
-// dirty path is marked linguist-generated; generated is the list of dirty paths
-// that are generated.
-func dirtState(ctx context.Context, path string) (clean, generatedOnly bool, generated []string, err error) {
+const untrackedStatus = "??"
+
+// dirtyPath is one dirty path and the porcelain status code of its record.
+type dirtyPath struct {
+	path   string
+	status string
+}
+
+// dirt is a git working tree's uncommitted changes, classified: generated is
+// the dirty paths marked linguist-generated, untracked is every untracked path
+// (generated or not), blocking is the dirty paths that are tracked and not
+// generated. An untracked path is never blocking — a fast-forward leaves it
+// where it is, or declines rather than clobber it.
+type dirt struct {
+	generated []string
+	untracked []string
+	blocking  []string
+}
+
+func dirtState(ctx context.Context, path string) (dirt, error) {
 	status, err := run(ctx, path, "git", "-C", path, "status", "--porcelain", "-uall", "-z")
 	if err != nil {
-		return false, false, nil, err
+		return dirt{}, err
 	}
 	dirty := parsePorcelainZ(status)
 	if len(dirty) == 0 {
-		return true, false, nil, nil
+		return dirt{}, nil
 	}
-	gen, err := generatedPaths(ctx, path, dirty)
+	paths := make([]string, 0, len(dirty))
+	for _, d := range dirty {
+		paths = append(paths, d.path)
+	}
+	generated, err := generatedPaths(ctx, path, paths)
 	if err != nil {
-		return false, false, nil, err
+		return dirt{}, err
 	}
-	return false, len(gen) == len(dirty), gen, nil
+	isGenerated := pathSet(generated)
+	state := dirt{generated: generated}
+	for _, d := range dirty {
+		if d.status == untrackedStatus {
+			state.untracked = append(state.untracked, d.path)
+			continue
+		}
+		if _, ok := isGenerated[d.path]; ok {
+			continue
+		}
+		state.blocking = append(state.blocking, d.path)
+	}
+	return state, nil
 }
 
-// parsePorcelainZ extracts the dirty paths from each record of `git status
-// --porcelain -z` output. Rename and copy records emit the new path in the
-// status record and the old path as a bare following record; both endpoints are
-// returned so a rename of a non-generated file into a generated-named path is
-// still classified by its source and never mistaken for generated-only dirt.
-func parsePorcelainZ(out string) []string {
+// parsePorcelainZ extracts the dirty paths and status codes of `git status
+// --porcelain -z` output. A rename or copy emits the old path as a bare
+// following record; both endpoints are returned under the record's status, so
+// a rename of real work into a generated-named path stays blocking dirt.
+func parsePorcelainZ(out string) []dirtyPath {
 	records := strings.Split(out, "\x00")
-	var paths []string
+	var dirty []dirtyPath
 	for i := 0; i < len(records); i++ {
 		rec := records[i]
 		if rec == "" {
 			continue
 		}
-		x := rec[0]
-		paths = append(paths, rec[3:])
-		if x == 'R' || x == 'C' {
+		status := rec[:2]
+		dirty = append(dirty, dirtyPath{path: rec[3:], status: status})
+		if status[0] == 'R' || status[0] == 'C' {
 			i++
 			if i < len(records) && records[i] != "" {
-				paths = append(paths, records[i])
+				dirty = append(dirty, dirtyPath{path: records[i], status: status})
 			}
 		}
 	}
-	return paths
+	return dirty
 }
 
 // generatedPaths returns the subset of paths whose linguist-generated attribute

@@ -20,7 +20,7 @@ func ScanNames(root string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scan env files in %s: %w", root, err)
 	}
-	var names []string
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		if !matchesPattern(name) {

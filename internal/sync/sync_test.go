@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,43 @@ func (h *harness) localAhead(dest, name, content string) string {
 func (h *harness) localMain(dest string) string {
 	h.t.Helper()
 	return strings.TrimSpace(h.RunGit(dest, "rev-parse", "main"))
+}
+
+const testLogin = "tester"
+
+// ghOrigin is a GitHub-form origin owned by testLogin. A registry origin is an
+// identifier, not a transport — the checkout's own remote is the fixture's bare
+// origin — so the push gate runs against GitHub URLs while the push stays local.
+func ghOrigin(relpath string) string {
+	return "https://github.com/" + testLogin + "/" + relpath + ".git"
+}
+
+// bareClone makes a bare clone of the fixture origin: a second push destination
+// whose history the checkout's trunk can fast-forward.
+func (h *harness) bareClone(name string) string {
+	h.t.Helper()
+	dest := filepath.Join(h.Root, name+".git")
+	h.RunGit(h.Root, "clone", "--bare", h.Origin, dest)
+	return dest
+}
+
+// syncOneWith runs the per-repo sync under an explicit push policy, the seam Sync
+// fills from `gh api user`: a fixture's push destination is a local path, which no
+// real login owns, so tests that are not about ownership supply their own policy.
+func (h *harness) syncOneWith(repo state.Repo, allowed pushPolicy, pushAfter time.Duration) Result {
+	h.t.Helper()
+	return syncOne(context.Background(), repo, repo.AbsPath(h.dataLoc), time.Nanosecond, pushAfter, time.Minute, allowed)
+}
+
+// allowAll approves every destination, isolating the gate a test is about.
+func allowAll([]string) bool { return true }
+
+// capture records the destinations the policy was asked about, then approves them.
+func capture(seen *[]string) pushPolicy {
+	return func(urls []string) bool {
+		*seen = urls
+		return true
+	}
 }
 
 // TestFailureMapsContentionToBusy proves a working-copy contention error from a
@@ -438,14 +476,8 @@ func TestSyncPushesQuietAheadRepo(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
 	wantMain := h.localAhead(dest, "feature.txt", "shipped locally\n")
-	// Both gates open (IdleThreshold and PushAfter default to 1ns via h.state).
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
-	results, err := Sync(context.Background(), st, "", "")
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	res := resultFor(t, results, "alpha")
+	res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, allowAll, time.Nanosecond)
 	if res.Err != nil {
 		t.Fatalf("alpha err: %v", res.Err)
 	}
@@ -457,23 +489,186 @@ func TestSyncPushesQuietAheadRepo(t *testing.T) {
 	}
 }
 
+// TestSyncAuthorizesCheckoutPushDestination proves what the policy actually gets
+// asked about: the checkout's own push destination, never the registry origin. A
+// configured pushurl is the destination, and the push lands there.
+func TestSyncAuthorizesCheckoutPushDestination(t *testing.T) {
+	t.Run("plain remote", func(t *testing.T) {
+		h := newHarness(t)
+		dest := h.jjClone("alpha")
+		wantMain := h.localAhead(dest, "feature.txt", "shipped locally\n")
+
+		var seen []string
+		repo := state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}
+		res := h.syncOneWith(repo, capture(&seen), time.Nanosecond)
+		if res.Err != nil {
+			t.Fatalf("alpha err: %v", res.Err)
+		}
+		if !slices.Equal(seen, []string{h.Origin}) {
+			t.Fatalf("policy saw %v, want the checkout remote %q, not the registry origin %q", seen, h.Origin, repo.Origin)
+		}
+		if got := h.OriginMain(); got != wantMain {
+			t.Fatalf("origin main = %q, want local main %q", got, wantMain)
+		}
+	})
+
+	t.Run("pushurl wins over the fetch url", func(t *testing.T) {
+		h := newHarness(t)
+		dest := h.jjClone("alpha")
+		pushTarget := h.bareClone("pushtarget")
+		h.RunGit(dest, "remote", "set-url", "--push", "origin", pushTarget)
+		wantMain := h.localAhead(dest, "feature.txt", "shipped locally\n")
+		fetchOriginBefore := h.OriginMain()
+
+		var seen []string
+		res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, capture(&seen), time.Nanosecond)
+		if res.Err != nil {
+			t.Fatalf("alpha err: %v", res.Err)
+		}
+		if !slices.Equal(seen, []string{pushTarget}) {
+			t.Fatalf("policy saw %v, want the pushurl %q", seen, pushTarget)
+		}
+		if got := strings.TrimSpace(h.RunGit(h.Root, "-C", pushTarget, "rev-parse", "main")); got != wantMain {
+			t.Fatalf("pushurl target main = %q, want local main %q", got, wantMain)
+		}
+		if got := h.OriginMain(); got != fetchOriginBefore {
+			t.Fatalf("fetch origin main moved from %q to %q, want unchanged", fetchOriginBefore, got)
+		}
+	})
+}
+
+// TestSyncNoPushWhenDestinationNotOwned proves the gate holds where it matters:
+// an owned-looking registry origin does not authorize a push to a destination the
+// policy rejects, a pushurl the login does not own is never pushed to, and an
+// origin remote that cannot be resolved at all fails closed.
+func TestSyncNoPushWhenDestinationNotOwned(t *testing.T) {
+	cases := []struct {
+		id      string
+		origin  string
+		allowed pushPolicy
+		setup   func(h *harness, dest string)
+	}{
+		{
+			id:      "registry origin is owned but the checkout pushes elsewhere",
+			origin:  ghOrigin("alpha"),
+			allowed: ownedBy(testLogin),
+		},
+		{
+			id:      "pushurl is not owned",
+			origin:  ghOrigin("alpha"),
+			allowed: ownedBy(testLogin),
+			setup: func(h *harness, dest string) {
+				h.RunGit(dest, "remote", "set-url", "--push", "origin", h.extraOrigin("pushtarget"))
+			},
+		},
+		{
+			id:      "unresolvable login owns nothing",
+			origin:  ghOrigin("alpha"),
+			allowed: ownedBy(""),
+		},
+		{
+			id:      "origin remote is gone",
+			origin:  ghOrigin("alpha"),
+			allowed: allowAll,
+			setup: func(h *harness, dest string) {
+				h.RunGit(dest, "remote", "remove", "origin")
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			h := newHarness(t)
+			dest := h.jjClone("alpha")
+			h.localAhead(dest, "feature.txt", "shipped locally\n")
+			if c.setup != nil {
+				c.setup(h, dest)
+			}
+			originBefore := h.OriginMain()
+
+			res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: c.origin, Trunk: "main"}, c.allowed, time.Nanosecond)
+			if res.Outcome == vcs.OutcomePushed {
+				t.Fatal("alpha outcome = pushed, want the push skipped")
+			}
+			if got := h.OriginMain(); got != originBefore {
+				t.Fatalf("origin main moved from %q to %q, want unchanged", originBefore, got)
+			}
+		})
+	}
+}
+
+func TestOwnedBy(t *testing.T) {
+	cases := []struct {
+		id    string
+		urls  []string
+		login string
+		want  bool
+	}{
+		{"single owned destination", []string{ghOrigin("alpha")}, testLogin, true},
+		{"every destination owned", []string{ghOrigin("alpha"), "git@github.com:tester/beta.git"}, testLogin, true},
+		{"one unowned destination rejects all", []string{ghOrigin("alpha"), "https://github.com/someone/beta.git"}, testLogin, false},
+		{"local destination", []string{"/tmp/bare.git"}, testLogin, false},
+		{"no destinations", nil, testLogin, false},
+		{"unresolvable login", []string{ghOrigin("alpha")}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			if got := ownedBy(c.login)(c.urls); got != c.want {
+				t.Fatalf("ownedBy(%q)(%v) = %v, want %v", c.login, c.urls, got, c.want)
+			}
+		})
+	}
+}
+
+func TestOwnsOrigin(t *testing.T) {
+	cases := []struct {
+		id     string
+		origin string
+		login  string
+		want   bool
+	}{
+		{"https", "https://github.com/yasyf/reposync", "yasyf", true},
+		{"https with .git", "https://github.com/yasyf/reposync.git", "yasyf", true},
+		{"ssh url", "ssh://git@github.com/yasyf/reposync", "yasyf", true},
+		{"scp style", "git@github.com:yasyf/reposync.git", "yasyf", true},
+		{"owner case-insensitive", "git@github.com:YasyF/reposync.git", "yasyf", true},
+		{"host case-insensitive", "https://GitHub.com/yasyf/reposync.git", "yasyf", true},
+		{"https explicit port", "https://github.com:443/yasyf/reposync.git", "yasyf", true},
+		{"ssh explicit port", "ssh://git@github.com:22/yasyf/reposync.git", "yasyf", true},
+		{"git scheme", "git://github.com/yasyf/reposync.git", "yasyf", true},
+		{"other owner https", "https://github.com/someone/reposync.git", "yasyf", false},
+		{"other owner scp", "git@github.com:someone/reposync.git", "yasyf", false},
+		{"other host", "git@gitlab.com:yasyf/reposync.git", "yasyf", false},
+		{"github in the path of another host", "https://git.example/mirror@github.com/yasyf/reposync.git", "yasyf", false},
+		{"github in a scp path", "git@git.example:github.com/yasyf/reposync.git", "yasyf", false},
+		{"local-only repo", "", "yasyf", false},
+		{"local path origin", "/Users/yasyf/Code/reposync", "yasyf", false},
+		{"relative path spelled like the host", "github.com/yasyf/reposync.git", "yasyf", false},
+		{"file url spelled like the host", "file://github.com/yasyf/reposync.git", "yasyf", false},
+		{"unresolved login", "https://github.com/yasyf/reposync.git", "", false},
+		{"owner but no repo", "https://github.com/yasyf", "yasyf", false},
+		{"trailing slash, empty repo", "https://github.com/yasyf/", "yasyf", false},
+		{"host only", "https://github.com/", "yasyf", false},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			if got := ownsOrigin(c.origin, c.login); got != c.want {
+				t.Fatalf("ownsOrigin(%q, %q) = %v, want %v", c.origin, c.login, got, c.want)
+			}
+		})
+	}
+}
+
 // TestSyncNoPushWhenRecentlyActive proves the quiet gate: an ahead repo that has
 // been active within PushAfter is not pushed even though Advance succeeds.
 func TestSyncNoPushWhenRecentlyActive(t *testing.T) {
 	h := newHarness(t)
 	dest := h.jjClone("alpha")
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
-	// IdleThreshold stays 1ns (Advance reaches the push check); PushAfter=1h makes
-	// the just-created clone look recently active, closing the push gate.
-	st.Settings.PushAfter = state.Duration(time.Hour)
 
 	originBefore := h.OriginMain()
-	results, err := Sync(context.Background(), st, "", "")
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	res := resultFor(t, results, "alpha")
+	// Idle stays 1ns (Advance reaches the push check); PushAfter=1h makes the
+	// just-created clone look recently active, closing the push gate.
+	res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, allowAll, time.Hour)
 	if res.Err != nil {
 		t.Fatalf("alpha err: %v", res.Err)
 	}
@@ -493,15 +688,10 @@ func TestSyncNoPushWhenDiverged(t *testing.T) {
 	dest := h.jjClone("alpha")
 	h.localAhead(dest, "feature.txt", "shipped locally\n")
 	originBefore := h.AdvanceOrigin("v2")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
-	results, err := Sync(context.Background(), st, "", "")
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
 	// jj classifies a diverged (conflicted) bookmark structurally, like git: no
 	// error, diverged, and crucially origin is not force-moved.
-	res := resultFor(t, results, "alpha")
+	res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, allowAll, time.Nanosecond)
 	if res.Err != nil {
 		t.Fatalf("diverged repo: want no error (diverged decline like git), got %v", res.Err)
 	}
@@ -523,14 +713,9 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 	// default 1ns idle threshold leaves the dirty probe as the deciding gate.
 	h.WriteFile(dest, "WORK.txt", "in progress\n")
 	h.RunJJ(dest, "status")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	originBefore := h.OriginMain()
-	results, err := Sync(context.Background(), st, "", "")
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	res := resultFor(t, results, "alpha")
+	res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, allowAll, time.Nanosecond)
 	if res.Err != nil {
 		t.Fatalf("alpha err: %v", res.Err)
 	}
@@ -547,14 +732,9 @@ func TestSyncNoPushWhenDirty(t *testing.T) {
 func TestSyncNoPushWhenNotAhead(t *testing.T) {
 	h := newHarness(t)
 	h.jjClone("alpha")
-	st := h.state(state.Repo{Relpath: "alpha", Origin: h.Origin, Trunk: "main"})
 
 	originBefore := h.OriginMain()
-	results, err := Sync(context.Background(), st, "", "")
-	if err != nil {
-		t.Fatalf("Sync: %v", err)
-	}
-	res := resultFor(t, results, "alpha")
+	res := h.syncOneWith(state.Repo{Relpath: "alpha", Origin: ghOrigin("alpha"), Trunk: "main"}, allowAll, time.Nanosecond)
 	if res.Err != nil {
 		t.Fatalf("alpha err: %v", res.Err)
 	}

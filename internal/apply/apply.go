@@ -11,6 +11,7 @@ import (
 	"github.com/yasyf/reposync/internal/discover"
 	"github.com/yasyf/reposync/internal/reconcile"
 	"github.com/yasyf/reposync/internal/state"
+	"github.com/yasyf/reposync/internal/vcs"
 )
 
 // RepoSelection is a batched enable/disable request: Enable carries discovered
@@ -26,9 +27,14 @@ type RepoSelection struct {
 // pull-merge on their own schedule, so there is no peer push here. Disabling
 // tombstones a repo's registry entry only; its on-disk checkout is left in place.
 func Repos(ctx context.Context, sel RepoSelection) ([]reconcile.Result, error) {
+	enabled, err := enabledRepos(ctx, sel.Enable)
+	if err != nil {
+		return nil, fmt.Errorf("apply repo selection: %w", err)
+	}
+
 	st, err := state.Update(ctx, func(s *state.State) error {
-		for _, c := range sel.Enable {
-			s.AddRepo(state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync})
+		for _, r := range enabled {
+			s.AddRepo(r)
 		}
 		for _, rp := range sel.Disable {
 			s.RemoveRepo(rp)
@@ -39,13 +45,30 @@ func Repos(ctx context.Context, sel RepoSelection) ([]reconcile.Result, error) {
 		return nil, fmt.Errorf("apply repo selection: %w", err)
 	}
 
-	enabled := make([]state.Repo, 0, len(sel.Enable))
-	for _, c := range sel.Enable {
-		enabled = append(enabled, state.Repo{Relpath: c.Relpath, Origin: c.Origin, Trunk: "main", LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync})
-	}
 	results, err := reconcile.Repos(ctx, st, enabled)
 	if err != nil {
 		return nil, fmt.Errorf("reconcile after apply: %w", err)
 	}
 	return results, nil
+}
+
+// enabledRepos turns candidates into registry entries, resolving each one's trunk
+// from its checkout. Detection runs here rather than during discovery: it can cost
+// a remote round-trip, which belongs to an explicit enable, not a read-only scan.
+func enabledRepos(ctx context.Context, candidates []discover.Candidate) ([]state.Repo, error) {
+	st, err := state.Load()
+	if err != nil {
+		return nil, err
+	}
+	dl, err := st.DefaultLocationExpanded()
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]state.Repo, 0, len(candidates))
+	for _, c := range candidates {
+		r := state.Repo{Relpath: c.Relpath, Origin: c.Origin, LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync}
+		r.Trunk = vcs.DetectTrunk(ctx, r.AbsPath(dl))
+		enabled = append(enabled, r)
+	}
+	return enabled, nil
 }
