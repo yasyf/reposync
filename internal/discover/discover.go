@@ -15,7 +15,7 @@ type Candidate struct {
 	AbsPath   string // absolute checkout path
 	Kind      string // "jj" or "git"
 	Origin    string // origin remote URL, or "" when local-only
-	LocalOnly bool   // true when the repo has no origin remote
+	LocalOnly bool   // true when the repo is registered local-only, or has no origin to converge through
 	Tracked   bool   // already present in state.Repos
 	NoEnvSync bool   // tracked repo opted out of env-file sync
 }

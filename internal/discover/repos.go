@@ -69,29 +69,31 @@ func classify(ctx context.Context, st *state.State, name, abs string) (Candidate
 	} else if err != nil {
 		return Candidate{}, &SkipNote{Name: name, Reason: err.Error()}, false
 	}
-	isTracked, noEnvSync := tracked(st, name, origin)
+	isTracked, localOnly, noEnvSync := tracked(st, name, origin)
 	return Candidate{
 		Relpath:   name,
 		AbsPath:   abs,
 		Kind:      r.Kind(),
 		Origin:    origin,
-		LocalOnly: origin == "",
+		LocalOnly: localOnly,
 		Tracked:   isTracked,
 		NoEnvSync: noEnvSync,
 	}, nil, true
 }
 
-// tracked reports whether st already registers this repo — matching on origin when
-// present, otherwise on relpath against the local-only registry — and, when tracked,
-// whether it has opted out of env-file sync.
-func tracked(st *state.State, name, origin string) (isTracked, noEnvSync bool) {
-	if origin != "" {
-		r, ok := st.FindRepoByOrigin(origin)
-		return ok, ok && r.NoEnvSync
+// tracked reports how st registers this repo: by relpath in the local-only
+// registry — which a repo carrying a remote can also be, so that is checked first
+// — else by origin in the propagating one. A repo with no origin can only ever be
+// local-only, registered or not.
+func tracked(st *state.State, name, origin string) (isTracked, localOnly, noEnvSync bool) {
+	if e, ok := st.LocalRepos[name]; ok && e.Present() {
+		return true, true, e.Value.NoEnvSync
 	}
-	e, ok := st.LocalRepos[name]
-	present := ok && e.Present()
-	return present, present && e.Value.NoEnvSync
+	if origin == "" {
+		return false, true, false
+	}
+	r, ok := st.FindRepoByOrigin(origin)
+	return ok, false, ok && r.NoEnvSync
 }
 
 // isDir reports whether the entry resolves to a directory, following a symlink
