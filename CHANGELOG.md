@@ -6,6 +6,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-21
+
+### Added
+- Report `blocked-untracked` when a plain-git fast-forward would overwrite
+  an untracked file or replace a directory containing one. Both refusals
+  now report a blocked advance instead of an error on every sync pass.
+
+### Changed
+- Untracked files no longer mark a plain-git working tree busy. Only edits
+  to tracked, non-generated files count as blocking dirt, so a stray
+  untracked file no longer skips the whole repo, fetch included.
+- Trunk push-back now requires every effective push destination to be a
+  `github.com` repo owned by this host's own `gh` login. The login is
+  resolved once per sync with `gh api user --jq .login`; an unresolvable
+  login authorizes no push. Organization-owned repos, including work repos,
+  are never pushed to. Destinations come from
+  `git remote get-url --push --all origin` immediately before the push, so
+  changed remotes and configured `pushurl` values are checked against the
+  policy instead of trusting the origin recorded at registration.
+
+### Fixed
+- Registration detects origin's default branch instead of assuming `main`.
+  Repos whose default branch was not `main` used to register with the wrong
+  trunk and report `no-trunk` on every sync pass indefinitely.
+  `vcs.DetectTrunk` reads `refs/remotes/origin/HEAD`, then falls back to
+  `git ls-remote --symref origin HEAD`, then to `main`. Reading the full ref
+  avoids misidentifying trunk when a local branch is named `origin/<trunk>`.
+  Detection runs in `apply.Repos` before the registry flock, so read-only
+  discovery makes no network call. Previously registered repos keep their
+  stored trunk until re-added.
+- A blocked advance no longer destroys generated work. `advanceGenerated`
+  could reset staged generated edits and delete untracked generated files
+  before git refused an unrelated untracked collision, leaving HEAD
+  unchanged and the content gone. A read-only preflight now detects the
+  collision before anything is reset or removed.
+
 ## [0.29.0] - 2026-08-29
 
 ### Changed
@@ -287,7 +323,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/yasyf/reposync/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/yasyf/reposync/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/yasyf/reposync/compare/v0.27.5...v0.28.0
 [0.27.5]: https://github.com/yasyf/reposync/compare/v0.27.4...v0.27.5
