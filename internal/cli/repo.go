@@ -118,15 +118,17 @@ func runRepoAdd(ctx context.Context, path string, localOnly, noEnvSync bool) err
 	if err != nil {
 		return err
 	}
-	origin, err := repoVCS.Origin(ctx)
-	switch {
-	case errors.Is(err, vcs.ErrNoOrigin):
-		if !localOnly {
+	// A local-only repo is registered by relpath and keeps no origin, so its
+	// remote is never resolved: only a converging repo needs one.
+	var origin string
+	if !localOnly {
+		origin, err = repoVCS.Origin(ctx)
+		if errors.Is(err, vcs.ErrNoOrigin) {
 			return fmt.Errorf("repo has no origin remote; cannot converge across hosts — use --local-only to track it on this host only")
 		}
-		origin = ""
-	case err != nil:
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	results, err := apply.Repos(ctx, apply.RepoSelection{

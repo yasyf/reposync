@@ -164,11 +164,12 @@ func (s *State) AddRepo(r Repo) {
 
 // RemoveRepo tombstones the repo registered at relpath, stamping the removal at the
 // current time and keeping the entry, so the removal propagates via pull-merge and
-// peers converge to absent. It searches the propagating registry first (by matching
-// relpath), then the local registry (keyed by relpath).
+// peers converge to absent. It searches the present propagating entries first (by
+// matching relpath), then the local registry: a relpath whose propagating entry is
+// already a tombstone is registered locally, if anywhere.
 func (s *State) RemoveRepo(relpath string) {
 	at := cregistry.UnixMicros(Now())
-	for origin, e := range s.Repos {
+	for origin, e := range s.Repos.Present() {
 		if e.Value.Relpath == relpath {
 			s.Repos.Remove(origin, at)
 			return

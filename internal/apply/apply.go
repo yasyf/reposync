@@ -66,9 +66,20 @@ func enabledRepos(ctx context.Context, candidates []discover.Candidate) ([]state
 	}
 	enabled := make([]state.Repo, 0, len(candidates))
 	for _, c := range candidates {
-		r := state.Repo{Relpath: c.Relpath, Origin: c.Origin, LocalOnly: c.LocalOnly, NoEnvSync: c.NoEnvSync}
+		r := trackedRepo(c)
 		r.Trunk = vcs.DetectTrunk(ctx, r.AbsPath(dl))
 		enabled = append(enabled, r)
 	}
 	return enabled, nil
+}
+
+// trackedRepo builds a candidate's registry entry. Each branch writes one of the
+// two identities the registries hold — a local-only repo is keyed by its relpath
+// and carries no origin, a propagating repo is keyed by its origin — so neither
+// can spell the entry the state layer rejects.
+func trackedRepo(c discover.Candidate) state.Repo {
+	if c.LocalOnly {
+		return state.Repo{Relpath: c.Relpath, LocalOnly: true, NoEnvSync: c.NoEnvSync}
+	}
+	return state.Repo{Relpath: c.Relpath, Origin: c.Origin, NoEnvSync: c.NoEnvSync}
 }

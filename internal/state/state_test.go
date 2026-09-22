@@ -358,6 +358,36 @@ func TestRemoveRepoTombstonesNotDrops(t *testing.T) {
 	}
 }
 
+// TestRemoveRepoReachesLocalPastPropagatingTombstone proves rm removes a repo
+// registered local-only behind a tombstoned propagating entry for the same
+// relpath: the tombstone still carries that relpath, and matching it would stop
+// the search before the local registry.
+func TestRemoveRepoReachesLocalPastPropagatingTombstone(t *testing.T) {
+	pinClock(t)()
+	s := New()
+	origin := "https://github.com/Forge-AI/monorepo.git"
+
+	s.AddRepo(Repo{Relpath: "monorepo", Origin: origin, Trunk: "main"})
+	s.RemoveRepo("monorepo")
+	s.AddRepo(Repo{Relpath: "monorepo", Trunk: "main", LocalOnly: true})
+	if all := s.AllRepos(); len(all) != 1 || !all[0].LocalOnly {
+		t.Fatalf("AllRepos after re-add = %+v, want the local-only monorepo", all)
+	}
+
+	s.RemoveRepo("monorepo")
+
+	if all := s.AllRepos(); len(all) != 0 {
+		t.Fatalf("AllRepos after rm = %+v, want the repo gone", all)
+	}
+	e, ok := s.LocalRepos["monorepo"]
+	if !ok {
+		t.Fatal("rm dropped the local entry instead of tombstoning it")
+	}
+	if e.Present() {
+		t.Fatal("local entry still present after rm: the removal stopped at the propagating tombstone")
+	}
+}
+
 // TestAddRepoThreadsNoEnvSync proves the opt-out flag reaches the registry payload
 // for both registries, and that its zero value keeps env sync on.
 func TestAddRepoThreadsNoEnvSync(t *testing.T) {

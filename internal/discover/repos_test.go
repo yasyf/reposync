@@ -233,6 +233,35 @@ func TestReposLocalOnlyTrackedByRelpath(t *testing.T) {
 	}
 }
 
+// TestReposLocalOnlyWithOriginStaysTracked proves a rediscovery scan recognizes a
+// repo registered local-only even though its checkout has a remote: matching only
+// on origin would report it untracked, and enabling it again would file it as a
+// propagating repo and undo its env opt-out.
+func TestReposLocalOnlyWithOriginStaysTracked(t *testing.T) {
+	h := newReposHarness(t)
+	const origin = "https://example.com/monorepo.git"
+	h.gitRepo("monorepo", origin)
+	st := h.state(state.Repo{Relpath: "monorepo", Trunk: "main", LocalOnly: true, NoEnvSync: true})
+
+	result, err := Repos(context.Background(), st)
+	if err != nil {
+		t.Fatalf("Repos: %v", err)
+	}
+	c := candidateFor(t, result.Candidates, "monorepo")
+	if !c.Tracked {
+		t.Fatalf("monorepo candidate = %+v, want tracked (registered local-only by relpath)", c)
+	}
+	if !c.LocalOnly {
+		t.Fatalf("monorepo LocalOnly = false, want true so re-enabling keeps it off the mesh")
+	}
+	if !c.NoEnvSync {
+		t.Fatal("monorepo NoEnvSync = false, want the registered env opt-out carried through")
+	}
+	if c.Origin != origin {
+		t.Fatalf("monorepo origin = %q, want the checkout's remote %q", c.Origin, origin)
+	}
+}
+
 // TestReposSurfacesNoEnvSyncFromState proves classify carries a tracked repo's env
 // opt-out onto its Candidate for both registries, while untracked repos default to on.
 func TestReposSurfacesNoEnvSyncFromState(t *testing.T) {

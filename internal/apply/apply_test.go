@@ -330,6 +330,46 @@ func TestApplyReposLocalOnlyStaysLocal(t *testing.T) {
 	}
 }
 
+// TestApplyReposLocalOnlyDropsOrigin proves the candidate's origin does not follow
+// a local-only repo into the registry: the entry is keyed by relpath and the
+// propagating registry stays empty, which is what keeps it off the mesh.
+func TestApplyReposLocalOnlyDropsOrigin(t *testing.T) {
+	h := newHarness(t)
+	h.seedState()
+	h.runGit(h.root, "clone", h.origin, filepath.Join(h.dataLoc, "local"))
+
+	sel := RepoSelection{
+		Enable: []discover.Candidate{
+			{Relpath: "local", Origin: h.origin, Kind: "git", LocalOnly: true},
+		},
+	}
+	if _, err := Repos(context.Background(), sel); err != nil {
+		t.Fatalf("ApplyRepos: %v", err)
+	}
+
+	st, err := state.Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(st.Repos) != 0 {
+		t.Fatalf("local-only repo with an origin leaked into the propagating registry: %v", st.Repos)
+	}
+	e, ok := st.LocalRepos["local"]
+	if !ok || !e.Present() {
+		t.Fatalf("local-only repo not present in the local registry: %v", st.LocalRepos)
+	}
+	if !e.Value.LocalOnly {
+		t.Fatalf("local entry = %+v, want local_only true", e.Value)
+	}
+	repo, ok := loadRepo(t, "local")
+	if !ok {
+		t.Fatal("local not in the flat repo view after enable")
+	}
+	if repo.Origin != "" {
+		t.Fatalf("registered origin = %q, want none for a local-only repo", repo.Origin)
+	}
+}
+
 func TestApplyReposDisableTombstonesAndKeepsCheckout(t *testing.T) {
 	h := newHarness(t)
 	h.seedState(state.Repo{Relpath: "alpha", Origin: h.origin, Trunk: "main"})
