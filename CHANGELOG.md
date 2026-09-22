@@ -6,6 +6,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-22
+
+### Fixed
+- `reposync repo add <path> --local-only` now accepts repos with an origin
+  remote. Keeping the origin used to put the local-only entry in the
+  propagating registry, which rejected it with
+  `invalid propagating repo entry <url>`. `apply` now builds entries by
+  identity: local-only entries carry no origin, and propagating entries
+  carry no local-only flag. A local-only add reports `(local-only)` instead
+  of an origin it never stored.
+- Discovery preserves local-only registrations when the checkout has a
+  remote. Scanning used to report the repo untracked and clear `LocalOnly`
+  and `NoEnvSync`, so enabling it from the Repos screen created a
+  propagating entry and re-enabled env export despite `--no-env-sync`.
+  Discovery now checks the local registry by relpath first, regardless of
+  origin, preserving both flags.
+- `repo rm` no longer stops at a tombstoned propagating entry before
+  reaching the local registry. After `add → rm → add --local-only → rm`,
+  the final removal used to report success while leaving the repo tracked.
+  Removal now searches only present propagating entries first, so an old
+  tombstone cannot hide the local-only registration.
+
 ## [0.30.0] - 2026-09-21
 
 ### Added
@@ -323,7 +345,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/yasyf/reposync/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/yasyf/reposync/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/yasyf/reposync/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/yasyf/reposync/compare/v0.27.5...v0.28.0
