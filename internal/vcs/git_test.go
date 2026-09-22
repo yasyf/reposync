@@ -206,14 +206,14 @@ func TestGitAdvanceAbortsUnderLock(t *testing.T) {
 }
 
 // TestGitInUseDirty proves a working tree with a non-generated uncommitted edit
-// is busy from the dirt check. The fresh clone's reflog still counts as recent
-// activity under a normal idle window, so a tiny idle window isolates the dirt
-// classification as the asserted result.
+// to a tracked file is busy from the dirt check. The fresh clone's reflog still
+// counts as recent activity under a normal idle window, so a tiny idle window
+// isolates the dirt classification as the asserted result.
 func TestGitInUseDirty(t *testing.T) {
 	f := vcstest.New(t)
 	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.WriteFile(dest, "DIRTY.txt", "uncommitted\n")
+	f.WriteFile(dest, "README.md", "uncommitted\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -231,11 +231,103 @@ func TestGitInUseDirty(t *testing.T) {
 	if _, err := r.Advance(context.Background()); err != nil {
 		t.Fatalf("advance: %v", err)
 	}
-	if !f.FileExists(dest, "DIRTY.txt") {
-		t.Fatal("dirty file was clobbered")
-	}
-	if got := f.ReadFile(dest, "DIRTY.txt"); got != "uncommitted\n" {
+	if got := f.ReadFile(dest, "README.md"); got != "uncommitted\n" {
 		t.Fatalf("dirty file content changed to %q", got)
+	}
+}
+
+// TestGitInUseUntrackedNotBusy proves an untracked non-generated file leaves the
+// tree idle and does not stand in the way of a fast-forward: a file git does not
+// track is not in-progress work the advance could lose.
+func TestGitInUseUntrackedNotBusy(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+	f.WriteFile(dest, "scratch.txt", "untracked\n")
+	want := f.AdvanceOrigin("v2")
+
+	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	if err != nil {
+		t.Fatalf("in use: %v", err)
+	}
+	if busy {
+		t.Fatalf("InUse = busy (%q), want not busy on an untracked file", reason)
+	}
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeAdvanced {
+		t.Fatalf("outcome = %q, want advanced", got)
+	}
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.ReadFile(dest, "scratch.txt"); c != "untracked\n" {
+		t.Fatalf("scratch.txt = %q, want the untracked file untouched", c)
+	}
+}
+
+// TestGitAdvanceUntrackedCollisionBlocked proves the one case an untracked file
+// does stop: trunk adds a path the working tree already holds untracked, which
+// `git merge --ff-only` refuses. That is a reported skip, not an error, and the
+// local file keeps its content.
+func TestGitAdvanceUntrackedCollisionBlocked(t *testing.T) {
+	f := vcstest.New(t)
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+	f.WriteFile(dest, "collide.txt", "local untracked\n")
+	mainBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
+	f.AdvanceOriginPath("collide.txt", "from trunk\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeBlockedUntracked {
+		t.Fatalf("outcome = %q, want blocked-untracked", got)
+	}
+	if c := f.ReadFile(dest, "collide.txt"); c != "local untracked\n" {
+		t.Fatalf("collide.txt = %q, want the local file untouched", c)
+	}
+	if mainAfter := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
+		t.Fatalf("local main moved from %q to %q, want unchanged", mainBefore, mainAfter)
+	}
+}
+
+// TestGitAdvanceUntrackedDirChildBlocked proves trunk replacing a directory with
+// a file, over an untracked child in that directory, is declined as
+// blocked-untracked — git refuses with its "directories would lose untracked
+// files" message, not the single-file one.
+func TestGitAdvanceUntrackedDirChildBlocked(t *testing.T) {
+	f := vcstest.New(t)
+	if err := os.MkdirAll(filepath.Join(f.Seed, "d"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	f.WriteFile(f.Seed, filepath.Join("d", "tracked.txt"), "trunk\n")
+	f.RunGit(f.Seed, "add", "d")
+	f.RunGit(f.Seed, "commit", "-qm", "seed dir")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+	f.WriteFile(dest, filepath.Join("d", "child.txt"), "local untracked\n")
+	mainBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
+	f.RunGit(f.Seed, "rm", "-rq", "d")
+	f.AdvanceOriginPath("d", "now a file\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeBlockedUntracked {
+		t.Fatalf("outcome = %q, want blocked-untracked", got)
+	}
+	if c := f.ReadFile(dest, filepath.Join("d", "child.txt")); c != "local untracked\n" {
+		t.Fatalf("d/child.txt = %q, want the untracked child untouched", c)
+	}
+	if mainAfter := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
+		t.Fatalf("local main moved from %q to %q, want unchanged", mainBefore, mainAfter)
 	}
 }
 
@@ -271,7 +363,7 @@ func TestGitInUseRecencyGateFirst(t *testing.T) {
 	f := vcstest.New(t)
 	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
-	f.WriteFile(dest, "DIRTY.txt", "uncommitted\n")
+	f.WriteFile(dest, "README.md", "uncommitted\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Hour)
 	if err != nil {
@@ -561,14 +653,14 @@ func TestGitInUseGeneratedOnlyNotBusy(t *testing.T) {
 }
 
 // TestGitInUseMixedDirtyIsBusy proves a tree dirty in both a generated and a
-// non-generated file is busy: the dirt is not generated-only.
+// tracked non-generated file is busy: the dirt is not generated-only.
 func TestGitInUseMixedDirtyIsBusy(t *testing.T) {
 	f := vcstest.New(t)
 	f.SeedGenerated()
 	dest := f.GitClone(filepath.Join(f.Root, "clone"))
 	r := openGit(t, dest)
 	f.WriteFile(dest, "build.gen", "local generated edit\n")
-	f.WriteFile(dest, "foo.txt", "real work\n")
+	f.WriteFile(dest, "README.md", "real work\n")
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -811,16 +903,13 @@ func TestGitAdvanceStagedGeneratedAdvances(t *testing.T) {
 	}
 }
 
-// TestGitInUseUntrackedDirNonGeneratedIsBusy proves an untracked directory holding a
-// non-generated file is busy. `git status --porcelain` without -uall collapses the
-// directory into one '?? gendir/' record; with a directory-level generated attribute
-// that record resolves generated, so the real (non-generated) file inside would be
-// wrongly classified as generated-only and skipped. -uall lists the file
-// individually, exposing it as a real dirty path so the tree is correctly busy.
-func TestGitInUseUntrackedDirNonGeneratedIsBusy(t *testing.T) {
+// TestGitAdvanceUntrackedDirNonGeneratedNotGenerated proves -uall still decides
+// the generated classification. `git status --porcelain` without it collapses an
+// untracked directory into one '?? gendir/' record, which a directory-level
+// attribute resolves generated; -uall lists the real file inside, so the advance
+// is a plain fast-forward rather than the generated-aware path.
+func TestGitAdvanceUntrackedDirNonGeneratedNotGenerated(t *testing.T) {
 	f := vcstest.New(t)
-	// Mark a whole directory generated, so the collapsed '?? gendir/' record itself
-	// resolves linguist-generated even though a non-generated file lives inside.
 	f.WriteFile(f.Seed, ".gitattributes", "*.gen linguist-generated\ngendir/ linguist-generated\n")
 	f.RunGit(f.Seed, "add", ".gitattributes")
 	f.RunGit(f.Seed, "commit", "-qm", "seed dir attr")
@@ -833,15 +922,116 @@ func TestGitInUseUntrackedDirNonGeneratedIsBusy(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	f.WriteFile(dest, filepath.Join("gendir", "real.txt"), "real work\n")
+	f.AdvanceOriginPath("x.txt", "sibling on trunk\n")
 
-	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
+	got, err := r.Advance(context.Background())
 	if err != nil {
-		t.Fatalf("in use: %v", err)
+		t.Fatalf("advance: %v", err)
 	}
-	if !busy {
-		t.Fatal("InUse = false, want busy on untracked directory with a non-generated file")
+	if got != OutcomeAdvanced {
+		t.Fatalf("outcome = %q, want advanced (the untracked file is not generated dirt)", got)
 	}
-	if reason != "dirty working tree" {
-		t.Fatalf("reason = %q, want dirty working tree", reason)
+	if c := f.ReadFile(dest, filepath.Join("gendir", "real.txt")); c != "real work\n" {
+		t.Fatalf("gendir/real.txt = %q, want the untracked file untouched", c)
+	}
+}
+
+// TestGitAdvanceGeneratedWithUntrackedRebases proves a generated edit alongside a
+// plain untracked file still takes the generated-aware path: the untracked file
+// is not blocking dirt, so both survive the fast-forward.
+func TestGitAdvanceGeneratedWithUntrackedRebases(t *testing.T) {
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.WriteFile(dest, "scratch.txt", "untracked\n")
+	want := f.AdvanceOriginPath("x.txt", "sibling on trunk\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeRebasedGenerated {
+		t.Fatalf("outcome = %q, want rebased-generated", got)
+	}
+	if localMain := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); localMain != want {
+		t.Fatalf("local main = %q, want origin %q", localMain, want)
+	}
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want local edit preserved", c)
+	}
+	if c := f.ReadFile(dest, "scratch.txt"); c != "untracked\n" {
+		t.Fatalf("scratch.txt = %q, want the untracked file untouched", c)
+	}
+}
+
+// TestGitAdvanceGeneratedBlockedDestroysNothing proves a generated advance that
+// an untracked collision blocks destroys nothing: the collision is declined
+// before the restore loop, so the staged generated edit, the untracked generated
+// file, and the colliding file all keep their exact prior content.
+func TestGitAdvanceGeneratedBlockedDestroysNothing(t *testing.T) {
+	f := vcstest.New(t)
+	f.SeedGenerated()
+	dest := f.GitClone(filepath.Join(f.Root, "clone"))
+	r := openGit(t, dest)
+
+	f.WriteFile(dest, "build.gen", "local generated edit\n")
+	f.RunGit(dest, "add", "build.gen")
+	f.WriteFile(dest, "extra.gen", "untracked local\n")
+	f.WriteFile(dest, "collide.txt", "local untracked\n")
+	mainBefore := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main"))
+	f.AdvanceOriginPath("build.gen", "trunk generated v2\n")
+	f.AdvanceOriginPath("extra.gen", "trunk generated v2\n")
+	f.AdvanceOriginPath("collide.txt", "from trunk\n")
+
+	got, err := r.Advance(context.Background())
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if got != OutcomeBlockedUntracked {
+		t.Fatalf("outcome = %q, want blocked-untracked", got)
+	}
+	if mainAfter := strings.TrimSpace(f.RunGit(dest, "rev-parse", "main")); mainAfter != mainBefore {
+		t.Fatalf("local main moved from %q to %q, want unchanged", mainBefore, mainAfter)
+	}
+	if c := f.RunGit(dest, "show", ":build.gen"); c != "local generated edit\n" {
+		t.Fatalf("staged build.gen = %q, want the staged edit intact", c)
+	}
+	if c := f.ReadFile(dest, "build.gen"); c != "local generated edit\n" {
+		t.Fatalf("build.gen = %q, want the local edit intact", c)
+	}
+	if c := f.ReadFile(dest, "extra.gen"); c != "untracked local\n" {
+		t.Fatalf("extra.gen = %q, want the untracked generated file intact", c)
+	}
+	if c := f.ReadFile(dest, "collide.txt"); c != "local untracked\n" {
+		t.Fatalf("collide.txt = %q, want the colliding file intact", c)
+	}
+}
+
+func TestUntrackedCollides(t *testing.T) {
+	changed := pathSet([]string{"a.txt", "gen.gen", "dir", "lead/x.txt"})
+	generated := pathSet([]string{"gen.gen"})
+	cases := []struct {
+		name      string
+		untracked []string
+		want      bool
+	}{
+		{"none", nil, false},
+		{"disjoint", []string{"other.txt", "elsewhere/a.txt"}, false},
+		{"same path", []string{"a.txt"}, true},
+		{"generated at changed path", []string{"gen.gen"}, false},
+		{"child of replaced directory", []string{"dir/child.txt"}, true},
+		{"deep child of replaced directory", []string{"dir/sub/child.txt"}, true},
+		{"leading directory is an untracked file", []string{"lead"}, true},
+		{"generated leading file", []string{"gen.gen/x"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := untrackedCollides(tc.untracked, changed, generated); got != tc.want {
+				t.Fatalf("untrackedCollides(%v) = %v, want %v", tc.untracked, got, tc.want)
+			}
+		})
 	}
 }

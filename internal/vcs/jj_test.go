@@ -107,8 +107,9 @@ func jjChangeID(t *testing.T, f *vcstest.Fixture, repo string) string {
 func jjOpsSince(t *testing.T, f *vcstest.Fixture, repo, sinceOp string) []string {
 	t.Helper()
 	out := f.RunJJ(repo, "op", "log", "-n", "20", "--no-graph", "--ignore-working-copy", "-T", `id ++ " " ++ description.first_line() ++ "\n"`)
-	var descs []string
-	for _, line := range strings.Split(out, "\n") {
+	lines := strings.Split(out, "\n")
+	descs := make([]string, 0, len(lines))
+	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}

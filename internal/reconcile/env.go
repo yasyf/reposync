@@ -64,8 +64,9 @@ func ApplyEnvSnapshot(ctx context.Context, incoming map[string]env.RepoState) []
 // eligibleEnvRepos returns the present-on-disk propagating repos that sync env files: an
 // origin-bearing, non-local-only repo that has not opted out via NoEnvSync.
 func eligibleEnvRepos(st *state.State, dl string) []state.Repo {
-	var out []state.Repo
-	for _, r := range st.PropagatingRepos() {
+	repos := st.PropagatingRepos()
+	out := make([]state.Repo, 0, len(repos))
+	for _, r := range repos {
 		if r.LocalOnly || r.NoEnvSync {
 			continue
 		}

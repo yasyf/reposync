@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -48,6 +49,10 @@ const (
 	// (forward onto trunk when conflict-free, else at its original parents), and
 	// no user content was lost.
 	OutcomeRecovered Outcome = "recovered"
+	// OutcomeBlockedUntracked means incoming trunk content would have clobbered an
+	// untracked working-tree file, or a directory holding one, so the fast-forward
+	// was declined and the repo left untouched.
+	OutcomeBlockedUntracked Outcome = "blocked-untracked"
 	// OutcomeSwept means a sweep was detected but concurrent user activity kept
 	// the advance from a clean recovered state: recovery was skipped (foreign
 	// ops in the window, or working-copy contention mid-recovery) or was itself
@@ -97,6 +102,60 @@ func Open(path, trunk string) (Repo, error) {
 		return &gitRepo{repoCore: repoCore{path: abs, trunk: trunk}}, nil
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNotARepo, abs)
+}
+
+// DetectTrunk resolves the repo's trunk from origin's default branch — the
+// recorded origin/HEAD first, then a symref query against origin — falling back
+// to "main". Colocated jj repos carry the same git refs, so one git probe serves
+// both kinds.
+func DetectTrunk(ctx context.Context, path string) string {
+	if out, err := run(ctx, path, "git", "-C", path, "symbolic-ref", "-q", "refs/remotes/origin/HEAD"); err == nil {
+		// The full ref, not --short: a local branch named origin/<trunk> makes the
+		// short form disambiguate to remotes/origin/<trunk>.
+		if branch, ok := strings.CutPrefix(strings.TrimSpace(out), "refs/remotes/origin/"); ok && branch != "" {
+			return branch
+		}
+	}
+	out, err := run(ctx, path, "git", "-C", path, "ls-remote", "--symref", "origin", "HEAD")
+	if err != nil {
+		return defaultTrunk
+	}
+	if branch := parseSymrefHead(out); branch != "" {
+		return branch
+	}
+	return defaultTrunk
+}
+
+// parseSymrefHead extracts the branch name from the `ref: refs/heads/<branch>	HEAD`
+// line of `git ls-remote --symref` output.
+func parseSymrefHead(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "ref:" {
+			continue
+		}
+		return strings.TrimPrefix(fields[1], "refs/heads/")
+	}
+	return ""
+}
+
+// PushURLs returns where a push to origin actually lands: the configured
+// pushurls, or the fetch URL when there are none, with git's own insteadOf
+// rewrites applied. Colocated jj repos push through the same git remote, so one
+// probe serves both kinds. It errors when the repo has no origin remote.
+func PushURLs(ctx context.Context, path string) ([]string, error) {
+	out, err := run(ctx, path, "git", "-C", path, "remote", "get-url", "--push", "--all", "origin")
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(out, "\n")
+	urls := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if u := strings.TrimSpace(line); u != "" {
+			urls = append(urls, u)
+		}
+	}
+	return urls, nil
 }
 
 // Clone clones origin into dest as a colocated jj repo (.git + .jj), regardless

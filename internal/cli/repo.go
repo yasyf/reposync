@@ -114,7 +114,7 @@ func runRepoAdd(ctx context.Context, path string, localOnly, noEnvSync bool) err
 		return err
 	}
 
-	repoVCS, err := vcs.Open(abspath, "main")
+	repoVCS, err := vcs.Open(abspath, "")
 	if err != nil {
 		return err
 	}
@@ -129,14 +129,13 @@ func runRepoAdd(ctx context.Context, path string, localOnly, noEnvSync bool) err
 		return err
 	}
 
-	repo := state.Repo{Relpath: relpath, Origin: origin, Trunk: "main", LocalOnly: localOnly, NoEnvSync: noEnvSync}
 	results, err := apply.Repos(ctx, apply.RepoSelection{
 		Enable: []discover.Candidate{{Relpath: relpath, Origin: origin, LocalOnly: localOnly, NoEnvSync: noEnvSync}},
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("registered %s (origin %s)\n", relpath, originLabel(repo))
+	fmt.Printf("registered %s (origin %s)\n", relpath, originLabel(state.Repo{Origin: origin}))
 	return printReconcile(results)
 }
 

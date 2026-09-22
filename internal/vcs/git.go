@@ -13,6 +13,14 @@ import (
 
 const gitReflogTimeLayout = "2006-01-02 15:04:05 -0700"
 
+// untrackedOverwrite is git's refusal to fast-forward over an untracked file an
+// incoming commit adds; untrackedDirLoss is its refusal to replace a directory
+// holding untracked files with a file.
+const (
+	untrackedOverwrite = "untracked working tree files would be overwritten"
+	untrackedDirLoss   = "directories would lose untracked files"
+)
+
 type gitRepo struct {
 	repoCore
 }
@@ -38,11 +46,11 @@ func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, 
 	if recent {
 		return true, "recent activity", nil
 	}
-	clean, generatedOnly, _, err := dirtState(ctx, r.path)
+	d, err := dirtState(ctx, r.path)
 	if err != nil {
 		return false, "", err
 	}
-	if !clean && !generatedOnly {
+	if len(d.blocking) > 0 {
 		return true, "dirty working tree", nil
 	}
 	return false, "", nil
@@ -91,12 +99,12 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		return "", err
 	}
 	if onTrunk {
-		_, generatedOnly, generated, err := dirtState(ctx, r.path)
+		d, err := dirtState(ctx, r.path)
 		if err != nil {
 			return "", err
 		}
-		if generatedOnly {
-			return r.advanceGenerated(ctx, g, ahead, behind, generated)
+		if len(d.generated) > 0 && len(d.blocking) == 0 {
+			return r.advanceGenerated(ctx, g, ahead, behind, d)
 		}
 		if behind == 0 {
 			return OutcomeUpToDate, nil
@@ -111,8 +119,12 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		if !ok {
 			return OutcomeRaced, nil
 		}
-		if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
+		blocked, err := r.ffTrunk(ctx)
+		if err != nil {
 			return "", err
+		}
+		if blocked {
+			return OutcomeBlockedUntracked, nil
 		}
 		return OutcomeAdvanced, nil
 	}
@@ -131,12 +143,12 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 	return OutcomeAdvanced, nil
 }
 
-// advanceGenerated advances an on-trunk working tree whose only uncommitted edits
-// are to generated files. Generated edits that conflict with what trunk changes
+// advanceGenerated advances an on-trunk working tree whose uncommitted edits are
+// generated ones, untracked files aside. Generated edits that conflict with trunk
 // are dropped (upstream wins); cleanly-applying generated edits are carried
-// untouched through the fast-forward. A diverged trunk is declined before the
-// restore loop touches any local edit — the merge below could not fast-forward it.
-func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind int, generated []string) (Outcome, error) {
+// untouched through the fast-forward. A diverged trunk and an untracked collision
+// are declined before the restore loop touches any local edit.
+func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind int, d dirt) (Outcome, error) {
 	if behind == 0 {
 		return OutcomeUpToDate, nil
 	}
@@ -147,6 +159,9 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 	if err != nil {
 		return "", err
 	}
+	if untrackedCollides(d.untracked, changed, pathSet(d.generated)) {
+		return OutcomeBlockedUntracked, nil
+	}
 	ok, err := g.stable(ctx)
 	if err != nil {
 		return "", err
@@ -154,7 +169,7 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 	if !ok {
 		return OutcomeRaced, nil
 	}
-	for _, p := range generated {
+	for _, p := range d.generated {
 		if _, ok := changed[p]; !ok {
 			continue
 		}
@@ -172,10 +187,64 @@ func (r *gitRepo) advanceGenerated(ctx context.Context, g *guard, ahead, behind 
 			return "", fmt.Errorf("remove untracked generated %s: %w", p, err)
 		}
 	}
-	if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
+	blocked, err := r.ffTrunk(ctx)
+	if err != nil {
 		return "", err
 	}
+	if blocked {
+		return OutcomeBlockedUntracked, nil
+	}
 	return OutcomeRebasedGenerated, nil
+}
+
+// ffTrunk fast-forwards the working copy onto origin/<trunk>, reporting blocked
+// when an incoming file would clobber an untracked one.
+func (r *gitRepo) ffTrunk(ctx context.Context) (blocked bool, err error) {
+	if _, err := r.git(ctx, "merge", "--ff-only", "origin/"+r.trunk); err != nil {
+		if stderrContains(err, untrackedOverwrite) || stderrContains(err, untrackedDirLoss) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+// untrackedCollides reports whether a fast-forward writing the changed paths
+// would refuse over an untracked path: the same path, an untracked file that is
+// a leading directory of a changed path, or an untracked file under a directory
+// a changed path replaces. An untracked generated file at a changed path is not
+// a collision — advanceGenerated removes it for upstream to win.
+func untrackedCollides(untracked []string, changed, generated map[string]struct{}) bool {
+	changedDirs := make(map[string]struct{})
+	for p := range changed {
+		for _, dir := range leadingDirs(p) {
+			changedDirs[dir] = struct{}{}
+		}
+	}
+	for _, u := range untracked {
+		if _, ok := changed[u]; ok {
+			if _, gen := generated[u]; !gen {
+				return true
+			}
+		}
+		if _, ok := changedDirs[u]; ok {
+			return true
+		}
+		for _, dir := range leadingDirs(u) {
+			if _, ok := changed[dir]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func leadingDirs(p string) []string {
+	var dirs []string
+	for i := strings.LastIndexByte(p, '/'); i > 0; i = strings.LastIndexByte(p[:i], '/') {
+		dirs = append(dirs, p[:i])
+	}
+	return dirs
 }
 
 // trunkChangedPaths returns the set of paths that differ between HEAD and origin/<trunk>.

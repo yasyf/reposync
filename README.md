@@ -1,6 +1,6 @@
 # ![reposync](docs/assets/readme-banner.webp)
 
-**Your other machine already pulled.** reposync clones every registered repo to each peer host and fast-forwards trunk on filesystem events, skipping anything dirty, busy, or diverged.
+**Your other machine already pulled.** reposync clones every registered repo to each peer host and fast-forwards trunk on filesystem events, skipping anything busy or diverged.
 
 [![CI](https://img.shields.io/github/actions/workflow/status/yasyf/reposync/ci.yml?branch=main&label=CI)](https://github.com/yasyf/reposync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/yasyf/reposync)](https://github.com/yasyf/reposync/releases)
@@ -52,16 +52,18 @@ The repo joins a convergent registry that pull-merges across the mesh, and every
 
 ### Sync in the background without ever clobbering work in progress
 
-A cron'd `git pull` doesn't know you're mid-rebase. An in-progress git or jj operation, activity within the idle threshold, a dirty tree, or a diverged trunk all gate the advance, and the skipped repo says why:
+A cron'd `git pull` doesn't know you're mid-rebase. An in-progress git or jj operation, activity within the idle threshold, edits to tracked files that aren't generated, or a diverged trunk all gate the advance, and the skipped repo says why:
 
 ```console
 $ reposync sync
 ✓ notes: busy (dirty working tree)
 ```
 
+In plain-git checkouts, non-generated untracked files don't block fetching. A fast-forward that would clobber one is declined as `blocked-untracked`.
+
 A stale lock left behind by a killed git or jj process no longer wedges a repo: sync clears a `packed-refs.lock` after 30 minutes, clears a jj lock of the same age once a flock probe confirms its holder is dead, and logs what it removed.
 
-The only write it ever sends is a fast-forward push of your own trunk, and only after the repo has been quiet past `push_after` (a day by default).
+The only write it ever sends is a fast-forward push of trunk to a `github.com` origin owned by this host's `gh` login, and only after the repo has been quiet past `push_after` (a day by default). The login is resolved once per sync with `gh api user --jq .login`; org-owned origins and an unresolvable login never get a push.
 
 ### Your `.env` files follow your repos
 
@@ -102,6 +104,6 @@ State lives at `~/.config/reposync/state.json`, sharing one file and one flock w
 | `default_location` | `~/Code` | The root every repo's relpath resolves under, on every host |
 | `settings.idle_threshold` | `30m` | Activity newer than this marks a repo busy; sync skips it |
 | `settings.repo_op_timeout` | `2m` | Per-repo timeout on any fetch, advance, or clone |
-| `settings.push_after` | `24h` | Quiet period before a strictly-ahead trunk is pushed back to origin |
+| `settings.push_after` | `24h` | Quiet period before a strictly-ahead trunk is pushed to a `github.com` origin owned by this host's `gh` login |
 
 Status: pre-1.0, in daily use across my own machines. Licensed under [PolyForm Noncommercial 1.0.0](LICENSE).

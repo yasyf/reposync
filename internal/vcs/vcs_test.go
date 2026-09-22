@@ -1,12 +1,16 @@
 package vcs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/yasyf/reposync/internal/vcs/vcstest"
 )
 
 // TestWatchPaths locks the watch-backend contract (backend-agnostic): the exact
@@ -55,6 +59,107 @@ func TestWatchPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// trunkOrigin seeds a bare origin whose default branch is branch, and returns a
+// plain-git clone of it.
+func trunkOrigin(t *testing.T, f *vcstest.Fixture, branch string) string {
+	t.Helper()
+	origin := filepath.Join(f.Root, branch+".git")
+	seed := filepath.Join(f.Root, branch+"-seed")
+	f.RunGit(f.Root, "init", "--bare", "-b", branch, origin)
+	f.RunGit(f.Root, "clone", origin, seed)
+	f.ConfigGit(seed)
+	f.WriteFile(seed, "README.md", "hello\n")
+	f.RunGit(seed, "add", "README.md")
+	f.RunGit(seed, "commit", "-qm", "init")
+	f.RunGit(seed, "push", "-q", "origin", branch)
+	dest := filepath.Join(f.Root, branch+"-clone")
+	f.RunGit(f.Root, "clone", origin, dest)
+	return dest
+}
+
+func TestDetectTrunk(t *testing.T) {
+	f := vcstest.New(t)
+	dest := trunkOrigin(t, f, "release")
+
+	t.Run("recorded origin/HEAD", func(t *testing.T) {
+		if got := DetectTrunk(context.Background(), dest); got != "release" {
+			t.Fatalf("DetectTrunk = %q, want release", got)
+		}
+	})
+
+	t.Run("origin symref when origin/HEAD is unset", func(t *testing.T) {
+		f.RunGit(dest, "remote", "set-head", "origin", "--delete")
+		if got := DetectTrunk(context.Background(), dest); got != "release" {
+			t.Fatalf("DetectTrunk = %q, want release", got)
+		}
+	})
+
+	t.Run("no origin falls back to main", func(t *testing.T) {
+		solo := filepath.Join(f.Root, "solo")
+		f.RunGit(f.Root, "init", "-b", "wip", solo)
+		if got := DetectTrunk(context.Background(), solo); got != defaultTrunk {
+			t.Fatalf("DetectTrunk = %q, want %q", got, defaultTrunk)
+		}
+	})
+}
+
+// TestDetectTrunkAmbiguousBranchName proves a local branch literally named
+// origin/<trunk> does not poison detection: `symbolic-ref --short` disambiguates
+// that to remotes/origin/<trunk>, which would be stored as a trunk that resolves
+// to nothing and stops the repo syncing.
+func TestDetectTrunkAmbiguousBranchName(t *testing.T) {
+	f := vcstest.New(t)
+	dest := trunkOrigin(t, f, "release")
+	f.RunGit(dest, "branch", "origin/release")
+
+	short := strings.TrimSpace(f.RunGit(dest, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"))
+	if short != "remotes/origin/release" {
+		t.Fatalf("precondition: --short = %q, want the ambiguous remotes/origin/release", short)
+	}
+	if got := DetectTrunk(context.Background(), dest); got != "release" {
+		t.Fatalf("DetectTrunk = %q, want release", got)
+	}
+}
+
+func TestPushURLs(t *testing.T) {
+	f := vcstest.New(t)
+
+	t.Run("fetch url when no pushurl is set", func(t *testing.T) {
+		dest := f.GitClone(filepath.Join(f.Root, "plain"))
+		got, err := PushURLs(context.Background(), dest)
+		if err != nil {
+			t.Fatalf("push urls: %v", err)
+		}
+		if !slices.Equal(got, []string{f.Origin}) {
+			t.Fatalf("PushURLs = %v, want [%q]", got, f.Origin)
+		}
+	})
+
+	t.Run("pushurls replace the fetch url", func(t *testing.T) {
+		dest := f.GitClone(filepath.Join(f.Root, "pushurl"))
+		first := filepath.Join(f.Root, "first.git")
+		second := filepath.Join(f.Root, "second.git")
+		f.RunGit(dest, "remote", "set-url", "--push", "origin", first)
+		f.RunGit(dest, "remote", "set-url", "--push", "--add", "origin", second)
+
+		got, err := PushURLs(context.Background(), dest)
+		if err != nil {
+			t.Fatalf("push urls: %v", err)
+		}
+		if !slices.Equal(got, []string{first, second}) {
+			t.Fatalf("PushURLs = %v, want both pushurls %v", got, []string{first, second})
+		}
+	})
+
+	t.Run("no origin remote errors", func(t *testing.T) {
+		dest := f.GitClone(filepath.Join(f.Root, "noremote"))
+		f.RunGit(dest, "remote", "remove", "origin")
+		if _, err := PushURLs(context.Background(), dest); err == nil {
+			t.Fatal("PushURLs err = nil with no origin remote, want the failure surfaced")
+		}
+	})
 }
 
 func TestIsWorkingCopyContention(t *testing.T) {
