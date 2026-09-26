@@ -143,19 +143,30 @@ type historyBlob struct {
 
 func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObjectRef, error) {
 	var commits, out bytes.Buffer
-	if err := s.run(ctx, nil, &commits, "rev-list", head, "^"+trunkTip); err != nil {
+	if err := s.run(ctx, nil, &commits, "rev-list", "--parents", head, "^"+trunkTip); err != nil {
 		return nil, err
 	}
-	transitions, err := s.attributeHistoryLFS(ctx, commits.String())
-	if err != nil {
-		return nil, err
+	parents := map[string][]string{}
+	for line := range strings.Lines(commits.String()) {
+		ids := strings.Fields(line)
+		parents[ids[0]] = ids[1:]
 	}
 	if err := s.run(ctx, &commits, &out, "diff-tree", "--stdin", "-r", "-m", "--root", "--raw", "--no-abbrev", "-z", "--no-renames"); err != nil {
 		return nil, err
 	}
-	blobs, err := parseRawDiff(out.String(), head)
+	blobs, attrDirs, err := parseRawDiff(out.String(), head)
 	if err != nil {
 		return nil, err
+	}
+	var refs []LFSObjectRef
+	for _, commit := range slices.Sorted(maps.Keys(attrDirs)) {
+		dirs := attrDirs[commit]
+		slices.Sort(dirs)
+		transitions, err := s.attributeTransitions(ctx, commit, parents[commit], slices.Compact(dirs))
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, transitions...)
 	}
 	oids := make([]string, 0, len(blobs))
 	for _, b := range blobs {
@@ -180,7 +191,6 @@ func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObj
 			return nil, err
 		}
 	}
-	refs := transitions
 	for _, b := range blobs {
 		if p, ok := pointers[b.oid]; ok && (p.Canonical || attrs[b.commit][b.path] == lfsFilter) {
 			refs = append(refs, LFSObjectRef{Path: b.path, OID: p.OID, Size: p.Size})
@@ -189,48 +199,16 @@ func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObj
 	return refs, nil
 }
 
-func (s source) attributeHistoryLFS(ctx context.Context, commits string) ([]LFSObjectRef, error) {
-	var out bytes.Buffer
-	if err := s.run(ctx, strings.NewReader(commits), &out, "diff-tree", "--stdin", "-r", "-m", "--root", "--name-only", "-z", "--no-renames", "--", ":(glob)**/.gitattributes"); err != nil {
-		return nil, err
-	}
-	dirs := map[string][]string{}
-	var commit string
-	for tok := range strings.SplitSeq(out.String(), "\x00") {
-		switch tok = strings.Trim(tok, "\n"); {
-		case tok == "":
-		case isHex(tok, 40) || isHex(tok, 64):
-			commit = tok
-		default:
-			dirs[commit] = append(dirs[commit], path.Dir(tok))
-		}
-	}
-	var refs []LFSObjectRef
-	for _, commit := range slices.Sorted(maps.Keys(dirs)) {
-		slices.Sort(dirs[commit])
-		got, err := s.attributeTransitions(ctx, commit, slices.Compact(dirs[commit]))
-		if err != nil {
-			return nil, err
-		}
-		refs = append(refs, got...)
-	}
-	return refs, nil
-}
-
-func (s source) attributeTransitions(ctx context.Context, commit string, dirs []string) ([]LFSObjectRef, error) {
-	ids, err := s.output(ctx, "rev-list", "--parents", "-n1", commit)
-	if err != nil {
-		return nil, err
-	}
+func (s source) attributeTransitions(ctx context.Context, commit string, parents, dirs []string) ([]LFSObjectRef, error) {
 	var listed bytes.Buffer
 	if err := s.run(ctx, nil, &listed, append([]string{"ls-tree", "-r", "-z", commit, "--"}, dirs...)...); err != nil {
 		return nil, err
 	}
 	oids := map[string]string{}
 	for rec := range strings.SplitSeq(strings.TrimSuffix(listed.String(), "\x00"), "\x00") {
-		meta, path, _ := strings.Cut(rec, "\t")
+		meta, p, _ := strings.Cut(rec, "\t")
 		if f := strings.Fields(meta); len(f) == 3 && (f[0] == "100644" || f[0] == "100755") {
-			oids[path] = f[2]
+			oids[p] = f[2]
 		}
 	}
 	paths := slices.Sorted(maps.Keys(oids))
@@ -238,8 +216,8 @@ func (s source) attributeTransitions(ctx context.Context, commit string, dirs []
 	if err != nil {
 		return nil, err
 	}
-	var before []map[string]string
-	for _, parent := range strings.Fields(ids)[1:] {
+	before := make([]map[string]string, 0, len(parents))
+	for _, parent := range parents {
 		attrs, err := s.filterAttr(ctx, paths, "--source="+parent)
 		if err != nil {
 			return nil, err
@@ -267,8 +245,9 @@ func (s source) attributeTransitions(ctx context.Context, commit string, dirs []
 	return refs, nil
 }
 
-func parseRawDiff(out, commit string) ([]historyBlob, error) {
+func parseRawDiff(out, commit string) ([]historyBlob, map[string][]string, error) {
 	var blobs []historyBlob
+	attrDirs := map[string][]string{}
 	tokens := strings.Split(out, "\x00")
 	for i := 0; i < len(tokens); i++ {
 		tok := strings.Trim(tokens[i], "\n")
@@ -280,17 +259,20 @@ func parseRawDiff(out, commit string) ([]historyBlob, error) {
 			continue
 		}
 		if !strings.HasPrefix(tok, ":") || i+1 >= len(tokens) {
-			return nil, fmt.Errorf("raw diff record %q", tok)
+			return nil, nil, fmt.Errorf("raw diff record %q", tok)
 		}
 		i++
 		f := strings.Fields(tok)
 		if len(f) != 5 {
-			return nil, fmt.Errorf("raw diff record %q", tok)
+			return nil, nil, fmt.Errorf("raw diff record %q", tok)
+		}
+		if path.Base(tokens[i]) == ".gitattributes" {
+			attrDirs[commit] = append(attrDirs[commit], path.Dir(tokens[i]))
 		}
 		mode, oid := f[1], f[3]
 		if (mode == "100644" || mode == "100755") && strings.Trim(oid, "0") != "" {
 			blobs = append(blobs, historyBlob{commit: commit, path: tokens[i], oid: oid})
 		}
 	}
-	return blobs, nil
+	return blobs, attrDirs, nil
 }
