@@ -16,12 +16,21 @@ import (
 	"github.com/yasyf/reposync/registry"
 )
 
+// FetchGate admits one network fetch. Verify and Restore call it immediately
+// before the fetch would start, passing the fetch: the gate runs it only while
+// the transfer is allowed, under a context it cancels once the transfer stops
+// being allowed, and returns an error wrapping ErrFetchDeferred when it refused
+// or interrupted the fetch. cc-sync gates fetches on network policy.
+type FetchGate func(ctx context.Context, fetch func(context.Context) error) error
+
 // VerifyOptions controls what Verify may do beyond local reads and writes to
 // the store's mirror and the checkout's pin refs.
 type VerifyOptions struct {
-	// FetchOrigin allows fetching origin/<trunk> into the checkout when required
-	// commits are missing; cc-sync sets it only when network policy allows.
-	FetchOrigin bool
+	// FetchOrigin, when set, admits fetching origin/<trunk> into the checkout
+	// when required commits are missing; nil never fetches. When it defers the
+	// fetch, Verify reports the commits still missing; any other error fails
+	// the verification.
+	FetchOrigin FetchGate
 }
 
 // Verification is this host's readiness to restore a snapshot. Missing names
@@ -175,14 +184,18 @@ func receiverCheckout(path string) (root, common string, err error) {
 	return root, common, nil
 }
 
-func requiredCommits(ctx context.Context, checkout, trunk string, requires []string, fetch bool) ([]string, error) {
+func requiredCommits(ctx context.Context, checkout, trunk string, requires []string, gate FetchGate) ([]string, error) {
 	checkoutArgs := []string{"-C", checkout}
 	absent, err := missing(ctx, checkoutArgs, requires)
-	if err != nil || len(absent) == 0 || !fetch {
+	if err != nil || len(absent) == 0 || gate == nil {
 		return absent, err
 	}
 	refspec := "+refs/heads/" + trunk + ":refs/remotes/origin/" + trunk
-	if _, err := recvGit(ctx, nil, nil, "-C", checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", refspec); err != nil {
+	err = gate(ctx, func(ctx context.Context) error {
+		_, err := recvGit(ctx, nil, nil, "-C", checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", refspec)
+		return err
+	})
+	if err != nil && !errors.Is(err, ErrFetchDeferred) {
 		return nil, fmt.Errorf("fetch origin %s: %w", trunk, err)
 	}
 	return missing(ctx, checkoutArgs, requires)

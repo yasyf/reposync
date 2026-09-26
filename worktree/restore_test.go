@@ -1,7 +1,9 @@
 package worktree_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -326,14 +328,65 @@ func TestRestoreLFSWithoutNetwork(t *testing.T) {
 	}
 
 	h.f.RunGit(h.recv, "config", "lfs.url", lfsURL)
-	fetched := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-fetched"), Fresh: true, FetchLFS: true})
-	h.assertFaithful(fetched)
+	boom := errors.New("lfs remote refused")
+	allow := func(ctx context.Context, fetch func(context.Context) error) error { return fetch(ctx) }
+	deferred := func(context.Context, func(context.Context) error) error { return worktree.ErrFetchDeferred }
+	tests := []struct {
+		name        string
+		gate        func(context.Context, func(context.Context) error) error
+		wantPending []string
+		wantErr     error
+	}{
+		{
+			name:        "refused",
+			gate:        deferred,
+			wantPending: []string{"other.bin"},
+		},
+		{
+			name: "interrupted",
+			gate: func(ctx context.Context, fetch func(context.Context) error) error {
+				fetchCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, fetch(fetchCtx))
+			},
+			wantPending: []string{"other.bin"},
+		},
+		{
+			name:    "failed",
+			gate:    func(context.Context, func(context.Context) error) error { return boom },
+			wantErr: boom,
+		},
+		{
+			name: "allowed",
+			gate: allow,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := filepath.Join(h.f.Root, "lfs-"+tt.name)
+			gated := 0
+			r, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest, Fresh: true, FetchLFS: func(ctx context.Context, fetch func(context.Context) error) error {
+				gated++
+				if got := h.f.ReadFile(dest, "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
+					t.Errorf("other.bin at the fetch gate = %q, want the checked-out pointer", got)
+				}
+				return tt.gate(ctx, fetch)
+			}})
+			if gated != 1 || !errors.Is(err, tt.wantErr) || !slices.Equal(r.LFSPending, tt.wantPending) {
+				t.Fatalf("gate called %d times, restore = %+v, %v; want once and LFSPending %q, error %v", gated, r, err, tt.wantPending, tt.wantErr)
+			}
+			if tt.wantErr == nil && tt.wantPending == nil {
+				h.assertFaithful(r)
+			}
+		})
+	}
 
 	cached := vcstest.LFSObjectPath(filepath.Join(h.recv, ".git"), otherOID)
 	if err := os.Remove(cached); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cached, []byte(strings.Repeat("x", len("another published asset"))), 0o600); err != nil {
+	garbage := strings.Repeat("x", len("another published asset"))
+	if err := os.WriteFile(cached, []byte(garbage), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	corrupt := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-corrupt"), Fresh: true})
@@ -343,7 +396,14 @@ func TestRestoreLFSWithoutNetwork(t *testing.T) {
 	if got := h.f.ReadFile(corrupt.Path, "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
 		t.Fatalf("other.bin = %q, want an unhydrated pointer", got)
 	}
-	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-repaired"), Fresh: true, FetchLFS: true}))
+	held := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-corrupt-deferred"), Fresh: true, FetchLFS: deferred})
+	if !slices.Equal(held.LFSPending, []string{"other.bin"}) {
+		t.Fatalf("deferred fetch over a corrupt cached object = %+v", held)
+	}
+	if got, err := os.ReadFile(vcstest.LFSObjectPath(filepath.Join(h.recv, ".git"), otherOID)); err != nil || string(got) != garbage {
+		t.Fatalf("cached object after a deferred fetch = %q, %v; want it untouched", got, err)
+	}
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-repaired"), Fresh: true, FetchLFS: allow}))
 }
 
 func TestRestoreSHA256(t *testing.T) {

@@ -41,10 +41,12 @@ type RestoreOptions struct {
 	// Fresh ignores an existing recovery checkout of the same source worktree
 	// and creates another; nothing is ever overwritten either way.
 	Fresh bool
-	// FetchLFS allows fetching LFS base assets missing locally, or failing
-	// hash verification there, from the LFS remote; a corrupt local object is
-	// replaced. cc-sync sets it only when network policy allows bulk transfer.
-	FetchLFS bool
+	// FetchLFS, when set, admits fetching the LFS base assets missing locally,
+	// or failing hash verification there, from the LFS remote; a fetch it runs
+	// first discards each corrupt local object. nil never fetches. When it
+	// defers the fetch, Restore leaves the paths still missing in LFSPending;
+	// any other error fails the restore.
+	FetchLFS FetchGate
 	// ApplySparse re-applies the snapshot's sparse-checkout patterns and
 	// skip-worktree exceptions in the recovery worktree with git
 	// sparse-checkout, which enables extensions.worktreeConfig in the receiving
@@ -563,7 +565,7 @@ func applyFile(ctx context.Context, root *os.Root, src ArtifactSource, f FileEnt
 	return root.Rename(tmp, name)
 }
 
-func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetch bool, overwritten map[string]bool) ([]string, error) {
+func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, gate FetchGate, overwritten map[string]bool) ([]string, error) {
 	if snap.LFS == nil {
 		return nil, nil
 	}
@@ -599,13 +601,17 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetc
 	if err != nil {
 		return nil, err
 	}
-	if fetch && len(pending) > 0 {
-		for _, p := range pending {
-			if err := os.Remove(m.checkoutLFSPath(pointers[p].OID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("discard corrupt lfs object for %s: %w", p, err)
+	if gate != nil && len(pending) > 0 {
+		err := gate(ctx, func(ctx context.Context) error {
+			for _, p := range pending {
+				if err := os.Remove(m.checkoutLFSPath(pointers[p].OID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("discard corrupt lfs object for %s: %w", p, err)
+				}
 			}
-		}
-		if _, err := recvGit(ctx, nil, nil, "-C", dest, "lfs", "fetch"); err != nil {
+			_, err := recvGit(ctx, nil, nil, "-C", dest, "lfs", "fetch")
+			return err
+		})
+		if err != nil && !errors.Is(err, ErrFetchDeferred) {
 			return nil, fmt.Errorf("fetch lfs base assets: %w", err)
 		}
 		if local, pending, err = split(); err != nil {
