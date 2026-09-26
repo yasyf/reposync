@@ -3,8 +3,10 @@ package worktree
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path/filepath"
 	"strings"
@@ -12,28 +14,42 @@ import (
 	"github.com/yasyf/reposync/internal/vcs"
 )
 
-const jjWorkspaceTemplate = `name ++ "\t" ++ root ++ "\t" ++ target.parents().map(|c| c.commit_id()).join(",") ++ "\n"`
+const jjWorkspaceTemplate = `"{\"name\":" ++ json(name) ++ ",\"root\":" ++ json(root) ++ ",\"parents\":" ++ json(target.parents().map(|c| c.commit_id())) ++ "}\n"`
+
+type jjWorkspace struct {
+	Name    string   `json:"name"`
+	Root    string   `json:"root"`
+	Parents []string `json:"parents"`
+}
 
 func jjWorkspaces(ctx context.Context, main Worktree) ([]Worktree, []Skip, error) {
 	out, err := jjRead(ctx, main.Root, "workspace", "list", "-T", jjWorkspaceTemplate)
 	if err != nil {
 		return nil, nil, err
 	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
 	var wts []Worktree
 	var skips []Skip
-	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
-			return nil, nil, fmt.Errorf("jj workspace list line %q", line)
+	for {
+		var ws jjWorkspace
+		err := dec.Decode(&ws)
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		name, rawRoot, parents := fields[0], fields[1], fields[2]
-		root, err := filepath.EvalSymlinks(rawRoot)
+		if err != nil {
+			return nil, nil, fmt.Errorf("decode jj workspace list: %w", err)
+		}
+		if len(ws.Parents) == 0 {
+			return nil, nil, fmt.Errorf("jj workspace %q has no parent commit", ws.Name)
+		}
+		root, err := filepath.EvalSymlinks(ws.Root)
 		if errors.Is(err, fs.ErrNotExist) {
-			skips = append(skips, Skip{Path: rawRoot, Reason: "jj workspace missing"})
+			skips = append(skips, Skip{Path: ws.Root, Reason: "jj workspace missing"})
 			continue
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("resolve jj workspace %s: %w", rawRoot, err)
+			return nil, nil, fmt.Errorf("resolve jj workspace %s: %w", ws.Root, err)
 		}
 		if root == main.Root {
 			continue
@@ -44,10 +60,10 @@ func jjWorkspaces(ctx context.Context, main Worktree) ([]Worktree, []Skip, error
 			Trunk:     main.Trunk,
 			Root:      root,
 			CommonDir: main.CommonDir,
-			Name:      name,
+			Name:      ws.Name,
 			Kind:      KindJJWorkspace,
+			Head:      ws.Parents[0],
 		}
-		wt.Head, _, _ = strings.Cut(parents, ",")
 		if wt.Incarnation, err = inode(filepath.Join(root, ".jj", "working_copy")); err != nil {
 			return nil, nil, err
 		}

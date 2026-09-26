@@ -42,7 +42,7 @@ func TestDiscover(t *testing.T) {
 	}
 	f.GitClone(filepath.Join(repos, "local"))
 	jjMain := f.JJClone(filepath.Join(repos, "jj"))
-	jjWS := f.JJWorkspace(jjMain, filepath.Join(wts, "jjws"), "second")
+	jjWS := f.JJWorkspace(jjMain, filepath.Join(wts, "jj\tws\nx"), "sec\tond\nx")
 	sep := filepath.Join(repos, "sep")
 	sepGit := filepath.Join(f.Root, "gitdirs", "sep.git")
 	f.RunGit(f.Root, "clone", "-q", "--separate-git-dir", sepGit, f.Origin, sep)
@@ -55,12 +55,12 @@ func TestDiscover(t *testing.T) {
 		{Relpath: "sep", Path: sep, Origin: "https://example.com/sep.git", Trunk: "main"},
 	}}
 	head := func(dir string) string { return strings.TrimSpace(f.RunGit(dir, "rev-parse", "HEAD")) }
-	jjParent := strings.TrimSpace(f.RunJJ(jjMain, "log", "--no-graph", "--ignore-working-copy", "-r", "second@-", "-T", "commit_id"))
+	jjParent := strings.TrimSpace(f.RunJJ(jjWS, "log", "--no-graph", "--ignore-working-copy", "-r", "@-", "-T", "commit_id"))
 	mainGit := filepath.Join(main, ".git")
 	jjGit := filepath.Join(jjMain, ".git")
 	want := map[string]discovered{
 		jjMain: {Kind: KindJJColocated, Head: head(jjMain), GitDir: jjGit, CommonDir: jjGit},
-		jjWS:   {Kind: KindJJWorkspace, Name: "second", Head: jjParent, CommonDir: jjGit},
+		jjWS:   {Kind: KindJJWorkspace, Name: "sec\tond\nx", Head: jjParent, CommonDir: jjGit},
 		main:   {Kind: KindGit, Branch: "main", Head: head(main), GitDir: mainGit, CommonDir: mainGit},
 		feat:   {Kind: KindGit, Name: "feat", Branch: "feat", Head: head(feat), GitDir: filepath.Join(mainGit, "worktrees", "feat"), CommonDir: mainGit},
 		locked: {Kind: KindGit, Name: "locked", Head: head(locked), GitDir: filepath.Join(mainGit, "worktrees", "locked"), CommonDir: mainGit, Locked: true},
@@ -148,10 +148,18 @@ func TestLocate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(outer, "file"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(inner, link); err != nil {
 		t.Fatal(err)
 	}
+	alias := filepath.Join(dir, "alias")
+	if err := os.Symlink(outer, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
 	wts := []Worktree{{Root: outer, Name: "outer"}, {Root: inner, Name: "inner"}, {Root: sibling, Name: "sibling"}}
 	tests := []struct {
 		name string
@@ -163,6 +171,12 @@ func TestLocate(t *testing.T) {
 		{"symlinked path resolves", filepath.Join(link, "src"), "inner"},
 		{"prefix is not containment", sibling, "sibling"},
 		{"deleted subdir of a root", filepath.Join(outer, "gone", "deeper"), "outer"},
+		{"deleted subdir through a symlinked ancestor", filepath.Join(alias, "deleted", "file"), "outer"},
+		{"deleted subdir through a symlinked root", filepath.Join(link, "gone"), "inner"},
+		{"relative path from cwd", filepath.Join("repo", "file"), "outer"},
+		{"relative nested path from cwd", filepath.Join("repo", "nested", "ws", "src"), "inner"},
+		{"relative deleted path through a symlink", filepath.Join("alias", "gone", "x"), "outer"},
+		{"relative path outside every root", "elsewhere", ""},
 		{"outside every root", dir, ""},
 	}
 	for _, tc := range tests {
