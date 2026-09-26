@@ -129,7 +129,10 @@ func TestExecStreamsStdinAndStdout(t *testing.T) {
 
 func TestReadOnlyGitEnv(t *testing.T) {
 	env := ReadOnlyGitEnv()
-	for _, want := range []string{"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=gc.auto"} {
+	for _, want := range []string{
+		"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=gc.auto",
+		"GIT_CONFIG_KEY_2=core.fsmonitor", "GIT_CONFIG_VALUE_2=false",
+	} {
 		if !slices.Contains(env, want) {
 			t.Errorf("ReadOnlyGitEnv() = %v, missing %q", env, want)
 		}
@@ -164,7 +167,17 @@ func TestFilterOverrideEnv(t *testing.T) {
 	git("config", "filter.spy.required", "true")
 	git("config", "filter.dotted.name.process", "false")
 
-	env, err := FilterOverrideEnv(context.Background(), dir)
+	other := t.TempDir()
+	if _, err := run(context.Background(), other, "git", "-C", other, "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range [][2]string{{"filter.spy.clean", "cat"}, {"filter.other.process", "false"}} {
+		if _, err := run(context.Background(), other, "git", "-C", other, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	env, err := FilterOverrideEnv(context.Background(), dir, other)
 	if err != nil {
 		t.Fatalf("FilterOverrideEnv: %v", err)
 	}
@@ -178,15 +191,16 @@ func TestFilterOverrideEnv(t *testing.T) {
 		keys[k] = v
 	}
 	want := map[string]string{
-		"gc.auto": "0", "maintenance.auto": "false",
+		"gc.auto": "0", "maintenance.auto": "false", "core.fsmonitor": "false",
 		"filter.spy.clean": "", "filter.spy.process": "", "filter.spy.required": "false",
 		"filter.dotted.name.clean": "", "filter.dotted.name.process": "", "filter.dotted.name.required": "false",
+		"filter.other.clean": "", "filter.other.process": "", "filter.other.required": "false",
 	}
 	if fmt.Sprint(keys) != fmt.Sprint(want) {
 		t.Fatalf("override config = %v, want %v", keys, want)
 	}
-	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "8" {
-		t.Fatalf("GIT_CONFIG_COUNT = %q, want 8", n)
+	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "12" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 12", n)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "a.dat"), []byte("two\n"), 0o600); err != nil {
@@ -212,8 +226,8 @@ func TestFilterOverrideEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FilterOverrideEnv without drivers: %v", err)
 	}
-	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "2" {
-		t.Fatalf("GIT_CONFIG_COUNT without drivers = %q, want 2", n)
+	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "3" {
+		t.Fatalf("GIT_CONFIG_COUNT without drivers = %q, want 3", n)
 	}
 }
 

@@ -56,6 +56,7 @@ var stampKinds = []stampKind{
 }
 
 func stampGitCommit(f *vcstest.Fixture, root string) {
+	f.RunGit(root, "add", "-A")
 	f.RunGit(root, "commit", "-q", "--allow-empty", "-m", "wip")
 }
 
@@ -130,6 +131,26 @@ func TestStampChanges(t *testing.T) {
 				writeStampFile(t, root, "logs/trace.log", "new\n")
 			},
 		},
+		{
+			name: "edit of a committed file later ignored",
+			prepare: func(t *testing.T, f *vcstest.Fixture, k stampKind, root string) {
+				writeStampFile(t, root, "tracked.txt", "one\n")
+				k.commit(f, root)
+				writeStampFile(t, root, ".gitignore", "node_modules/\n*.log\ntracked.txt\n")
+			},
+			mutate:  write("tracked.txt", "two, longer\n"),
+			changes: true,
+		},
+		{
+			name:    "new file inside a nested repository",
+			prepare: nestedStampRepo,
+			mutate:  write("nested/noise.log", "noise\n"),
+		},
+		{
+			name:    "edit inside a nested repository",
+			prepare: nestedStampRepo,
+			mutate:  write("nested/n.txt", "two, longer\n"),
+		},
 	}
 	for _, k := range stampKinds {
 		t.Run(k.name, func(t *testing.T) {
@@ -167,6 +188,7 @@ func TestStampReadOnly(t *testing.T) {
 			sentinel := filepath.Join(f.Root, "clean-filter-ran")
 			f.RunGit(main, "config", "filter.sentinel.clean", "touch '"+sentinel+"'; cat")
 			f.RunGit(main, "config", "filter.sentinel.required", "true")
+			f.RunGit(main, "config", "core.fsmonitor", fsmonitorSentinel(t, f, "fsmonitor-ran"))
 			future := time.Now().Add(time.Hour)
 			setStampMtime(t, filepath.Join(root, "c.dat"), future)
 			setStampMtime(t, filepath.Join(root, "a.txt"), future)
@@ -196,15 +218,110 @@ func TestStampReadOnly(t *testing.T) {
 			if k.kind != KindGit && f.JJOpHead(main) != opHead {
 				t.Fatal("Stamp advanced the jj operation log")
 			}
-			if f.FileExists(f.Root, "clean-filter-ran") {
-				t.Fatal("Stamp ran a clean filter")
+			for _, ran := range []string{"clean-filter-ran", "fsmonitor-ran"} {
+				if f.FileExists(f.Root, ran) {
+					t.Fatalf("Stamp left %s", ran)
+				}
 			}
 			if k.kind == KindJJWorkspace {
 				return
 			}
 			f.RunGit(root, "status")
-			if !f.FileExists(f.Root, "clean-filter-ran") {
-				t.Fatal("a plain git status never ran the clean filter; the fixture proves nothing")
+			for _, ran := range []string{"clean-filter-ran", "fsmonitor-ran"} {
+				if !f.FileExists(f.Root, ran) {
+					t.Fatalf("a plain git status never left %s; the fixture proves nothing", ran)
+				}
+			}
+		})
+	}
+}
+
+func TestStampSubmodule(t *testing.T) {
+	f := vcstest.New(t)
+	seedStampOrigin(f)
+	sub := filepath.Join(f.Root, "subrepo")
+	f.RunGit(f.Root, "init", "-q", "-b", "main", sub)
+	f.ConfigGit(sub)
+	f.WriteFile(sub, ".gitignore", "*.log\n")
+	f.WriteFile(sub, ".gitattributes", "*.dat filter=subspy\n")
+	f.WriteFile(sub, "s.txt", "sub\n")
+	f.WriteFile(sub, "x.dat", "data\n")
+	f.RunGit(sub, "add", "-A")
+	f.RunGit(sub, "commit", "-q", "-m", "sub")
+	newRepo := func(name string) (Worktree, string) {
+		root := f.GitClone(filepath.Join(f.Root, name))
+		f.RunGit(root, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+		f.RunGit(root, "commit", "-q", "-m", "add sub")
+		return stampWorktree(t, root, root, KindGit), filepath.Join(root, "sub")
+	}
+
+	t.Run("read-only", func(t *testing.T) {
+		wt, inner := newRepo("ro")
+		f.RunGit(inner, "config", "filter.subspy.clean", "touch '"+filepath.Join(f.Root, "sub-filter-ran")+"'; cat")
+		f.RunGit(inner, "config", "filter.subspy.required", "true")
+		f.RunGit(inner, "config", "core.fsmonitor", fsmonitorSentinel(t, f, "sub-fsmonitor-ran"))
+		setStampMtime(t, filepath.Join(inner, "x.dat"), time.Now().Add(time.Hour))
+		mustStamp(t, wt)
+		for _, ran := range []string{"sub-filter-ran", "sub-fsmonitor-ran"} {
+			if f.FileExists(f.Root, ran) {
+				t.Fatalf("Stamp left %s inside a submodule", ran)
+			}
+		}
+		f.RunGit(wt.Root, "status")
+		for _, ran := range []string{"sub-filter-ran", "sub-fsmonitor-ran"} {
+			if !f.FileExists(f.Root, ran) {
+				t.Fatalf("a plain git status never left %s; the fixture proves nothing", ran)
+			}
+		}
+	})
+
+	tests := []struct {
+		name    string
+		dirty   bool
+		mutate  func(t *testing.T, inner string)
+		changes bool
+	}{
+		{
+			name:    "edit inside a clean submodule",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited\n") },
+			changes: true,
+		},
+		{
+			name:    "untracked file inside a dirty submodule",
+			dirty:   true,
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "new.txt", "new\n") },
+			changes: true,
+		},
+		{
+			name: "commit inside a submodule",
+			mutate: func(_ *testing.T, inner string) {
+				f.ConfigGit(inner)
+				f.RunGit(inner, "commit", "-q", "--allow-empty", "-m", "moved")
+			},
+			changes: true,
+		},
+		{
+			name:   "ignored file inside a dirty submodule",
+			dirty:  true,
+			mutate: func(t *testing.T, inner string) { writeStampFile(t, inner, "noise.log", "noise\n") },
+		},
+		{
+			name:   "further edit inside a dirty submodule",
+			dirty:  true,
+			mutate: func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited again, longer\n") },
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wt, inner := newRepo(fmt.Sprintf("s%d", i))
+			if tc.dirty {
+				writeStampFile(t, inner, "s.txt", "dirty\n")
+			}
+			before := mustStamp(t, wt)
+			tc.mutate(t, inner)
+			after := mustStamp(t, wt)
+			if changed := before != after; changed != tc.changes {
+				t.Fatalf("stamp changed = %v, want %v", changed, tc.changes)
 			}
 		})
 	}
@@ -261,21 +378,37 @@ func TestStampLstatRecords(t *testing.T) {
 	}
 	tests := []struct {
 		prefix string
-		absent bool
+		suffix string
 	}{
-		{`lstat "d" `, false},
-		{`lstat "f" `, false},
-		{`lstat "f/child" `, true},
-		{`lstat "gone" `, true},
+		{`lstat "d" dir`, "dir"},
+		{`lstat "f" `, "600"},
+		{`lstat "f/child" absent`, "absent"},
+		{`lstat "gone" absent`, "absent"},
 	}
 	if len(records) != len(tests) {
 		t.Fatalf("records = %q, want %d", records, len(tests))
 	}
 	for i, tc := range tests {
-		if !strings.HasPrefix(records[i], tc.prefix) || strings.HasSuffix(records[i], " absent") != tc.absent {
-			t.Errorf("record %d = %q, want prefix %q absent=%v", i, records[i], tc.prefix, tc.absent)
+		if !strings.HasPrefix(records[i], tc.prefix) || !strings.HasSuffix(records[i], tc.suffix) {
+			t.Errorf("record %d = %q, want prefix %q suffix %q", i, records[i], tc.prefix, tc.suffix)
 		}
 	}
+}
+
+func fsmonitorSentinel(t *testing.T, f *vcstest.Fixture, ran string) string {
+	t.Helper()
+	hook := filepath.Join(f.Root, ran+"-hook")
+	script := "#!/bin/sh\ntouch '" + filepath.Join(f.Root, ran) + "'\nexit 1\n"
+	//nolint:gosec // G306: the fsmonitor hook must be executable; it lives in a test-controlled temp dir.
+	if err := os.WriteFile(hook, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return hook
+}
+
+func nestedStampRepo(t *testing.T, f *vcstest.Fixture, _ stampKind, root string) {
+	f.RunGit(root, "init", "-q", "nested")
+	writeStampFile(t, root, "nested/n.txt", "one\n")
 }
 
 func seedStampOrigin(f *vcstest.Fixture) {

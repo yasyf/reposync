@@ -23,11 +23,15 @@ import (
 // and the lstat of every changed and untracked path. An unstaged edit to a
 // tracked file or a new non-ignored file changes it with HEAD and the index
 // untouched; a change confined to ignored paths does not, because git prunes
-// ignored directories itself. Stamp reads the source as Capture does and never
-// writes it: no index refresh, no hooks, no filter drivers, and jj reads pinned
-// to the current operation without a snapshot. A KindJJWorkspace has no index
-// of its own, so its stamp covers the workspace's @ and @- commit ids and the
-// lstat of every non-ignored file instead of status records.
+// ignored directories itself. A directory path (a submodule or an untracked
+// nested repository, whose content Capture omits) hashes as its bare path, so
+// only its status record moves the stamp. Stamp reads the source as Capture
+// does and never writes it: no index refresh, no fsmonitor, no filter drivers
+// in the repository or any submodule, and jj reads pinned to the current
+// operation without a snapshot. A KindJJWorkspace has no index of its own, so
+// its stamp covers the workspace's @ and @- commit ids and the lstat of every
+// file either commit tracks plus every non-ignored file instead of status
+// records.
 func Stamp(ctx context.Context, wt Worktree) (string, error) {
 	records, err := stampRecords(ctx, wt)
 	if err != nil {
@@ -75,7 +79,11 @@ func gitStatusRecords(ctx context.Context, wt Worktree) ([]string, []string, err
 	if err != nil {
 		return nil, nil, err
 	}
-	env, err := vcs.FilterOverrideEnv(ctx, wt.Root)
+	subs, err := submoduleRoots(ctx, wt.Root)
+	if err != nil {
+		return nil, nil, err
+	}
+	env, err := vcs.FilterOverrideEnv(ctx, append([]string{wt.Root}, subs...)...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -116,10 +124,48 @@ func indexRecord(path string) (string, error) {
 	return fmt.Sprintf("index %d %d %d", st.Size, st.Mtimespec.Nano(), st.Ino), nil
 }
 
-// A jj workspace has no git index of its own: listing against an absent index
-// makes every non-ignored file an untracked "other", git still prunes ignored
-// directories, and Capture's private index is never read or written.
+func submoduleRoots(ctx context.Context, dir string) ([]string, error) {
+	var out bytes.Buffer
+	err := vcs.Exec(ctx, vcs.Cmd{
+		Dir:    dir,
+		Name:   "git",
+		Args:   []string{"-C", dir, "ls-files", "-z", "--stage"},
+		Env:    vcs.ReadOnlyGitEnv(),
+		Stdout: &out,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list gitlinks in %s: %w", dir, err)
+	}
+	var roots []string
+	last := ""
+	for rec := range strings.SplitSeq(out.String(), "\x00") {
+		meta, path, _ := strings.Cut(rec, "\t")
+		if !strings.HasPrefix(meta, "160000 ") || path == last {
+			continue
+		}
+		last = path
+		sub := filepath.Join(dir, filepath.FromSlash(path))
+		_, err := os.Lstat(filepath.Join(sub, ".git"))
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lstat %s: %w", sub, err)
+		}
+		nested, err := submoduleRoots(ctx, sub)
+		if err != nil {
+			return nil, err
+		}
+		roots = append(append(roots, sub), nested...)
+	}
+	return roots, nil
+}
+
 func jjWorkspaceFiles(ctx context.Context, wt Worktree) ([]string, error) {
+	tracked, err := jjRead(ctx, wt.Root, "log", "--no-graph", "-r", "@ | @-", "-T", `self.files().map(|e| e.path() ++ "\0").join("")`)
+	if err != nil {
+		return nil, err
+	}
 	scratch, err := os.MkdirTemp("", "reposync-stamp-")
 	if err != nil {
 		return nil, fmt.Errorf("scratch dir: %w", err)
@@ -138,7 +184,7 @@ func jjWorkspaceFiles(ctx context.Context, wt Worktree) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list jj workspace files: %w", err)
 	}
-	return strings.FieldsFunc(out.String(), func(r rune) bool { return r == 0 }), nil
+	return strings.FieldsFunc(tracked+out.String(), func(r rune) bool { return r == 0 }), nil
 }
 
 func lstatRecords(dir string, paths []string) ([]string, error) {
@@ -162,6 +208,10 @@ func lstatRecords(dir string, paths []string) ([]string, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("lstat %s: %w", p, err)
+		}
+		if info.IsDir() {
+			records = append(records, fmt.Sprintf("lstat %q dir", p))
+			continue
 		}
 		st, err := statT(info)
 		if err != nil {
