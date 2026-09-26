@@ -67,7 +67,11 @@ var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 //
 // Known limit: a file hidden by assume-unchanged or skip-worktree inside a
 // submodule leaves that submodule looking clean, exactly as git status reports
-// it; a submodule git reports dirty is always an omission.
+// it; a submodule git reports dirty, or one with a staged gitlink change, is
+// always an omission.
+//
+// Like git status, reading a split index freshens the mtime of its shared
+// index file; no byte under the git directory changes.
 //
 // It returns *GitVersionError when the host's git predates 2.44,
 // *DeferredError mid-operation, ErrBusy on a live lock or a HEAD, index, or file that moved

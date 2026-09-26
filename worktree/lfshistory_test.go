@@ -102,3 +102,48 @@ func TestStrictPointerOutsideAttributesIsRequired(t *testing.T) {
 		t.Fatalf("Capture error %v, want MissingLFSError %+v", err, want)
 	}
 }
+
+func TestCaptureTransientAttributeCommitsRequireLFSObject(t *testing.T) {
+	f := vcstest.New(t)
+	f.EnableLFS("*.dat")
+	asset := "historic dependency\x00\x02"
+	oid := vcstest.SHA256([]byte(asset))
+	f.RunGit(f.Seed, "config", "lfs.allowincompletepush", "true")
+	f.AdvanceOriginPath("asset.bin", crlfPointer(oid, len(asset)))
+	repo := f.LFSClone(filepath.Join(f.Root, "repo"))
+	f.WriteFile(repo, ".gitattributes", datAttrs+binAttrs)
+	f.RunGit(repo, "add", ".gitattributes")
+	f.RunGit(repo, "commit", "-qm", "enable binary LFS")
+	f.WriteFile(repo, ".gitattributes", datAttrs)
+	f.RunGit(repo, "add", ".gitattributes")
+	f.RunGit(repo, "commit", "-qm", "disable binary LFS")
+
+	_, err := capture(t, openStore(t), discoverAt(t, repo, repo), worktreetest.New(), worktree.Limits{})
+	var missing *worktree.MissingLFSError
+	if !errors.As(err, &missing) || len(missing.Objects) != 1 || missing.Objects[0].OID != oid {
+		t.Fatalf("err %v, want MissingLFSError for %s", err, oid)
+	}
+}
+
+func TestCapturePublishedLFSRenameShipsNothing(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "staged", true: "committed"}[commit], func(t *testing.T) {
+			f := vcstest.New(t)
+			f.EnableLFS("*.bin")
+			f.AdvanceOriginPath("base.bin", lfsBase)
+			repo := f.LFSClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "mv", "base.bin", "renamed.bin")
+			if commit {
+				f.RunGit(repo, "commit", "-qm", "rename published base asset")
+			}
+			if err := os.Remove(vcstest.LFSObjectPath(filepath.Join(repo, ".git"), vcstest.SHA256([]byte(lfsBase)))); err != nil {
+				t.Fatal(err)
+			}
+
+			snap, err := capture(t, openStore(t), discoverAt(t, repo, repo), worktreetest.New(), worktree.Limits{})
+			if err != nil || !snap.Complete || len(snap.LFSObjects) != 0 {
+				t.Fatalf("err %v complete=%v lfs objects %v, want the published object left to the receiver", err, snap.Complete, lfsOIDs(snap))
+			}
+		})
+	}
+}
