@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 )
@@ -52,14 +53,14 @@ func parseFlagged(out string) ([]flaggedEntry, error) {
 	return entries, nil
 }
 
-func (c *capture) hidden(ctx context.Context, status statusReport, format string, fileMode, sparse bool) ([]fileCandidate, []FileEntry, error) {
+func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapshot, fileMode, sparse bool) ([]fileCandidate, error) {
 	var out bytes.Buffer
 	if err := c.src.run(ctx, nil, &out, flaggedArgs...); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	flagged, err := parseFlagged(out.String())
 	if err != nil || len(flagged) == 0 {
-		return nil, nil, err
+		return nil, err
 	}
 	shown := map[string]bool{}
 	for _, e := range status.changed {
@@ -67,36 +68,86 @@ func (c *capture) hidden(ctx context.Context, status statusReport, format string
 			shown[e.path] = true
 		}
 	}
+	empty, err := blobID(snap.ObjectFormat, strings.NewReader(""), 0)
+	if err != nil {
+		return nil, err
+	}
+	var ita map[string]bool
+	if slices.ContainsFunc(flagged, func(e flaggedEntry) bool { return e.oid == empty }) {
+		if ita, err = c.src.intentToAdd(ctx); err != nil {
+			return nil, err
+		}
+	}
 	root, err := os.OpenRoot(c.wt.Root)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open worktree root: %w", err)
+		return nil, fmt.Errorf("open worktree root: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	var files []fileCandidate
-	var deleted []FileEntry
+	var gone []flaggedEntry
 	for _, e := range flagged {
-		if shown[e.path] || !blobModes[e.mode] {
+		if shown[e.path] {
+			continue
+		}
+		state, err := submoduleState(ctx, c.wt.Root, c.src.env, e)
+		if err != nil {
+			return nil, err
+		}
+		if state != "" && state != "S..." {
+			c.omitted = append(c.omitted, Omission{Path: e.path, Reason: OmitSubmodule})
+		}
+		if !blobModes[e.mode] {
 			continue
 		}
 		info, err := root.Lstat(e.path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || err == nil && info.IsDir():
-			if !e.skipWorktree || !sparse {
-				deleted = append(deleted, FileEntry{Path: e.path, Kind: FileDeleted, AssumeUnchanged: e.assumeUnchanged, SkipWorktree: e.skipWorktree})
-			}
+			gone = append(gone, e)
 			continue
 		case err != nil:
-			return nil, nil, fmt.Errorf("lstat %s: %w", e.path, err)
+			return nil, fmt.Errorf("lstat %s: %w", e.path, err)
 		}
-		same, err := matchesIndex(root, e, info, format, fileMode)
+		cand := fileCandidate{path: e.path, indexMode: e.mode, indexOID: e.oid, assumeUnchanged: e.assumeUnchanged, skipWorktree: e.skipWorktree}
+		if ita[e.path] {
+			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+			files = append(files, cand)
+			continue
+		}
+		same, err := matchesIndex(root, e, info, snap.ObjectFormat, fileMode)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if !same {
-			files = append(files, fileCandidate{path: e.path, indexMode: e.mode, indexOID: e.oid, assumeUnchanged: e.assumeUnchanged, skipWorktree: e.skipWorktree})
+			files = append(files, cand)
 		}
 	}
-	return files, deleted, nil
+	deleted, err := c.hiddenDeletions(ctx, gone, sparse)
+	if err != nil {
+		return nil, err
+	}
+	snap.Files = append(snap.Files, deleted...)
+	return files, nil
+}
+
+func (c *capture) hiddenDeletions(ctx context.Context, gone []flaggedEntry, sparse bool) ([]FileEntry, error) {
+	var outside []string
+	for _, e := range gone {
+		if e.skipWorktree && sparse {
+			outside = append(outside, e.path)
+		}
+	}
+	included, err := c.src.sparseIncluded(ctx, outside)
+	if err != nil {
+		return nil, err
+	}
+	var deleted []FileEntry
+	for _, e := range gone {
+		if e.skipWorktree && sparse && !included[e.path] {
+			continue
+		}
+		deleted = append(deleted, FileEntry{Path: e.path, Kind: FileDeleted, AssumeUnchanged: e.assumeUnchanged, SkipWorktree: e.skipWorktree})
+	}
+	return deleted, nil
 }
 
 func matchesIndex(root *os.Root, e flaggedEntry, info fs.FileInfo, format string, fileMode bool) (bool, error) {

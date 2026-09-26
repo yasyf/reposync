@@ -19,24 +19,22 @@ type source struct {
 	env []string
 }
 
-func newSource(ctx context.Context, wt Worktree, privateIndex string) (source, error) {
-	dirs := []string{wt.CommonDir}
-	if wt.Kind != KindJJWorkspace {
-		subs, err := submoduleRoots(ctx, wt.Root)
-		if err != nil {
-			return source{}, err
-		}
-		dirs = append([]string{wt.Root}, subs...)
+func newSource(ctx context.Context, wt Worktree, privateIndex, parent string) (source, error) {
+	top, list := wt.Root, []string{"ls-files", "-z", "--stage"}
+	var repo []string
+	if wt.Kind == KindJJWorkspace {
+		top, list = wt.CommonDir, []string{"ls-tree", "-r", "-z", parent}
+		repo = []string{"GIT_DIR=" + wt.CommonDir, "GIT_WORK_TREE=" + wt.Root, "GIT_INDEX_FILE=" + privateIndex}
 	}
-	env, err := vcs.FilterOverrideEnv(ctx, dirs...)
+	subs, err := gitlinkRoots(ctx, wt.Root, append(vcs.ReadOnlyGitEnv(), repo...), list...)
 	if err != nil {
 		return source{}, err
 	}
-	env = append(env, "GIT_NO_LAZY_FETCH=1")
-	if wt.Kind == KindJJWorkspace {
-		env = append(env, "GIT_DIR="+wt.CommonDir, "GIT_WORK_TREE="+wt.Root, "GIT_INDEX_FILE="+privateIndex)
+	env, err := vcs.FilterOverrideEnv(ctx, append([]string{top}, subs...)...)
+	if err != nil {
+		return source{}, err
 	}
-	return source{dir: wt.Root, env: env}, nil
+	return source{dir: wt.Root, env: append(env, repo...)}, nil
 }
 
 func (s source) run(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
@@ -95,6 +93,52 @@ func (s source) filterAttr(ctx context.Context, paths []string) (map[string]stri
 		attrs[fields[i]] = fields[i+2]
 	}
 	return attrs, nil
+}
+
+func (s source) intentToAdd(ctx context.Context) (map[string]bool, error) {
+	added := func(visibility string) (map[string]bool, error) {
+		var out bytes.Buffer
+		if err := s.run(ctx, nil, &out, "diff-index", "--cached", "--name-only", "--diff-filter=A", "-z", visibility, "HEAD"); err != nil {
+			return nil, err
+		}
+		paths := map[string]bool{}
+		for p := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
+			if p != "" {
+				paths[p] = true
+			}
+		}
+		return paths, nil
+	}
+	ita, err := added("--ita-visible-in-index")
+	if err != nil {
+		return nil, err
+	}
+	staged, err := added("--ita-invisible-in-index")
+	if err != nil {
+		return nil, err
+	}
+	for p := range staged {
+		delete(ita, p)
+	}
+	return ita, nil
+}
+
+func (s source) sparseIncluded(ctx context.Context, paths []string) (map[string]bool, error) {
+	included := map[string]bool{}
+	if len(paths) == 0 {
+		return included, nil
+	}
+	var out bytes.Buffer
+	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	if err := s.run(ctx, stdin, &out, "sparse-checkout", "check-rules", "-z"); err != nil {
+		return nil, err
+	}
+	for p := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
+		if p != "" {
+			included[p] = true
+		}
+	}
+	return included, nil
 }
 
 func (s source) blobSizes(ctx context.Context, oids []string) (map[string]int64, error) {

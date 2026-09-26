@@ -52,8 +52,10 @@ var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 // the repository or any populated submodule, no hook, no jj snapshot. A tracked
 // path whose assume-unchanged or skip-worktree index flag hides its worktree
 // state from git status is captured when its raw worktree bytes, type, or exec
-// bit differ from the index entry; a skip-worktree path absent from a sparse
-// checkout is the sparse pattern's doing, not an edit. With core.filemode=false
+// bit differ from the index entry, and always when it is intent-to-add; a
+// so-flagged submodule with local changes is omitted like any other; and a
+// skip-worktree path absent from a sparse checkout whose patterns exclude it
+// is the sparse pattern's doing, not an edit. With core.filemode=false
 // the index mode is authoritative: the repository ignores the exec bit, so a
 // chmod alone is not work in progress. A KindJJWorkspace captures every file
 // its @ tracks, even one .gitignore now matches. It returns *DeferredError
@@ -165,14 +167,14 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	c.next = newLedger(c.wt.ID)
 	c.next.Chain = slices.Clone(c.prev.Chain)
 	c.next.Files, c.next.Blobs = map[string]cachedFile{}, map[string]cachedBlob{}
-	if c.src, err = newSource(ctx, c.wt, c.store.privateIndexPath(c.wt.ID)); err != nil {
-		return Snapshot{}, err
-	}
 	snap := Snapshot{Schema: SnapshotSchema, Worktree: c.wt}
 	if c.wt.Kind != KindGit {
 		if snap.JJ, snap.Head.Commit, err = c.jjState(ctx); err != nil {
 			return Snapshot{}, err
 		}
+	}
+	if c.src, err = newSource(ctx, c.wt, c.store.privateIndexPath(c.wt.ID), snap.Head.Commit); err != nil {
+		return Snapshot{}, err
 	}
 	if c.wt.Kind == KindJJWorkspace {
 		if err := c.refreshPrivateIndex(ctx, snap.Head.Commit); err != nil {
@@ -214,12 +216,11 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 		}
 		files = append(files, tracked...)
 	} else {
-		hidden, deleted, err := c.hidden(ctx, status, snap.ObjectFormat, fileMode, cfg["core.sparsecheckout"] == "true")
+		hidden, err := c.hidden(ctx, status, &snap, fileMode, cfg["core.sparsecheckout"] == "true")
 		if err != nil {
 			return Snapshot{}, err
 		}
 		files = append(files, hidden...)
-		snap.Files = append(snap.Files, deleted...)
 	}
 	_, lfsClean := cfg["filter.lfs.clean"]
 	_, lfsProcess := cfg["filter.lfs.process"]

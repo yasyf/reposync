@@ -273,28 +273,39 @@ func TestStampSubmodule(t *testing.T) {
 		return stampWorktree(t, root, root, KindGit), filepath.Join(root, "sub")
 	}
 
-	t.Run("read-only", func(t *testing.T) {
-		wt, inner := newRepo("ro")
-		f.RunGit(inner, "config", "filter.subspy.clean", "touch '"+filepath.Join(f.Root, "sub-filter-ran")+"'; cat")
-		f.RunGit(inner, "config", "filter.subspy.required", "true")
-		f.RunGit(inner, "config", "core.fsmonitor", fsmonitorSentinel(t, f, "sub-fsmonitor-ran"))
-		setStampMtime(t, filepath.Join(inner, "x.dat"), time.Now().Add(time.Hour))
-		mustStamp(t, wt)
-		for _, ran := range []string{"sub-filter-ran", "sub-fsmonitor-ran"} {
-			if f.FileExists(f.Root, ran) {
-				t.Fatalf("Stamp left %s inside a submodule", ran)
+	for i, flag := range []string{"", "--assume-unchanged"} {
+		t.Run("read-only flag="+flag, func(t *testing.T) {
+			wt, inner := newRepo(fmt.Sprintf("ro%d", i))
+			if flag != "" {
+				f.RunGit(wt.Root, "update-index", flag, "sub")
 			}
-		}
-		f.RunGit(wt.Root, "status")
-		for _, ran := range []string{"sub-filter-ran", "sub-fsmonitor-ran"} {
-			if !f.FileExists(f.Root, ran) {
-				t.Fatalf("a plain git status never left %s; the fixture proves nothing", ran)
+			filterRan := filepath.Join(f.Root, fmt.Sprintf("sub-filter-ran-%d", i))
+			fsmonitorRan := fmt.Sprintf("sub-fsmonitor-ran-%d", i)
+			f.RunGit(inner, "config", "filter.subspy.clean", "touch '"+filterRan+"'; cat")
+			f.RunGit(inner, "config", "filter.subspy.required", "true")
+			f.RunGit(inner, "config", "core.fsmonitor", fsmonitorSentinel(t, f, fsmonitorRan))
+			setStampMtime(t, filepath.Join(inner, "x.dat"), time.Now().Add(time.Hour))
+			mustStamp(t, wt)
+			for _, ran := range []string{filepath.Base(filterRan), fsmonitorRan} {
+				if f.FileExists(f.Root, ran) {
+					t.Fatalf("Stamp left %s inside a submodule", ran)
+				}
 			}
-		}
-	})
+			f.RunGit(wt.Root, "status")
+			if flag != "" {
+				f.RunGit(inner, "status")
+			}
+			for _, ran := range []string{filepath.Base(filterRan), fsmonitorRan} {
+				if !f.FileExists(f.Root, ran) {
+					t.Fatalf("a plain git status never left %s; the fixture proves nothing", ran)
+				}
+			}
+		})
+	}
 
 	tests := []struct {
 		name    string
+		flag    string
 		dirty   bool
 		mutate  func(t *testing.T, inner string)
 		changes bool
@@ -303,6 +314,39 @@ func TestStampSubmodule(t *testing.T) {
 			name:    "edit inside a clean submodule",
 			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited\n") },
 			changes: true,
+		},
+		{
+			name:    "edit inside an assume-unchanged submodule",
+			flag:    "--assume-unchanged",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited\n") },
+			changes: true,
+		},
+		{
+			name:    "edit inside a skip-worktree submodule",
+			flag:    "--skip-worktree",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited\n") },
+			changes: true,
+		},
+		{
+			name:    "untracked file inside a skip-worktree submodule",
+			flag:    "--skip-worktree",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "new.txt", "new\n") },
+			changes: true,
+		},
+		{
+			name: "commit inside an assume-unchanged submodule",
+			flag: "--assume-unchanged",
+			mutate: func(_ *testing.T, inner string) {
+				f.ConfigGit(inner)
+				f.RunGit(inner, "commit", "-q", "--allow-empty", "-m", "moved")
+			},
+			changes: true,
+		},
+		{
+			name:   "further edit inside a dirty assume-unchanged submodule",
+			flag:   "--assume-unchanged",
+			dirty:  true,
+			mutate: func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited again, longer\n") },
 		},
 		{
 			name:    "untracked file inside a dirty submodule",
@@ -332,6 +376,9 @@ func TestStampSubmodule(t *testing.T) {
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			wt, inner := newRepo(fmt.Sprintf("s%d", i))
+			if tc.flag != "" {
+				f.RunGit(wt.Root, "update-index", tc.flag, "sub")
+			}
 			if tc.dirty {
 				writeStampFile(t, inner, "s.txt", "dirty\n")
 			}
@@ -342,6 +389,34 @@ func TestStampSubmodule(t *testing.T) {
 				t.Fatalf("stamp changed = %v, want %v", changed, tc.changes)
 			}
 		})
+	}
+}
+
+func TestStampNoLazyFetch(t *testing.T) {
+	f := vcstest.New(t)
+	writeStampFile(t, f.Seed, "in/x.txt", "in\n")
+	writeStampFile(t, f.Seed, "out/crlf.txt", "a\r\nb\r\n")
+	f.RunGit(f.Seed, "add", "-A")
+	f.RunGit(f.Seed, "commit", "-q", "-m", "crlf outside the cone")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	f.RunGit(f.Origin, "config", "uploadpack.allowFilter", "true")
+	root := filepath.Join(f.Root, "partial")
+	f.RunGit(f.Root, "clone", "-q", "--filter=blob:none", "--sparse", "file://"+f.Origin, root)
+	f.ConfigGit(root)
+	f.RunGit(root, "sparse-checkout", "set", "in")
+	f.RunGit(root, "config", "core.autocrlf", "true")
+	writeStampFile(t, root, "out/crlf.txt", "a\r\nc\r\n")
+	wt := stampWorktree(t, root, root, KindGit)
+	objects := filepath.Join(root, ".git", "objects")
+
+	before := f.SnapshotTree(objects)
+	mustStamp(t, wt)
+	if !reflect.DeepEqual(f.SnapshotTree(objects), before) {
+		t.Fatal("Stamp lazily fetched missing objects into the source object store")
+	}
+	f.RunGit(root, "status")
+	if reflect.DeepEqual(f.SnapshotTree(objects), before) {
+		t.Fatal("a plain git status fetched nothing; the fixture proves nothing")
 	}
 }
 

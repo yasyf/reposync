@@ -130,7 +130,7 @@ func TestExecStreamsStdinAndStdout(t *testing.T) {
 func TestReadOnlyGitEnv(t *testing.T) {
 	env := ReadOnlyGitEnv()
 	for _, want := range []string{
-		"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=gc.auto",
+		"GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=gc.auto",
 		"GIT_CONFIG_KEY_2=core.fsmonitor", "GIT_CONFIG_VALUE_2=false",
 	} {
 		if !slices.Contains(env, want) {

@@ -26,10 +26,13 @@ import (
 // with HEAD and the index untouched; a change confined to ignored paths does
 // not, because git prunes ignored directories itself. A directory path (a
 // submodule or an untracked nested repository, whose content Capture omits)
-// hashes as its bare path, so only its status record moves the stamp. Stamp
-// reads the source as Capture does and never writes it: no index refresh, no
-// fsmonitor, no filter drivers in the repository or any submodule, and jj reads
-// pinned to the current operation without a snapshot. A KindJJWorkspace has no
+// hashes as its bare path, so only its status record moves the stamp; a
+// submodule whose flag hides it from status contributes the same new-commit,
+// tracked-change, and untracked-content state read from the submodule itself.
+// Stamp reads the source as Capture does and never writes it: no index
+// refresh, no fsmonitor, no filter drivers in the repository or any submodule,
+// no lazy fetch into a partial clone, and jj reads pinned to the current
+// operation without a snapshot. A KindJJWorkspace has no
 // index of its own, so its stamp covers the workspace's @ and @- commit ids and
 // the lstat of every file either commit tracks plus every non-ignored file
 // instead of status records.
@@ -115,7 +118,11 @@ func gitStatusRecords(ctx context.Context, wt Worktree) ([]string, []string, err
 		entries = append(entries, fmt.Sprintf("? %q", p))
 	}
 	for _, e := range flagged {
-		entries = append(entries, fmt.Sprintf("flag %t %t %s %s %q", e.assumeUnchanged, e.skipWorktree, e.mode, e.oid, e.path))
+		state, err := submoduleState(ctx, wt.Root, env, e)
+		if err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, fmt.Sprintf("flag %t %t %s %s %q %q", e.assumeUnchanged, e.skipWorktree, e.mode, e.oid, state, e.path))
 		paths = append(paths, e.path)
 	}
 	slices.Sort(entries)
@@ -139,14 +146,12 @@ func indexRecord(path string) (string, error) {
 }
 
 func submoduleRoots(ctx context.Context, dir string) ([]string, error) {
+	return gitlinkRoots(ctx, dir, vcs.ReadOnlyGitEnv(), "ls-files", "-z", "--stage")
+}
+
+func gitlinkRoots(ctx context.Context, dir string, env []string, list ...string) ([]string, error) {
 	var out bytes.Buffer
-	err := vcs.Exec(ctx, vcs.Cmd{
-		Dir:    dir,
-		Name:   "git",
-		Args:   []string{"-C", dir, "ls-files", "-z", "--stage"},
-		Env:    vcs.ReadOnlyGitEnv(),
-		Stdout: &out,
-	})
+	err := vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: append([]string{"-C", dir}, list...), Env: env, Stdout: &out})
 	if err != nil {
 		return nil, fmt.Errorf("list gitlinks in %s: %w", dir, err)
 	}
@@ -159,12 +164,12 @@ func submoduleRoots(ctx context.Context, dir string) ([]string, error) {
 		}
 		last = path
 		sub := filepath.Join(dir, filepath.FromSlash(path))
-		_, err := os.Lstat(filepath.Join(sub, ".git"))
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-			continue
-		}
+		populated, err := isPopulated(sub)
 		if err != nil {
-			return nil, fmt.Errorf("lstat %s: %w", sub, err)
+			return nil, err
+		}
+		if !populated {
+			continue
 		}
 		nested, err := submoduleRoots(ctx, sub)
 		if err != nil {
@@ -173,6 +178,51 @@ func submoduleRoots(ctx context.Context, dir string) ([]string, error) {
 		roots = append(append(roots, sub), nested...)
 	}
 	return roots, nil
+}
+
+func isPopulated(sub string) (bool, error) {
+	_, err := os.Lstat(filepath.Join(sub, ".git"))
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lstat %s: %w", sub, err)
+	}
+	return true, nil
+}
+
+func submoduleState(ctx context.Context, root string, env []string, e flaggedEntry) (string, error) {
+	if e.mode != "160000" {
+		return "", nil
+	}
+	dir := filepath.Join(root, filepath.FromSlash(e.path))
+	populated, err := isPopulated(dir)
+	if err != nil || !populated {
+		return "", err
+	}
+	st, err := readStatus(ctx, dir, env)
+	if err != nil {
+		return "", err
+	}
+	state := []byte("S...")
+	if st.commit != e.oid {
+		state[1] = 'C'
+	}
+	if len(st.unmerged) > 0 {
+		state[2] = 'M'
+	}
+	for _, c := range st.changed {
+		if c.sub != "S..U" {
+			state[2] = 'M'
+		}
+		if c.sub[0] == 'S' && c.sub[3] == 'U' {
+			state[3] = 'U'
+		}
+	}
+	if len(st.untracked) > 0 {
+		state[3] = 'U'
+	}
+	return string(state), nil
 }
 
 func jjWorkspaceFiles(ctx context.Context, wt Worktree) ([]string, error) {

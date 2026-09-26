@@ -456,6 +456,25 @@ func TestCaptureOmissions(t *testing.T) {
 			f.RunGit(repo, "commit", "-qm", "submodule")
 			f.WriteFile(filepath.Join(repo, "sub"), "README.md", "dirty inside\n")
 		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
+		{"assume-unchanged-dirty-submodule", func(_ *testing.T, f *vcstest.Fixture, repo string) {
+			f.RunGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+			f.RunGit(repo, "commit", "-qm", "submodule")
+			f.RunGit(repo, "update-index", "--assume-unchanged", "sub")
+			f.WriteFile(filepath.Join(repo, "sub"), "README.md", "dirty inside\n")
+		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
+		{"skip-worktree-untracked-submodule", func(_ *testing.T, f *vcstest.Fixture, repo string) {
+			f.RunGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+			f.RunGit(repo, "commit", "-qm", "submodule")
+			f.RunGit(repo, "update-index", "--skip-worktree", "sub")
+			f.WriteFile(filepath.Join(repo, "sub"), "new.txt", "untracked inside\n")
+		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
+		{"skip-worktree-moved-submodule", func(_ *testing.T, f *vcstest.Fixture, repo string) {
+			f.RunGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+			f.RunGit(repo, "commit", "-qm", "submodule")
+			f.RunGit(repo, "update-index", "--skip-worktree", "sub")
+			f.ConfigGit(filepath.Join(repo, "sub"))
+			f.RunGit(filepath.Join(repo, "sub"), "commit", "-q", "--allow-empty", "-m", "moved")
+		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
 		{"nested-repo", func(_ *testing.T, f *vcstest.Fixture, repo string) {
 			f.RunGit(repo, "init", "-q", filepath.Join(repo, "nested"))
 			f.WriteFile(filepath.Join(repo, "nested"), "x.txt", "x\n")

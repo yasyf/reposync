@@ -107,7 +107,8 @@ func Exec(ctx context.Context, c Cmd) error {
 // ReadOnlyGitEnv is the environment for git reads against a repository
 // reposync must never write: no optional index refresh (GIT_OPTIONAL_LOCKS=0),
 // no fsmonitor hook or daemon (core.fsmonitor=false, which a submodule's child
-// git inherits), no credential prompt, and the default gc/maintenance
+// git inherits), no lazy fetch of an object a partial clone lacks
+// (GIT_NO_LAZY_FETCH=1), no credential prompt, and the default gc/maintenance
 // suppression.
 func ReadOnlyGitEnv() []string {
 	return readOnlyEnv(nil)
@@ -156,7 +157,7 @@ func FilterOverrideEnv(ctx context.Context, dirs ...string) ([]string, error) {
 }
 
 func readOnlyEnv(extra [][2]string) []string {
-	return append(configEnv(slices.Concat(readOnlyGitConfig, extra)), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	return append(configEnv(slices.Concat(readOnlyGitConfig, extra)), "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
 }
 
 func filterDrivers(out []byte) ([]string, error) {
