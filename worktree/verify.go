@@ -56,8 +56,13 @@ type Verification struct {
 // never lazily fetched — the head commit and every tree and blob of its tree
 // and the staged tree, not their history — so a checkout lacking any of them,
 // partial or damaged, is not Ready, while one lacking only history can be; and
-// every file artifact is present in src. A bundle tip the mirror already holds is validated and pinned from the
-// prerequisites recorded when it was imported, without re-reading its artifact.
+// every file artifact is present in src. A bundle the mirror already imported,
+// whose tip it still holds, is validated and pinned from the prerequisites
+// recorded for that bundle, without re-reading its artifact; the receiver
+// commits a held tip's mirrored objects build on stay pinned while any
+// snapshot names the tip. A staged blob the mirror reads back corrupt is
+// re-imported from its artifact, and one still read back corrupt, from a copy
+// Verify cannot replace, fails with ErrCorruptObject.
 // It is idempotent, and it rebuilds mirror state whose objects went missing.
 // It returns *GitVersionError when the host's git predates 2.44.
 func (s *Store) Verify(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts VerifyOptions) (Verification, error) {
@@ -144,7 +149,7 @@ func (s *Store) verifyLocked(ctx context.Context, reg registry.Registry, snap Sn
 	if err != nil {
 		return v, m, err
 	}
-	entry, absent, err := m.importSnapshot(ctx, snap, src, l.Tips)
+	entry, absent, err := m.importSnapshot(ctx, snap, src, l)
 	if err != nil {
 		return v, m, errors.Join(err, m.reconcile(ctx, l))
 	}
@@ -227,7 +232,7 @@ func absentArtifacts(ctx context.Context, src ArtifactSource, snap Snapshot) ([]
 	return absent, nil
 }
 
-func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource, tips map[string][]string) (mirrorEntry, []string, error) {
+func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource, l mirrorLedger) (mirrorEntry, []string, error) {
 	var entry mirrorEntry
 	if len(snap.History) == 0 {
 		if err := m.pin(ctx, snap.Requires); err != nil {
@@ -245,9 +250,11 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 	delivered := map[string]bool{}
 	for i, b := range snap.History {
 		entry.Tips = append(entry.Tips, b.Tip)
+		entry.Bundles = append(entry.Bundles, b.Artifact.Digest)
+		var external []string
 		admit := func(prereqs []string) error {
-			external, err := externalPrerequisites(b, prereqs, snap.Requires, delivered)
-			if err != nil {
+			var err error
+			if external, err = externalPrerequisites(b, prereqs, snap.Requires, delivered); err != nil {
 				return err
 			}
 			if err := m.pin(ctx, external); err != nil {
@@ -256,11 +263,15 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 			entry.Pins = append(entry.Pins, external...)
 			return nil
 		}
-		prereqs, recorded := tips[b.Tip]
-		if recorded && have[tipPrefix+b.Tip] == b.Tip {
+		mirrored := have[tipPrefix+b.Tip] == b.Tip
+		prereqs, recorded := l.Bundles[b.Artifact.Digest]
+		if recorded && mirrored {
 			err = admit(prereqs)
 		} else if prereqs, err = m.importLink(ctx, src, b, admit); err == nil {
-			tips[b.Tip] = prereqs
+			l.Bundles[b.Artifact.Digest] = prereqs
+			if _, known := l.Tips[b.Tip]; !known || !mirrored {
+				l.Tips[b.Tip] = external
+			}
 		}
 		if err != nil {
 			return entry, nil, err
@@ -463,23 +474,37 @@ func (m mirror) healStaged(ctx context.Context, snap Snapshot, src ArtifactSourc
 			continue
 		}
 		checked = append(checked, e.OID)
-		stored, err := m.hashObject(ctx, func(w io.Writer) error {
-			return recvGitTo(ctx, nil, nil, w, "--git-dir="+m.dir, "cat-file", "blob", e.OID)
-		})
+		stored, err := m.storedBlob(ctx, e)
 		if err != nil {
-			return fmt.Errorf("stored staged blob %s: %w", e.Path, err)
+			return err
 		}
 		if stored == e.OID {
 			continue
 		}
-		if err := os.Remove(filepath.Join(m.dir, "objects", e.OID[:2], e.OID[2:])); err != nil {
+		if err := os.Remove(filepath.Join(m.dir, "objects", e.OID[:2], e.OID[2:])); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("drop corrupt staged blob %s: %w", e.Path, err)
 		}
 		if err := m.importBlob(ctx, src, e); err != nil {
 			return err
 		}
+		if stored, err = m.storedBlob(ctx, e); err != nil {
+			return err
+		}
+		if stored != e.OID {
+			return fmt.Errorf("%w: staged blob %s %s reads back as %s", ErrCorruptObject, e.Path, e.OID, stored)
+		}
 	}
 	return nil
+}
+
+func (m mirror) storedBlob(ctx context.Context, e IndexEntry) (string, error) {
+	stored, err := m.hashObject(ctx, func(w io.Writer) error {
+		return recvGitTo(ctx, nil, nil, w, "--git-dir="+m.dir, "cat-file", "blob", e.OID)
+	})
+	if err != nil {
+		return "", fmt.Errorf("stored staged blob %s: %w", e.Path, err)
+	}
+	return stored, nil
 }
 
 func (m mirror) hashObject(ctx context.Context, write func(io.Writer) error, args ...string) (string, error) {

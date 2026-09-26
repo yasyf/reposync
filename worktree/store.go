@@ -21,7 +21,7 @@ import (
 const (
 	lockWait     = 10 * time.Second
 	ledgerSchema = "reposync-worktree-ledger-v2"
-	mirrorSchema = "reposync-mirror-ledger-v2"
+	mirrorSchema = "reposync-mirror-ledger-v3"
 )
 
 // Store is reposync's private on-disk state for worktree capture and restore:

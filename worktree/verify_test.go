@@ -515,6 +515,85 @@ func TestVerifyHealsCorruptStagedBlob(t *testing.T) {
 	}
 }
 
+func TestVerifyRefusesUnhealableStagedBlob(t *testing.T) {
+	tests := []struct {
+		name          string
+		corruptMirror bool
+		release       bool
+	}{
+		{"mirror and receiver copies, cached snapshot", true, false},
+		{"mirror and receiver copies, released snapshot", true, true},
+		{"receiver copy only", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			h.f.WriteFile(h.src, "staged.txt", "original staged bytes\n")
+			h.f.RunGit(h.src, "add", "staged.txt")
+			snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+				t.Fatalf("first verify = %+v, want ready", v)
+			}
+			oid := h.git(h.src, "rev-parse", ":staged.txt")
+			mirrored := filepath.Join(h.mirrorDir(), "objects", oid[:2], oid[2:])
+			if tt.corruptMirror {
+				writeLooseBlob(t, mirrored, "CORRUPTED mirror bytes\n")
+			} else if err := os.Remove(mirrored); err != nil {
+				t.Fatal(err)
+			}
+			writeLooseBlob(t, filepath.Join(h.recv, ".git", "objects", oid[:2], oid[2:]), "CORRUPTED receiver bytes\n")
+			if tt.release {
+				if err := h.store.Release(t.Context(), h.recvReg(), snap); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			v, err := h.store.Verify(t.Context(), h.recvReg(), snap, h.art, worktree.VerifyOptions{})
+			if v.Ready || !errors.Is(err, worktree.ErrCorruptObject) {
+				t.Fatalf("verify over a corrupt receiver copy of %s = %+v, %v; want not ready with ErrCorruptObject", oid, v, err)
+			}
+		})
+	}
+}
+
+func TestVerifyAdmitsRecutBundleForMirroredTip(t *testing.T) {
+	h := newGitHarness(t)
+	base := h.git(h.src, "rev-parse", "origin/main")
+	published := h.commit(h.src, "published.txt", "published later\n")
+	tip := h.commit(h.src, "private.txt", "still private\n")
+	st, wt := openStore(t), discoverAt(t, h.src, h.src)
+	first := mustCapture(t, st, wt, h.art)
+	if !slices.Equal(first.Requires, []string{base}) {
+		t.Fatalf("first requires %v, want [%s]", first.Requires, base)
+	}
+	if v := h.verify(first, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("first verify = %+v, want ready", v)
+	}
+
+	h.f.RunGit(h.src, "push", "-q", "origin", published+":refs/heads/main")
+	h.f.RunGit(h.recv, "pull", "-q")
+	h.f.RunGit(h.src, "fetch", "-q", "origin")
+	h.art.Remove(first.History[0].Artifact)
+	second := mustCapture(t, st, wt, h.art)
+	if len(second.History) != 1 || second.History[0].Tip != tip || second.History[0].Artifact == first.History[0].Artifact || !slices.Equal(second.Requires, []string{published}) {
+		t.Fatalf("second history %+v requires %v, want tip %s recut on [%s]", second.History, second.Requires, tip, published)
+	}
+
+	if v, err := h.store.Verify(t.Context(), h.recvReg(), second, h.art, worktree.VerifyOptions{}); err != nil || !v.Ready {
+		t.Fatalf("verify recut bundle for mirrored tip %s = %+v, %v; want ready", tip, v, err)
+	}
+	if v := h.verify(first, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("re-verify original snapshot from its cached bundle = %+v, want ready", v)
+	}
+	if err := h.store.Release(t.Context(), h.recvReg(), first); err != nil {
+		t.Fatal(err)
+	}
+	if pins, want := h.pins(), slices.Sorted(slices.Values([]string{base, published})); !slices.Equal(pins, want) {
+		t.Fatalf("pins = %v, want %v: the mirrored tip still builds on %s", pins, want, base)
+	}
+	h.assertFaithful(h.restore(second, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+}
+
 func TestVerifyRejectsUndeclaredBundlePrerequisite(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -605,7 +684,10 @@ func writeLooseBlob(t *testing.T, path, content string) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
