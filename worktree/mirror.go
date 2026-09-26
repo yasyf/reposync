@@ -349,8 +349,3 @@ func holds(path, oid string, size int64) (bool, error) {
 	}
 	return err == nil, err
 }
-
-func sizeIs(path string, size int64) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() == size
-}
