@@ -28,6 +28,8 @@ const (
 	lfsCheckoutBatch = 256
 )
 
+var receiverEnv = []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null' 'core.fsmonitor'='false'", "GIT_NO_LAZY_FETCH=1"}
+
 // RestoreOptions places a restored snapshot.
 type RestoreOptions struct {
 	// Dest is the absolute path of the new recovery worktree; it must not exist.
@@ -39,8 +41,9 @@ type RestoreOptions struct {
 	// Fresh ignores an existing recovery checkout of the same source worktree
 	// and creates another; nothing is ever overwritten either way.
 	Fresh bool
-	// FetchLFS allows fetching LFS base assets missing locally from the LFS
-	// remote; cc-sync sets it only when network policy allows bulk transfer.
+	// FetchLFS allows fetching LFS base assets missing locally, or failing
+	// hash verification there, from the LFS remote; a corrupt local object is
+	// replaced. cc-sync sets it only when network policy allows bulk transfer.
 	FetchLFS bool
 	// ApplySparse re-applies the snapshot's sparse-checkout patterns and
 	// skip-worktree exceptions in the recovery worktree with git
@@ -55,7 +58,7 @@ type RestoreOptions struct {
 // checkout of the same source worktree was found and left untouched; Applied
 // is the snapshot digest it holds and Newer reports that snap is newer.
 // LFSPending lists paths still holding LFS pointers because their objects are
-// not local. Sparse is the source's sparse-checkout configuration, applied
+// not local or fail hash verification. Sparse is the source's sparse-checkout configuration, applied
 // in Path only under RestoreOptions.ApplySparse. Exact reports that the
 // worktree's status and sparse-checkout match the snapshot; Differences lists
 // every mismatch otherwise.
@@ -154,7 +157,7 @@ func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapsho
 func (m mirror) restore(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch string) (Restored, error) {
 	ns := recoveryPrefix + strings.TrimPrefix(snap.Digest, digestPrefix)[:12] + "/"
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
-	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
+	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
 		return Restored{}, fmt.Errorf("fetch snapshot into checkout: %w", err)
 	}
 	r, err := m.materialize(ctx, snap, src, opts, branch, ns)
@@ -171,20 +174,23 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if err != nil {
 		return Restored{}, err
 	}
-	inherited, err := sparseEnabled(ctx, dest, "core.sparseCheckout")
-	if err != nil {
+	if err := disableInheritedSparse(ctx, dest, admin); err != nil {
 		return Restored{}, err
-	}
-	if inherited {
-		if _, err := recvGit(ctx, skip, nil, "-C", dest, "sparse-checkout", "disable"); err != nil {
-			return Restored{}, fmt.Errorf("disable inherited sparse-checkout: %w", err)
-		}
 	}
 	if _, err := recvGit(ctx, skip, nil, "-C", dest, "read-tree", "-u", "--reset", ns+"index^{tree}"); err != nil {
 		return Restored{}, fmt.Errorf("check out staged tree: %w", err)
 	}
-	if opts.ApplySparse && snap.Sparse != nil {
-		if err := applySparse(ctx, dest, *snap.Sparse); err != nil {
+	sparse := opts.ApplySparse && snap.Sparse != nil
+	if sparse {
+		if err := applySparsePatterns(ctx, dest, *snap.Sparse); err != nil {
+			return Restored{}, err
+		}
+	}
+	if err := markIntentToAdd(ctx, dest, snap); err != nil {
+		return Restored{}, err
+	}
+	if sparse {
+		if err := applySparseExceptions(ctx, dest, snap.Sparse.Exceptions); err != nil {
 			return Restored{}, err
 		}
 	}
@@ -196,24 +202,7 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if err != nil {
 		return Restored{}, err
 	}
-	ita := map[string]bool{}
-	var itaPaths []string
-	for _, e := range snap.IntentToAdd {
-		ita[e.Path] = true
-		itaPaths = append(itaPaths, e.Path)
-	}
-	var files, placeholders []FileEntry
-	for _, f := range snap.Files {
-		if f.Kind == FileDeleted && ita[f.Path] {
-			placeholders = append(placeholders, f)
-		} else {
-			files = append(files, f)
-		}
-	}
-	if err := applyFiles(ctx, dest, src, files); err != nil {
-		return Restored{}, err
-	}
-	if err := markIntentToAdd(ctx, dest, src, itaPaths, placeholders); err != nil {
+	if err := applyFiles(ctx, dest, src, snap.Files); err != nil {
 		return Restored{}, err
 	}
 	if err := applyFlags(ctx, dest, snap.Files); err != nil {
@@ -330,6 +319,9 @@ func (m mirror) checkCollisions(ctx context.Context, snap Snapshot, dest string)
 		return err
 	}
 	var paths []string
+	for _, e := range snap.IntentToAdd {
+		paths = append(paths, e.Path)
+	}
 	for _, f := range snap.Files {
 		if f.Kind != FileDeleted {
 			paths = append(paths, f.Path)
@@ -358,7 +350,11 @@ func (m mirror) checkCollisions(ctx context.Context, snap Snapshot, dest string)
 		}
 		files[k] = p
 		for d := path.Dir(p); d != "."; d = path.Dir(d) {
-			dirs[fold(d)] = d
+			k := fold(d)
+			if o, ok := dirs[k]; ok && o != d {
+				return fmt.Errorf("%w: directories %q and %q", ErrPathCollision, o, d)
+			}
+			dirs[k] = d
 		}
 	}
 	for k, p := range files {
@@ -398,8 +394,8 @@ func folding(dest string) (caseFold, normFold bool, err error) {
 	return same(strings.ToUpper(base)), same(norm.NFD.String(base)), nil
 }
 
-func markIntentToAdd(ctx context.Context, dest string, src ArtifactSource, paths []string, placeholders []FileEntry) error {
-	if len(paths) == 0 {
+func markIntentToAdd(ctx context.Context, dest string, snap Snapshot) error {
+	if len(snap.IntentToAdd) == 0 {
 		return nil
 	}
 	root, err := os.OpenRoot(dest)
@@ -407,20 +403,43 @@ func markIntentToAdd(ctx context.Context, dest string, src ArtifactSource, paths
 		return fmt.Errorf("open %s: %w", dest, err)
 	}
 	defer func() { _ = root.Close() }()
-	for _, f := range placeholders {
-		name := filepath.FromSlash(f.Path)
-		if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
-			return fmt.Errorf("intent-to-add placeholder %s: %w", f.Path, err)
+	var paths strings.Builder
+	for _, e := range snap.IntentToAdd {
+		if err := placeholder(root, filepath.FromSlash(e.Path), e.Mode); err != nil {
+			return fmt.Errorf("intent-to-add placeholder %s: %w", e.Path, err)
 		}
-		if err := root.WriteFile(name, nil, 0o644); err != nil {
-			return fmt.Errorf("intent-to-add placeholder %s: %w", f.Path, err)
-		}
+		paths.WriteString(e.Path + "\x00")
 	}
-	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
-	if _, err := recvGit(ctx, []string{"GIT_LITERAL_PATHSPECS=1"}, stdin, "-C", dest, "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+	stdin := strings.NewReader(paths.String())
+	if _, err := recvGit(ctx, []string{"GIT_LITERAL_PATHSPECS=1"}, stdin, "-C", dest, "add", "-N", "-f", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
 		return fmt.Errorf("mark intent-to-add: %w", err)
 	}
-	return applyFiles(ctx, dest, src, placeholders)
+	return nil
+}
+
+func placeholder(root *os.Root, name, mode string) error {
+	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return err
+	}
+	switch mode {
+	case "120000":
+		return root.Symlink(".", name)
+	case "100755":
+		return root.WriteFile(name, nil, 0o755)
+	}
+	return root.WriteFile(name, nil, 0o644)
+}
+
+func gitMode(f FileEntry) string {
+	switch {
+	case f.Kind == FileDeleted:
+		return "000000"
+	case f.Kind == FileSymlink:
+		return "120000"
+	case f.Executable:
+		return "100755"
+	}
+	return "100644"
 }
 
 func applyFiles(ctx context.Context, dest string, src ArtifactSource, files []FileEntry) error {
@@ -446,7 +465,7 @@ func applyFile(ctx context.Context, root *os.Root, src ArtifactSource, f FileEnt
 	name := filepath.FromSlash(f.Path)
 	switch f.Kind {
 	case FileDeleted:
-		if err := root.Remove(name); err != nil {
+		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		for dir := filepath.Dir(name); dir != "."; dir = filepath.Dir(dir) {
@@ -507,24 +526,41 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetc
 	if err != nil {
 		return nil, err
 	}
-	split := func() (local, pending []string) {
+	valid := map[string]bool{}
+	split := func() (local, pending []string, err error) {
 		for p, ptr := range pointers {
-			switch {
-			case overwritten[p]:
-			case sizeIs(m.checkoutLFSPath(ptr.OID), ptr.Size):
+			if overwritten[p] {
+				continue
+			}
+			if !valid[ptr.OID] {
+				if valid[ptr.OID], err = holds(m.checkoutLFSPath(ptr.OID), ptr.OID, ptr.Size); err != nil {
+					return nil, nil, err
+				}
+			}
+			if valid[ptr.OID] {
 				local = append(local, p)
-			default:
+			} else {
 				pending = append(pending, p)
 			}
 		}
-		return local, pending
+		return local, pending, nil
 	}
-	local, pending := split()
+	local, pending, err := split()
+	if err != nil {
+		return nil, err
+	}
 	if fetch && len(pending) > 0 {
+		for _, p := range pending {
+			if err := os.Remove(m.checkoutLFSPath(pointers[p].OID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("discard corrupt lfs object for %s: %w", p, err)
+			}
+		}
 		if _, err := recvGit(ctx, nil, nil, "-C", dest, "lfs", "fetch"); err != nil {
 			return nil, fmt.Errorf("fetch lfs base assets: %w", err)
 		}
-		local, pending = split()
+		if local, pending, err = split(); err != nil {
+			return nil, err
+		}
 	}
 	slices.Sort(local)
 	for chunk := range slices.Chunk(local, lfsCheckoutBatch) {
@@ -664,7 +700,7 @@ func checkoutPointers(ctx context.Context, dest string, paths []string, oids map
 	return pointers, nil
 }
 
-func applySparse(ctx context.Context, dest string, sp Sparse) error {
+func applySparsePatterns(ctx context.Context, dest string, sp Sparse) error {
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
 	patterns := strings.NewReader(strings.Join(sp.Patterns, "\n") + "\n")
 	if _, err := recvGit(ctx, skip, patterns, "-C", dest, "sparse-checkout", "set", "--no-cone", "--stdin"); err != nil {
@@ -675,16 +711,21 @@ func applySparse(ctx context.Context, dest string, sp Sparse) error {
 			return fmt.Errorf("apply cone sparse-checkout: %w", err)
 		}
 	}
-	skipped, err := skipWorktree(ctx, dest, nil)
+	return nil
+}
+
+func applySparseExceptions(ctx context.Context, dest string, exceptions []string) error {
+	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
+	skipped, err := skipWorktree(ctx, dest, receiverEnv)
 	if err != nil {
 		return err
 	}
-	got, err := sparseExceptions(ctx, dest, nil, skipped)
+	got, err := sparseExceptions(ctx, dest, receiverEnv, skipped)
 	if err != nil {
 		return err
 	}
 	var materialize, hide []string
-	for _, p := range symmetricDifference(sp.Exceptions, got) {
+	for _, p := range symmetricDifference(exceptions, got) {
 		if skipped[p] {
 			materialize = append(materialize, p)
 		} else {
@@ -741,28 +782,67 @@ func sparseEnabled(ctx context.Context, dest, key string) (bool, error) {
 	return strings.TrimSpace(out) == "true", nil
 }
 
+func disableInheritedSparse(ctx context.Context, dest, admin string) error {
+	inherited, err := sparseEnabled(ctx, dest, "core.sparseCheckout")
+	if err != nil || !inherited {
+		return err
+	}
+	perWorktree, err := sparseEnabled(ctx, dest, "extensions.worktreeConfig")
+	if err != nil {
+		return err
+	}
+	if perWorktree {
+		if _, err := recvGit(ctx, []string{"GIT_LFS_SKIP_SMUDGE=1"}, nil, "-C", dest, "sparse-checkout", "disable"); err != nil {
+			return fmt.Errorf("disable inherited sparse-checkout: %w", err)
+		}
+		return nil
+	}
+	if err := os.Remove(filepath.Join(admin, "info", "sparse-checkout")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("drop inherited sparse-checkout patterns: %w", err)
+	}
+	return nil
+}
+
 func checkoutSparse(ctx context.Context, dest, admin string) (*Sparse, error) {
 	enabled, err := sparseEnabled(ctx, dest, "core.sparseCheckout")
 	if err != nil || !enabled {
 		return nil, err
 	}
+	if _, err := os.Lstat(filepath.Join(admin, "info", "sparse-checkout")); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	cone, err := sparseEnabled(ctx, dest, "core.sparseCheckoutCone")
 	if err != nil {
 		return nil, err
 	}
-	return readSparse(ctx, dest, nil, admin, cone)
+	return readSparse(ctx, dest, receiverEnv, admin, cone)
 }
 
 func fidelity(ctx context.Context, dest, admin string, snap Snapshot, pending []string) ([]string, error) {
-	st, err := readStatus(ctx, dest, []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null' 'core.fsmonitor'='false'", "GIT_NO_LAZY_FETCH=1"})
+	st, err := readStatus(ctx, dest, receiverEnv)
 	if err != nil {
 		return nil, err
 	}
 	zero := strings.Repeat("0", len(snap.Head.Commit))
+	itaModes := map[string]string{}
+	for _, e := range snap.IntentToAdd {
+		itaModes[e.Path] = e.Mode
+	}
+	var empty string
+	if len(itaModes) > 0 {
+		out, err := recvGit(ctx, nil, strings.NewReader(""), "-C", dest, "hash-object", "--stdin")
+		if err != nil {
+			return nil, fmt.Errorf("hash empty blob: %w", err)
+		}
+		empty = strings.TrimSpace(out)
+	}
 	want := map[string]pathState{}
 	for _, e := range snap.Index {
 		mode, oid := e.Mode, e.OID
-		if mode == "" {
+		switch ita, ok := itaModes[e.Path]; {
+		case mode == "" && ok:
+			mode, oid = ita, empty
+		case mode == "":
 			mode, oid = "000000", zero
 		}
 		ps := want[e.Path]
@@ -776,17 +856,9 @@ func fidelity(ctx context.Context, dest, admin string, snap Snapshot, pending []
 			continue
 		}
 		ps := want[f.Path]
-		switch {
-		case f.Untracked:
+		ps.work = gitMode(f)
+		if f.Untracked {
 			ps.work = "untracked"
-		case f.Kind == FileDeleted:
-			ps.work = "000000"
-		case f.Kind == FileSymlink:
-			ps.work = "120000"
-		case f.Executable:
-			ps.work = "100755"
-		default:
-			ps.work = "100644"
 		}
 		want[f.Path] = ps
 	}
@@ -834,6 +906,11 @@ func fidelity(ctx context.Context, dest, admin string, snap Snapshot, pending []
 	for _, p := range pending {
 		diffs = append(diffs, p+": lfs object pending")
 	}
+	itaDiffs, err := intentToAddModeDiffs(ctx, dest, snap.IntentToAdd)
+	if err != nil {
+		return nil, err
+	}
+	diffs = append(diffs, itaDiffs...)
 	sparse, err := checkoutSparse(ctx, dest, admin)
 	if err != nil {
 		return nil, err
@@ -847,6 +924,31 @@ func fidelity(ctx context.Context, dest, admin string, snap Snapshot, pending []
 		diffs = append(diffs, fmt.Sprintf("sparse checkout: want %+v, got %+v", *snap.Sparse, *sparse))
 	}
 	slices.Sort(diffs)
+	return diffs, nil
+}
+
+func intentToAddModeDiffs(ctx context.Context, dest string, want []IntentToAdd) ([]string, error) {
+	if len(want) == 0 {
+		return nil, nil
+	}
+	out, err := recvGit(ctx, nil, nil, "-C", dest, "ls-files", "-z", "-s")
+	if err != nil {
+		return nil, fmt.Errorf("read index modes: %w", err)
+	}
+	modes := map[string]string{}
+	for rec := range strings.SplitSeq(strings.TrimSuffix(out, "\x00"), "\x00") {
+		meta, p, ok := strings.Cut(rec, "\t")
+		if !ok {
+			return nil, fmt.Errorf("ls-files -s record %q", rec)
+		}
+		modes[p], _, _ = strings.Cut(meta, " ")
+	}
+	var diffs []string
+	for _, e := range want {
+		if got := modes[e.Path]; got != e.Mode {
+			diffs = append(diffs, fmt.Sprintf("%s: want intent-to-add index mode %s, got %q", e.Path, e.Mode, got))
+		}
+	}
 	return diffs, nil
 }
 
