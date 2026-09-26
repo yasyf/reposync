@@ -36,6 +36,9 @@ var (
 	// neither the manifest's Requires names nor an earlier link of its chain
 	// carries.
 	ErrUndeclaredPrerequisite = errors.New("bundle prerequisite undeclared by the manifest")
+	// ErrCorruptObject means an object the snapshot needs reads back as bytes
+	// that do not hash to its id, from a copy Verify cannot replace.
+	ErrCorruptObject = errors.New("object store serves a corrupt copy")
 )
 
 type mirror struct {
@@ -58,20 +61,22 @@ type mirrorLedger struct {
 	Schema    string                 `json:"schema"`
 	Snapshots map[string]mirrorEntry `json:"snapshots"`
 	Tips      map[string][]string    `json:"tips"`
+	Bundles   map[string][]string    `json:"bundles"`
 }
 
 type mirrorEntry struct {
-	Pins []string `json:"pins"`
-	Tips []string `json:"tips,omitempty"`
-	LFS  []string `json:"lfs,omitempty"`
+	Pins    []string `json:"pins"`
+	Tips    []string `json:"tips,omitempty"`
+	Bundles []string `json:"bundles,omitempty"`
+	LFS     []string `json:"lfs,omitempty"`
 }
 
 func (l mirrorLedger) Validate() error {
 	if l.Schema != mirrorSchema {
 		return fmt.Errorf("mirror ledger schema %q, want %q", l.Schema, mirrorSchema)
 	}
-	if l.Snapshots == nil || l.Tips == nil {
-		return errors.New("nil snapshots or tips")
+	if l.Snapshots == nil || l.Tips == nil || l.Bundles == nil {
+		return errors.New("nil snapshots, tips, or bundles")
 	}
 	for key := range l.Snapshots {
 		wt, digest, ok := strings.Cut(key, "/")
@@ -79,39 +84,61 @@ func (l mirrorLedger) Validate() error {
 			return fmt.Errorf("snapshot key %q", key)
 		}
 	}
-	for tip, prereqs := range l.Tips {
-		for _, oid := range append([]string{tip}, prereqs...) {
-			if !isHex(oid, 40) && !isHex(oid, 64) {
-				return fmt.Errorf("tip %q prerequisite %q", tip, oid)
-			}
+	for tip, externals := range l.Tips {
+		if err := validateOIDs(append([]string{tip}, externals...)); err != nil {
+			return fmt.Errorf("tip %q: %w", tip, err)
+		}
+	}
+	for digest, prereqs := range l.Bundles {
+		if sum, ok := strings.CutPrefix(digest, digestPrefix); !ok || !isHex(sum, 64) {
+			return fmt.Errorf("bundle digest %q", digest)
+		}
+		if err := validateOIDs(prereqs); err != nil {
+			return fmt.Errorf("bundle %q: %w", digest, err)
 		}
 	}
 	return nil
 }
 
-func (l mirrorLedger) keep() (pins, tips, lfs map[string]bool) {
-	pins, tips, lfs = map[string]bool{}, map[string]bool{}, map[string]bool{}
+func validateOIDs(oids []string) error {
+	for _, oid := range oids {
+		if !isHex(oid, 40) && !isHex(oid, 64) {
+			return fmt.Errorf("object id %q", oid)
+		}
+	}
+	return nil
+}
+
+func (l mirrorLedger) keep() (pins, tips, bundles, lfs map[string]bool) {
+	pins, tips, bundles, lfs = map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, e := range l.Snapshots {
 		for _, p := range e.Pins {
 			pins[p] = true
 		}
 		for _, t := range e.Tips {
 			tips[t] = true
+			for _, p := range l.Tips[t] {
+				pins[p] = true
+			}
+		}
+		for _, b := range e.Bundles {
+			bundles[b] = true
 		}
 		for _, o := range e.LFS {
 			lfs[o] = true
 		}
 	}
-	return pins, tips, lfs
+	return pins, tips, bundles, lfs
 }
 
 func (m mirror) load() (mirrorLedger, error) {
-	return readDurable(m.ledger, mirrorLedger{Schema: mirrorSchema, Snapshots: map[string]mirrorEntry{}, Tips: map[string][]string{}})
+	return readDurable(m.ledger, mirrorLedger{Schema: mirrorSchema, Snapshots: map[string]mirrorEntry{}, Tips: map[string][]string{}, Bundles: map[string][]string{}})
 }
 
 func (m mirror) save(l mirrorLedger) error {
-	_, tips, _ := l.keep()
+	_, tips, bundles, _ := l.keep()
 	maps.DeleteFunc(l.Tips, func(tip string, _ []string) bool { return !tips[tip] })
+	maps.DeleteFunc(l.Bundles, func(digest string, _ []string) bool { return !bundles[digest] })
 	return writeDurable(m.ledger, l)
 }
 
@@ -246,7 +273,7 @@ func (m mirror) unreachable(ctx context.Context, refs []string) (bool, error) {
 }
 
 func (m mirror) reconcile(ctx context.Context, l mirrorLedger) error {
-	pins, tips, lfs := l.keep()
+	pins, tips, _, lfs := l.keep()
 	if m.checkout != "" {
 		refs, err := listRefs(ctx, []string{"-C", m.checkout}, pinPrefix)
 		if err != nil {
