@@ -65,6 +65,14 @@ func (s *Store) privateIndexPath(worktreeID string) string {
 	return filepath.Join(s.root, "source", worktreeID+".index")
 }
 
+func (s *Store) mirrorDir(origin string) string {
+	return filepath.Join(s.root, "mirror", repoKey(origin)+".git")
+}
+
+func (s *Store) mirrorLedgerPath(origin string) string {
+	return filepath.Join(s.root, "mirror", repoKey(origin)+".json")
+}
+
 func (s *Store) tempDir() string {
 	return filepath.Join(s.root, "tmp")
 }
@@ -100,7 +108,7 @@ func initBareAlternate(ctx context.Context, dir, objectFormat, objectsDir string
 		return err
 	}
 	if got := strings.TrimSpace(format.String()); got != objectFormat {
-		return fmt.Errorf("%s has object format %s, want %s", dir, got, objectFormat)
+		return fmt.Errorf("%w: %s is %s, snapshot is %s", ErrObjectFormat, dir, got, objectFormat)
 	}
 	alternates := filepath.Join(dir, "objects", "info", "alternates")
 	want := []byte(objectsDir + "\n")
