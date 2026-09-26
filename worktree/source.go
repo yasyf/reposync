@@ -51,11 +51,8 @@ func (s source) output(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-func (s source) config(ctx context.Context, pattern string, file string) (map[string]string, error) {
-	args := []string{"config", "-z"}
-	if file != "" {
-		args = append(args, "-f", file)
-	}
+func (s source) config(ctx context.Context, pattern string, opts ...string) (map[string]string, error) {
+	args := append([]string{"config", "-z"}, opts...)
 	var out bytes.Buffer
 	err := s.run(ctx, nil, &out, append(args, "--get-regexp", pattern)...)
 	var exitErr *exec.ExitError

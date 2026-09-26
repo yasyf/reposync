@@ -172,7 +172,11 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if snap.ObjectFormat, err = c.src.output(ctx, "rev-parse", "--show-object-format"); err != nil {
 		return Snapshot{}, err
 	}
-	cfg, err := c.src.config(ctx, `^(core\.filemode|core\.sparsecheckout|core\.sparsecheckoutcone|filter\.lfs\.(clean|process)|lfs\.url|remote\.origin\.lfsurl)$`, "")
+	cfg, err := c.src.config(ctx, `^(filter\.lfs\.(clean|process)|lfs\.url|remote\.origin\.lfsurl)$`)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	flags, err := c.src.config(ctx, `^core\.(filemode|sparsecheckout|sparsecheckoutcone)$`, "--type=bool")
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -225,7 +229,7 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	fileMode := cfg["core.filemode"] != "false"
+	fileMode := flags["core.filemode"] != "false"
 	entries, err := c.captureFiles(ctx, files, attrs, fileMode)
 	if err != nil {
 		return Snapshot{}, err
@@ -234,8 +238,8 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err := c.recheck(ctx, before, snap.Head.Commit); err != nil {
 		return Snapshot{}, err
 	}
-	if cfg["core.sparsecheckout"] == "true" && c.wt.GitDir != "" {
-		if snap.Sparse, err = readSparse(c.wt.GitDir, cfg["core.sparsecheckoutcone"] == "true"); err != nil {
+	if flags["core.sparsecheckout"] == "true" && c.wt.GitDir != "" {
+		if snap.Sparse, err = readSparse(c.wt.GitDir, flags["core.sparsecheckoutcone"] == "true"); err != nil {
 			return Snapshot{}, err
 		}
 	}
@@ -552,7 +556,7 @@ func (c *capture) lfsInfo(ctx context.Context, cfg map[string]string, refs []LFS
 	if _, err := os.Lstat(lfsconfig); errors.Is(err, fs.ErrNotExist) {
 		return info, nil
 	}
-	file, err := c.src.config(ctx, `^(lfs\.url|remote\.origin\.lfsurl)$`, lfsconfig)
+	file, err := c.src.config(ctx, `^(lfs\.url|remote\.origin\.lfsurl)$`, "-f", lfsconfig)
 	if err != nil {
 		return nil, err
 	}
