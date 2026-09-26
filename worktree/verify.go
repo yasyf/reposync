@@ -25,7 +25,8 @@ type VerifyOptions struct {
 }
 
 // Verification is this host's readiness to restore a snapshot. Missing names
-// what blocks it: hex commit ids the checkout lacks, artifact digests the
+// what blocks it: hex object ids the checkout lacks (required commits, or
+// trees and blobs of the head commit and staged tree), artifact digests the
 // source lacks, and "omitted:<reason>:<path>" for WIP the capture could not
 // carry, so an incomplete snapshot is never Ready.
 type Verification struct {
@@ -37,10 +38,12 @@ type Verification struct {
 // Verify proves the receiver can restore snap: the registered checkout holds
 // every required commit (pinned under refs/reposync/pins/ so gc keeps them),
 // each history bundle, staged blob, and shipped LFS object hash-verifies and is
-// imported into the store's mirror, the staged tree is rebuilt there, and
-// every file artifact is present in src. It is idempotent, and it rebuilds
-// mirror state whose objects went missing. It returns *GitVersionError when the
-// host's git predates 2.44.
+// imported into the store's mirror, the staged tree is rebuilt there, every
+// tree and blob of the head commit and staged tree is local (never lazily
+// fetched, so a partial or damaged checkout is not Ready), and every file
+// artifact is present in src. It is idempotent, and it rebuilds mirror state
+// whose objects went missing. It returns *GitVersionError when the host's git
+// predates 2.44.
 func (s *Store) Verify(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts VerifyOptions) (Verification, error) {
 	if err := requireGit(ctx); err != nil {
 		return Verification{}, err
@@ -125,9 +128,13 @@ func (s *Store) verifyLocked(ctx context.Context, reg registry.Registry, snap Sn
 	if err != nil {
 		return v, m, err
 	}
-	entry, err := m.importSnapshot(ctx, snap, src)
+	entry, absent, err := m.importSnapshot(ctx, snap, src)
 	if err != nil {
 		return v, m, errors.Join(err, m.reconcile(ctx, l))
+	}
+	if len(absent) > 0 {
+		v.Missing = absent
+		return v, m, m.reconcile(ctx, l)
 	}
 	l.Snapshots[snapshotKey(snap)] = entry
 	if err := m.save(l); err != nil {
@@ -200,21 +207,21 @@ func absentArtifacts(ctx context.Context, src ArtifactSource, snap Snapshot) ([]
 	return absent, nil
 }
 
-func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource) (mirrorEntry, error) {
+func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource) (mirrorEntry, []string, error) {
 	entry := mirrorEntry{Requires: snap.Requires}
 	pins := make([]string, len(snap.Requires))
 	for i, oid := range snap.Requires {
 		pins[i] = "update " + pinPrefix + oid + " " + oid
 	}
 	if err := updateRefs(ctx, []string{"-C", m.checkout}, pins); err != nil {
-		return entry, fmt.Errorf("pin required commits: %w", err)
+		return entry, nil, fmt.Errorf("pin required commits: %w", err)
 	}
 	if err := m.repair(ctx); err != nil {
-		return entry, err
+		return entry, nil, err
 	}
 	have, err := listRefs(ctx, []string{"--git-dir=" + m.dir}, snapshotPrefix)
 	if err != nil {
-		return entry, err
+		return entry, nil, err
 	}
 	for _, b := range snap.History {
 		entry.Tips = append(entry.Tips, b.Tip)
@@ -222,27 +229,51 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 			continue
 		}
 		if err := m.importLink(ctx, src, b); err != nil {
-			return entry, err
+			return entry, nil, err
 		}
 	}
 	head, index := snapshotPrefix+snapshotKey(snap)+"/head", snapshotPrefix+snapshotKey(snap)+"/index"
-	if have[head] == "" || have[index] == "" {
+	cached := have[head] != "" && have[index] != ""
+	roots := []string{snap.Head.Commit}
+	if cached {
+		roots = append(roots, index)
+	}
+	absent, err := m.absentClosure(ctx, roots)
+	if err != nil || len(absent) > 0 {
+		return entry, absent, err
+	}
+	if !cached {
 		staged, err := m.buildIndex(ctx, snap, src)
 		if err != nil {
-			return entry, err
+			return entry, nil, err
 		}
 		refs := []string{"update " + head + " " + snap.Head.Commit, "update " + index + " " + staged}
 		if err := updateRefs(ctx, []string{"--git-dir=" + m.dir}, refs); err != nil {
-			return entry, fmt.Errorf("record snapshot refs: %w", err)
+			return entry, nil, fmt.Errorf("record snapshot refs: %w", err)
 		}
 	}
 	for _, o := range snap.LFSObjects {
 		if err := m.importLFS(ctx, src, o); err != nil {
-			return entry, err
+			return entry, nil, err
 		}
 		entry.LFS = append(entry.LFS, o.OID)
 	}
-	return entry, nil
+	return entry, nil, nil
+}
+
+func (m mirror) absentClosure(ctx context.Context, commits []string) ([]string, error) {
+	args := append([]string{"rev-list", "--objects", "--no-walk", "--missing=print", "--quiet"}, commits...)
+	out, err := m.git(ctx, nil, nil, args...)
+	if err != nil {
+		return nil, fmt.Errorf("check snapshot objects: %w", err)
+	}
+	var absent []string
+	for l := range strings.Lines(out) {
+		if oid, ok := strings.CutPrefix(strings.TrimSuffix(l, "\n"), "?"); ok {
+			absent = append(absent, oid)
+		}
+	}
+	return absent, nil
 }
 
 func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle) error {

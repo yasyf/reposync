@@ -351,3 +351,77 @@ func TestVerifyNeverLazyFetches(t *testing.T) {
 		t.Fatalf("verify = %+v, want not ready missing %s with no lazy fetch", v, next)
 	}
 }
+
+func TestVerifyRequiresLocalBaseObjects(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, f *vcstest.Fixture) (recv string, lost func(src string) string, heal func(recv string))
+	}{
+		{"sparse blobless clone", func(t *testing.T, f *vcstest.Fixture) (string, func(string) string, func(string)) {
+			if err := os.MkdirAll(filepath.Join(f.Seed, "excluded"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			f.AdvanceOriginPath("excluded/asset.txt", "outside the sparse cone\n")
+			f.RunGit(f.Origin, "config", "uploadpack.allowFilter", "true")
+			f.RunGit(f.Origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+			recv := filepath.Join(f.Root, "recv")
+			f.RunGit(f.Root, "clone", "-q", "--filter=blob:none", "--sparse", "file://"+f.Origin, recv)
+			f.ConfigGit(recv)
+			return recv,
+				func(src string) string {
+					return strings.TrimSpace(f.RunGit(src, "rev-parse", "HEAD:excluded/asset.txt"))
+				},
+				func(recv string) { f.RunGit(recv, "sparse-checkout", "disable") }
+		}},
+		{"lost base blob", func(t *testing.T, f *vcstest.Fixture) (string, func(string) string, func(string)) {
+			if err := os.MkdirAll(filepath.Join(f.Seed, "lib"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			f.AdvanceOriginPath("lib/base.txt", "untouched base file\n")
+			recv := f.GitClone(filepath.Join(f.Root, "recv"))
+			oid := strings.TrimSpace(f.RunGit(recv, "rev-parse", "HEAD:lib/base.txt"))
+			content := f.RunGit(recv, "cat-file", "blob", oid)
+			if err := os.Remove(filepath.Join(recv, ".git", "objects", oid[:2], oid[2:])); err != nil {
+				t.Fatal(err)
+			}
+			return recv,
+				func(string) string { return oid },
+				func(recv string) {
+					f.WriteFile(f.Root, "base.bak", content)
+					f.RunGit(recv, "hash-object", "-w", filepath.Join(f.Root, "base.bak"))
+				}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			recv, lost, heal := tt.setup(t, f)
+			h := newHarness(t, f, f.GitClone(filepath.Join(f.Root, "src")), recv)
+			h.f.WriteFile(h.src, "staged.txt", "staged\n")
+			h.f.RunGit(h.src, "add", "staged.txt")
+			snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+			oid := lost(h.src)
+
+			for _, opts := range []worktree.VerifyOptions{{}, {FetchOrigin: true}} {
+				if v := h.verify(snap, opts); v.Ready || !slices.Equal(v.Missing, []string{oid}) {
+					t.Fatalf("verify %+v = %+v, want not ready missing [%s]", opts, v, oid)
+				}
+			}
+			if refs := h.mirrorRefs(); len(refs) != 0 {
+				t.Fatalf("mirror refs after unready verify: %v", refs)
+			}
+			if pins := h.pins(); len(pins) != 0 {
+				t.Fatalf("pins after unready verify: %v", pins)
+			}
+			if got := h.git(h.recv, "rev-list", "--objects", "--missing=print", "--quiet", "HEAD^{tree}"); got != "?"+oid {
+				t.Fatalf("receiver lacks %q, want only %s: verify must never fetch it", got, oid)
+			}
+
+			heal(h.recv)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready || len(v.Missing) != 0 {
+				t.Fatalf("verify after healing = %+v, want ready", v)
+			}
+			h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+		})
+	}
+}
