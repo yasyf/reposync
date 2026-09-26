@@ -2,7 +2,9 @@ package worktree_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -423,5 +425,142 @@ func TestVerifyRequiresLocalBaseObjects(t *testing.T) {
 			}
 			h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
 		})
+	}
+}
+
+func TestVerifyHealsCorruptStagedBlob(t *testing.T) {
+	tests := []struct {
+		name    string
+		between func(h *harness, snap worktree.Snapshot)
+	}{
+		{"cached snapshot", func(*harness, worktree.Snapshot) {}},
+		{"released snapshot", func(h *harness, snap worktree.Snapshot) {
+			if err := h.store.Release(h.t.Context(), h.recvReg(), snap); err != nil {
+				h.t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			h.f.WriteFile(h.src, "staged.txt", "original staged bytes\n")
+			h.f.RunGit(h.src, "add", "staged.txt")
+			snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+				t.Fatalf("first verify = %+v, want ready", v)
+			}
+			oid := h.git(h.src, "rev-parse", ":staged.txt")
+			writeLooseBlob(t, filepath.Join(h.mirrorDir(), "objects", oid[:2], oid[2:]), "CORRUPTED staged bytes\n")
+			if got := h.git(h.mirrorDir(), "cat-file", "blob", oid); got != "CORRUPTED staged bytes" {
+				t.Fatalf("mirror serves %q, want the corrupt bytes", got)
+			}
+
+			tt.between(h, snap)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready || len(v.Missing) != 0 {
+				t.Fatalf("re-verify = %+v, want ready", v)
+			}
+			if got := h.git(h.mirrorDir(), "cat-file", "blob", oid); got != "original staged bytes" {
+				t.Fatalf("mirror serves %q after re-verify, want the staged bytes", got)
+			}
+			h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+		})
+	}
+}
+
+func TestVerifyRejectsUndeclaredBundlePrerequisite(t *testing.T) {
+	tests := []struct {
+		name  string
+		prime func(h *harness, snap worktree.Snapshot) []string
+	}{
+		{"fresh bundle", func(*harness, worktree.Snapshot) []string { return nil }},
+		{"cached tip", func(h *harness, snap worktree.Snapshot) []string {
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+				h.t.Fatalf("genuine verify = %+v, want ready", v)
+			}
+			h.art.Remove(snap.History[0].Artifact)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+				h.t.Fatalf("re-verify without the cached bundle = %+v, want ready", v)
+			}
+			return snap.Requires
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			h.commit(h.src, "feature.txt", "private history\n")
+			snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+			prereq := h.git(h.src, "rev-parse", "origin/main")
+			if !slices.Equal(snap.History[0].Prerequisites, []string{prereq}) || !slices.Equal(snap.Requires, []string{prereq}) {
+				t.Fatalf("captured prerequisites %v requires %v, want [%s]", snap.History[0].Prerequisites, snap.Requires, prereq)
+			}
+			wantPins := tt.prime(h, snap)
+
+			tampered := snap
+			tampered.Requires = nil
+			tampered = h.seal(tampered)
+			v, err := h.store.Verify(t.Context(), h.recvReg(), tampered, h.art, worktree.VerifyOptions{})
+			if !errors.Is(err, worktree.ErrUndeclaredPrerequisite) || v.Ready {
+				t.Fatalf("verify with undeclared prerequisite %s = %+v, %v; want not ready with ErrUndeclaredPrerequisite", prereq, v, err)
+			}
+			if pins := h.pins(); !slices.Equal(pins, wantPins) {
+				t.Fatalf("pins = %v, want %v", pins, wantPins)
+			}
+			if ref, ok := h.mirrorRefs()[worktree.SnapshotPrefix+worktree.SnapshotKey(tampered)+"/head"]; ok {
+				t.Fatalf("rejected snapshot recorded in the mirror at %s", ref)
+			}
+		})
+	}
+}
+
+func TestVerifyPinsSurviveReceiverGC(t *testing.T) {
+	h := newGitHarness(t)
+	h.commit(h.src, "feature.txt", "private history\n")
+	st, wt := openStore(t), discoverAt(t, h.src, h.src)
+	first := mustCapture(t, st, wt, h.art)
+	h.f.WriteFile(h.src, "wip.txt", "reuses the cached tip\n")
+	second := mustCapture(t, st, wt, h.art)
+	if len(second.History) != 1 || second.History[0].Tip != first.History[0].Tip || second.History[0].Artifact != first.History[0].Artifact {
+		t.Fatalf("second history %+v does not reuse %+v", second.History, first.History)
+	}
+	prereq := h.git(h.src, "rev-parse", "origin/main")
+
+	if v := h.verify(first, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("first verify = %+v, want ready", v)
+	}
+	h.art.Remove(first.History[0].Artifact)
+	if v := h.verify(second, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("verify reusing the cached tip without its bundle = %+v, want ready", v)
+	}
+	if err := h.store.Release(t.Context(), h.recvReg(), first); err != nil {
+		t.Fatal(err)
+	}
+	if pins := h.pins(); !slices.Equal(pins, []string{prereq}) {
+		t.Fatalf("pins = %v, want [%s]", pins, prereq)
+	}
+
+	root := h.git(h.recv, "commit-tree", "HEAD^{tree}", "-m", "new root")
+	h.git(h.recv, "update-ref", "refs/heads/main", root)
+	h.git(h.recv, "update-ref", "refs/remotes/origin/main", root)
+	h.git(h.recv, "reflog", "expire", "--expire=now", "--all")
+	h.git(h.recv, "gc", "-q", "--prune=now")
+	h.git(h.recv, "cat-file", "-e", prereq+"^{commit}")
+	h.assertFaithful(h.restore(second, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+}
+
+func writeLooseBlob(t *testing.T, path, content string) {
+	t.Helper()
+	var encoded bytes.Buffer
+	zw := zlib.NewWriter(&encoded)
+	if _, err := fmt.Fprintf(zw, "blob %d\x00%s", len(content), content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
