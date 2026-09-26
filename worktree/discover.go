@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -102,10 +101,11 @@ func Discover(ctx context.Context, reg registry.Registry) ([]Worktree, []Skip, e
 }
 
 // Locate returns the worktree whose symlink-resolved Root most deeply contains
-// path. A relative path is taken against the process working directory, and a
-// path that no longer exists resolves through its deepest existing ancestor.
+// path. A relative path is taken against the process working directory. Each
+// component resolves in order, so ".." climbs out of a symlink's target as the
+// kernel does, and components that no longer exist are taken lexically.
 func Locate(wts []Worktree, path string) (Worktree, bool) {
-	resolved, err := resolveThroughAncestors(path)
+	resolved, err := resolvePhysical(path)
 	if err != nil {
 		return Worktree{}, false
 	}
@@ -120,23 +120,29 @@ func Locate(wts []Worktree, path string) (Worktree, bool) {
 	return best, found
 }
 
-func resolveThroughAncestors(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("absolute path of %s: %w", path, err)
-	}
-	var missing []string
-	for dir := abs; ; dir = filepath.Dir(dir) {
-		resolved, err := filepath.EvalSymlinks(dir)
-		if err == nil {
-			slices.Reverse(missing)
-			return filepath.Join(append([]string{resolved}, missing...)...), nil
+func resolvePhysical(path string) (string, error) {
+	sep := string(filepath.Separator)
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("working directory for %s: %w", path, err)
 		}
-		if filepath.Dir(dir) == dir {
-			return "", fmt.Errorf("resolve %s: %w", abs, err)
-		}
-		missing = append(missing, filepath.Base(dir))
+		path = wd + sep + path
 	}
+	resolved := sep
+	for _, part := range strings.Split(path, sep) {
+		switch part {
+		case "", ".":
+		case "..":
+			resolved = filepath.Dir(resolved)
+		default:
+			resolved = filepath.Join(resolved, part)
+			if target, err := filepath.EvalSymlinks(resolved); err == nil {
+				resolved = target
+			}
+		}
+	}
+	return resolved, nil
 }
 
 func discoverRepo(ctx context.Context, repo registry.Repo) ([]Worktree, []Skip, error) {

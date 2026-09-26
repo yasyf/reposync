@@ -148,9 +148,15 @@ func TestLocate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(outer, "file"), nil, 0o600); err != nil {
+	for _, f := range []string{filepath.Join(outer, "file"), filepath.Join(inner, "file")} {
+		if err := os.WriteFile(f, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(inner, "src"), filepath.Join(sibling, "hop")); err != nil {
 		t.Fatal(err)
 	}
+	raw := func(parts ...string) string { return strings.Join(parts, string(filepath.Separator)) }
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(inner, link); err != nil {
 		t.Fatal(err)
@@ -176,6 +182,12 @@ func TestLocate(t *testing.T) {
 		{"relative path from cwd", filepath.Join("repo", "file"), "outer"},
 		{"relative nested path from cwd", filepath.Join("repo", "nested", "ws", "src"), "inner"},
 		{"relative deleted path through a symlink", filepath.Join("alias", "gone", "x"), "outer"},
+		{"dotdot after a symlink leaves its target", raw(sibling, "hop", "..", "file"), "inner"},
+		{"dotdot after a symlink into a deleted path", raw(sibling, "hop", "..", "gone", "x"), "inner"},
+		{"relative dotdot after a symlink", raw("repo2", "hop", "..", "file"), "inner"},
+		{"relative dotdot after a symlink into a deleted path", raw("repo2", "hop", "..", "gone"), "inner"},
+		{"dotdot after a deleted component reaches a symlink", raw(sibling, "gone", "..", "hop", "x"), "inner"},
+		{"dotdot after a deleted component", raw(inner, "gone", "..", "..", "..", "file"), "outer"},
 		{"relative path outside every root", "elsewhere", ""},
 		{"outside every root", dir, ""},
 	}
