@@ -45,6 +45,17 @@ type RestoreOptions struct {
 	// hash verification there, from the LFS remote; a corrupt local object is
 	// replaced. cc-sync sets it only when network policy allows bulk transfer.
 	FetchLFS bool
+	// FetchLFSContext, when set, scopes the FetchLFS fetch: Restore calls it
+	// with its own context just before fetching, runs the fetch under the
+	// returned context, which must derive from the one passed in, and calls the
+	// returned CancelFunc once the fetch ends. Cancelling that context while
+	// Restore's own is live terminates the fetch's git and git-lfs processes,
+	// and Restore still succeeds as if FetchLFS were false for every object that
+	// had not arrived, listing those paths in Restored.LFSPending; cancelling
+	// Restore's own context fails the Restore. When nil, the fetch runs under
+	// Restore's context. cc-sync cancels it when network policy stops allowing
+	// bulk transfer.
+	FetchLFSContext func(context.Context) (context.Context, context.CancelFunc)
 	// ApplySparse re-applies the snapshot's sparse-checkout patterns and
 	// skip-worktree exceptions in the recovery worktree with git
 	// sparse-checkout, which enables extensions.worktreeConfig in the receiving
@@ -248,7 +259,7 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	for _, f := range snap.Files {
 		overwritten[f.Path] = true
 	}
-	pending, err := m.hydrateLFS(ctx, snap, dest, opts.FetchLFS, overwritten)
+	pending, err := m.hydrateLFS(ctx, snap, dest, opts, overwritten)
 	if err != nil {
 		return Restored{}, err
 	}
@@ -563,7 +574,7 @@ func applyFile(ctx context.Context, root *os.Root, src ArtifactSource, f FileEnt
 	return root.Rename(tmp, name)
 }
 
-func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetch bool, overwritten map[string]bool) ([]string, error) {
+func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, opts RestoreOptions, overwritten map[string]bool) ([]string, error) {
 	if snap.LFS == nil {
 		return nil, nil
 	}
@@ -599,14 +610,14 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetc
 	if err != nil {
 		return nil, err
 	}
-	if fetch && len(pending) > 0 {
+	if opts.FetchLFS && len(pending) > 0 {
 		for _, p := range pending {
 			if err := os.Remove(m.checkoutLFSPath(pointers[p].OID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return nil, fmt.Errorf("discard corrupt lfs object for %s: %w", p, err)
 			}
 		}
-		if _, err := recvGit(ctx, nil, nil, "-C", dest, "lfs", "fetch"); err != nil {
-			return nil, fmt.Errorf("fetch lfs base assets: %w", err)
+		if err := fetchLFS(ctx, dest, opts.FetchLFSContext); err != nil {
+			return nil, err
 		}
 		if local, pending, err = split(); err != nil {
 			return nil, err
@@ -633,6 +644,20 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetc
 	}
 	slices.Sort(pending)
 	return pending, nil
+}
+
+func fetchLFS(ctx context.Context, dest string, scope func(context.Context) (context.Context, context.CancelFunc)) error {
+	if scope == nil {
+		scope = context.WithCancel
+	}
+	fetchCtx, release := scope(ctx)
+	defer release()
+	_, err := recvGit(fetchCtx, nil, nil, "-C", dest, "lfs", "fetch")
+	stopped := fetchCtx.Err() != nil && ctx.Err() == nil
+	if err == nil || stopped {
+		return nil
+	}
+	return fmt.Errorf("fetch lfs base assets: %w", err)
 }
 
 func lfsPattern(path string) string {
