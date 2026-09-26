@@ -1,7 +1,9 @@
 package worktree_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -311,8 +313,56 @@ func TestRestoreLFSWithoutNetwork(t *testing.T) {
 	}
 
 	h.f.RunGit(h.recv, "config", "lfs.url", lfsURL)
-	fetched := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-fetched"), Fresh: true, FetchLFS: true})
-	h.assertFaithful(fetched)
+	boom := errors.New("lfs remote refused")
+	tests := []struct {
+		name        string
+		gate        func(context.Context, func(context.Context) error) error
+		wantPending []string
+		wantErr     error
+	}{
+		{
+			name:        "refused",
+			gate:        func(context.Context, func(context.Context) error) error { return worktree.ErrFetchDeferred },
+			wantPending: []string{"other.bin"},
+		},
+		{
+			name: "interrupted",
+			gate: func(ctx context.Context, fetch func(context.Context) error) error {
+				fetchCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, fetch(fetchCtx))
+			},
+			wantPending: []string{"other.bin"},
+		},
+		{
+			name:    "failed",
+			gate:    func(context.Context, func(context.Context) error) error { return boom },
+			wantErr: boom,
+		},
+		{
+			name: "allowed",
+			gate: func(ctx context.Context, fetch func(context.Context) error) error { return fetch(ctx) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := filepath.Join(h.f.Root, "lfs-"+tt.name)
+			gated := 0
+			r, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest, Fresh: true, FetchLFS: func(ctx context.Context, fetch func(context.Context) error) error {
+				gated++
+				if got := h.f.ReadFile(dest, "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
+					t.Errorf("other.bin at the fetch gate = %q, want the checked-out pointer", got)
+				}
+				return tt.gate(ctx, fetch)
+			}})
+			if gated != 1 || !errors.Is(err, tt.wantErr) || !slices.Equal(r.LFSPending, tt.wantPending) {
+				t.Fatalf("gate called %d times, restore = %+v, %v; want once and LFSPending %q, error %v", gated, r, err, tt.wantPending, tt.wantErr)
+			}
+			if tt.wantErr == nil && tt.wantPending == nil {
+				h.assertFaithful(r)
+			}
+		})
+	}
 }
 
 func TestRestoreSHA256(t *testing.T) {
