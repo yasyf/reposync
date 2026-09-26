@@ -2,7 +2,9 @@ package worktree_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -141,9 +143,55 @@ func TestVerifyRequiresTrunk(t *testing.T) {
 		t.Fatalf("pins after unready verify: %v", pins)
 	}
 
-	v = h.verify(snap, worktree.VerifyOptions{FetchOrigin: true})
-	if !v.Ready || len(v.Missing) != 0 {
-		t.Fatalf("after origin fetch: %+v, want ready", v)
+	boom := errors.New("origin refused")
+	tests := []struct {
+		name        string
+		gate        worktree.FetchGate
+		wantMissing []string
+		wantErr     error
+	}{
+		{
+			name:        "refused",
+			gate:        func(context.Context, func(context.Context) error) error { return worktree.ErrFetchDeferred },
+			wantMissing: []string{trunk},
+		},
+		{
+			name: "interrupted",
+			gate: func(ctx context.Context, fetch func(context.Context) error) error {
+				fetchCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, fetch(fetchCtx))
+			},
+			wantMissing: []string{trunk},
+		},
+		{
+			name:    "failed",
+			gate:    func(context.Context, func(context.Context) error) error { return boom },
+			wantErr: boom,
+		},
+		{
+			name: "allowed",
+			gate: func(ctx context.Context, fetch func(context.Context) error) error { return fetch(ctx) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gated := 0
+			v, err := h.store.Verify(t.Context(), h.recvReg(), snap, h.art, worktree.VerifyOptions{FetchOrigin: func(ctx context.Context, fetch func(context.Context) error) error {
+				gated++
+				return tt.gate(ctx, fetch)
+			}})
+			if gated != 1 || !errors.Is(err, tt.wantErr) || v.Ready != (tt.wantErr == nil && tt.wantMissing == nil) || !slices.Equal(v.Missing, tt.wantMissing) {
+				t.Fatalf("gate called %d times, verify = %+v, %v; want once, missing %v, error %v", gated, v, err, tt.wantMissing, tt.wantErr)
+			}
+		})
+	}
+	v, err := h.store.Verify(t.Context(), h.recvReg(), snap, h.art, worktree.VerifyOptions{FetchOrigin: func(context.Context, func(context.Context) error) error {
+		t.Error("fetch gate called with no required commit missing")
+		return nil
+	}})
+	if err != nil || !v.Ready || len(v.Missing) != 0 {
+		t.Fatalf("after origin fetch: %+v, %v; want ready", v, err)
 	}
 	if pins := h.pins(); !slices.Equal(pins, []string{trunk}) {
 		t.Fatalf("pins = %v, want [%s]", pins, trunk)

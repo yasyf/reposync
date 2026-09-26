@@ -29,10 +29,10 @@ var (
 	ErrPathCollision = errors.New("snapshot paths collide on this filesystem")
 	// ErrInvalidSnapshot means a snapshot manifest failed validation.
 	ErrInvalidSnapshot = errors.New("invalid snapshot")
-	// ErrFetchDeferred means a RestoreOptions.FetchLFS gate refused or
-	// interrupted the fetch; the restore completes with the objects it could
-	// not fetch pending.
-	ErrFetchDeferred = errors.New("lfs fetch deferred")
+	// ErrFetchDeferred means a FetchGate refused or interrupted its fetch: a
+	// restore completes with the LFS objects it could not fetch pending, and a
+	// verification reports the commits it could not fetch missing.
+	ErrFetchDeferred = errors.New("fetch deferred")
 )
 
 // GitVersionError means the host's git predates the minimum Capture, Stamp,

@@ -40,14 +40,10 @@ type RestoreOptions struct {
 	// and creates another; nothing is ever overwritten either way.
 	Fresh bool
 	// FetchLFS, when set, admits fetching the LFS base assets still missing
-	// locally from the LFS remote; nil never fetches. Restore calls it
-	// immediately before the fetch would start, passing the fetch: FetchLFS
-	// runs it only while the transfer is allowed, under a context it cancels
-	// once the transfer stops being allowed, and returns an error wrapping
-	// ErrFetchDeferred when it refused or interrupted the fetch. Restore then
-	// leaves the paths still missing in LFSPending; any other error fails the
-	// restore. cc-sync gates it on network policy.
-	FetchLFS func(ctx context.Context, fetch func(context.Context) error) error
+	// locally from the LFS remote; nil never fetches. When it defers the
+	// fetch, Restore leaves the paths still missing in LFSPending; any other
+	// error fails the restore.
+	FetchLFS FetchGate
 	// ApplySparse re-applies the snapshot's sparse-checkout patterns and
 	// skip-worktree exceptions in the recovery worktree with git
 	// sparse-checkout, which enables extensions.worktreeConfig in the receiving
@@ -498,7 +494,7 @@ func applyFile(ctx context.Context, root *os.Root, src ArtifactSource, f FileEnt
 	return root.Rename(tmp, name)
 }
 
-func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, gate func(context.Context, func(context.Context) error) error, overwritten map[string]bool) ([]string, error) {
+func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, gate FetchGate, overwritten map[string]bool) ([]string, error) {
 	if snap.LFS == nil {
 		return nil, nil
 	}
