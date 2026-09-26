@@ -95,11 +95,11 @@ func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapsho
 		if err != nil {
 			return nil, err
 		}
-		if ita {
-			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+		if ita != nil {
+			snap.IntentToAdd = append(snap.IntentToAdd, *ita)
 		}
 		files = append(files, fileCandidate{
-			path: e.path, hidden: !ita, indexMode: e.mode, indexOID: e.oid,
+			path: e.path, hidden: ita == nil, indexMode: e.mode, indexOID: e.oid,
 			assumeUnchanged: e.assumeUnchanged, skipWorktree: e.skipWorktree,
 		})
 	}
@@ -114,33 +114,36 @@ func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapsho
 func (c *capture) hiddenDeletions(ctx context.Context, gone []flaggedEntry, snap *Snapshot, sparse bool) ([]FileEntry, error) {
 	var deleted []FileEntry
 	for _, e := range gone {
-		if e.skipWorktree && sparse {
-			continue
-		}
 		ita, err := c.intentToAdd(ctx, e.path, e.oid)
 		if err != nil {
 			return nil, err
 		}
-		if ita {
-			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+		if ita != nil {
+			snap.IntentToAdd = append(snap.IntentToAdd, *ita)
+		} else if e.skipWorktree && sparse {
+			continue
 		}
 		deleted = append(deleted, FileEntry{Path: e.path, Kind: FileDeleted, AssumeUnchanged: e.assumeUnchanged, SkipWorktree: e.skipWorktree})
 	}
 	return deleted, nil
 }
 
-func (c *capture) intentToAdd(ctx context.Context, path, oid string) (bool, error) {
+func (c *capture) intentToAdd(ctx context.Context, path, oid string) (*IntentToAdd, error) {
 	if oid != c.blobOID(nil) {
-		return false, nil
+		return nil, nil
 	}
 	if c.ita == nil {
 		ita, err := c.src.intentToAdd(ctx)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		c.ita = ita
 	}
-	return c.ita[path], nil
+	mode, ok := c.ita[path]
+	if !ok {
+		return nil, nil
+	}
+	return &IntentToAdd{Path: path, Mode: mode}, nil
 }
 
 func applyFlags(ctx context.Context, dest string, files []FileEntry) error {

@@ -135,7 +135,7 @@ func TestRoundTripHiddenIntentToAdd(t *testing.T) {
 	}
 
 	snap, want := rt.tick()
-	if !snap.Complete || !slices.Equal(snap.IntentToAdd, []string{"au.txt", "sw-empty.txt"}) {
+	if !snap.Complete || !slices.Equal(snap.IntentToAdd, []worktree.IntentToAdd{{Path: "au.txt", Mode: "100644"}, {Path: "sw-empty.txt", Mode: "100644"}}) {
 		t.Fatalf("complete=%v intent-to-add %v, want both hidden intent-to-add paths", snap.Complete, snap.IntentToAdd)
 	}
 	for path, e := range map[string]worktree.FileEntry{
@@ -325,7 +325,7 @@ func TestRoundTripDeletedIntentToAdd(t *testing.T) {
 			}
 
 			snap, want := rt.tick()
-			if !snap.Complete || !slices.Equal(snap.IntentToAdd, []string{tt.path}) {
+			if !snap.Complete || !slices.Equal(itaPaths(snap), []string{tt.path}) {
 				t.Fatalf("complete=%v intent-to-add %v, want [%s]", snap.Complete, snap.IntentToAdd, tt.path)
 			}
 			i := slices.IndexFunc(snap.Files, func(e worktree.FileEntry) bool { return e.Path == tt.path })
@@ -349,4 +349,12 @@ func TestRoundTripDeletedIntentToAdd(t *testing.T) {
 			}
 		})
 	}
+}
+
+func itaPaths(snap worktree.Snapshot) []string {
+	var paths []string
+	for _, e := range snap.IntentToAdd {
+		paths = append(paths, e.Path)
+	}
+	return paths
 }

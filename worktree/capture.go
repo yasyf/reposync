@@ -152,7 +152,7 @@ type capture struct {
 	remaining []string
 	missing   []LFSObjectRef
 	omitted   []Omission
-	ita       map[string]bool
+	ita       map[string]string
 }
 
 type fileCandidate struct {
@@ -488,27 +488,35 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 			c.omitted = append(c.omitted, Omission{Path: e.path, Reason: OmitSubmodule})
 			continue
 		}
+		var ita *IntentToAdd
+		if c.wt.Kind != KindJJWorkspace && (e.x != '.' || e.y == 'D') {
+			var err error
+			if ita, err = c.intentToAdd(ctx, e.path, e.oidIndex); err != nil {
+				return nil, err
+			}
+		}
 		if e.x != '.' && c.wt.Kind != KindJJWorkspace {
 			entry := IndexEntry{Path: e.path, Mode: e.modeIndex, OID: e.oidIndex}
-			if e.modeIndex == "000000" {
+			if e.modeIndex == "000000" || ita != nil {
 				entry.Mode, entry.OID = "", ""
 			}
 			snap.Index = append(snap.Index, entry)
 		}
 		switch e.y {
 		case 'D':
-			if c.wt.Kind != KindJJWorkspace && e.x == '.' {
-				ita, err := c.intentToAdd(ctx, e.path, e.oidIndex)
-				if err != nil {
-					return nil, err
-				}
-				if ita {
-					snap.IntentToAdd = append(snap.IntentToAdd, e.path)
-				}
+			if ita != nil {
+				snap.IntentToAdd = append(snap.IntentToAdd, *ita)
 			}
 			snap.Files = append(snap.Files, FileEntry{Path: e.path, Kind: FileDeleted})
 		case 'A':
-			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+			ita, err := c.intentToAdd(ctx, e.path, c.blobOID(nil))
+			if err != nil {
+				return nil, err
+			}
+			if ita == nil {
+				return nil, fmt.Errorf("status reports %s intent-to-add but the index does not", e.path)
+			}
+			snap.IntentToAdd = append(snap.IntentToAdd, *ita)
 			files = append(files, fileCandidate{path: e.path, indexMode: e.modeIndex, indexOID: e.oidIndex})
 		case 'M', 'T':
 			files = append(files, fileCandidate{path: e.path, indexMode: e.modeIndex, indexOID: e.oidIndex})
@@ -1123,7 +1131,7 @@ func sparseExceptions(ctx context.Context, dir string, env []string, skipped map
 func sortSnapshot(snap *Snapshot, omitted []Omission) {
 	slices.SortFunc(snap.Index, func(a, b IndexEntry) int { return strings.Compare(a.Path, b.Path) })
 	slices.SortFunc(snap.Files, func(a, b FileEntry) int { return strings.Compare(a.Path, b.Path) })
-	slices.Sort(snap.IntentToAdd)
+	slices.SortFunc(snap.IntentToAdd, func(a, b IntentToAdd) int { return strings.Compare(a.Path, b.Path) })
 	slices.SortFunc(omitted, func(a, b Omission) int { return strings.Compare(a.Path, b.Path) })
 	snap.Omitted = slices.CompactFunc(omitted, func(a, b Omission) bool { return a.Path == b.Path })
 	snap.Complete = len(snap.Omitted) == 0
