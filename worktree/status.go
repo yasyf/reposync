@@ -35,7 +35,7 @@ type statusEntry struct {
 }
 
 func (e statusEntry) submoduleChanged() bool {
-	return e.sub != "N..." && strings.ContainsAny(e.sub[1:], "CMU")
+	return e.sub != "N..." && (strings.ContainsAny(e.sub[1:], "CMU") || e.x != '.' && e.modeIndex == "160000")
 }
 
 func readStatus(ctx context.Context, dir string, env []string, pathspec ...string) (statusReport, error) {
