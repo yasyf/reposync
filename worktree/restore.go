@@ -458,12 +458,53 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, fetc
 	}
 	slices.Sort(local)
 	for chunk := range slices.Chunk(local, lfsCheckoutBatch) {
-		if _, err := recvGit(ctx, nil, nil, append([]string{"-C", dest, "lfs", "checkout", "--"}, chunk...)...); err != nil {
+		args := []string{"-C", dest, "lfs", "checkout", "--"}
+		for _, p := range chunk {
+			args = append(args, lfsPattern(p))
+		}
+		if _, err := recvGit(ctx, nil, nil, args...); err != nil {
 			return nil, fmt.Errorf("hydrate lfs files: %w", err)
+		}
+	}
+	for _, p := range local {
+		unhydrated, err := pointerOnDisk(filepath.Join(dest, p), pointers[p])
+		if err != nil {
+			return nil, err
+		}
+		if unhydrated {
+			pending = append(pending, p)
 		}
 	}
 	slices.Sort(pending)
 	return pending, nil
+}
+
+func lfsPattern(path string) string {
+	var b strings.Builder
+	for _, r := range path {
+		if strings.ContainsRune(`\*?[]`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func pointerOnDisk(path string, ptr lfsPointer) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, fmt.Errorf("stat hydrated %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > lfsPointerMax {
+		return false, nil
+	}
+	//nolint:gosec // G304: a tracked path inside the recovery worktree this restore created.
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read hydrated %s: %w", path, err)
+	}
+	got, ok := parseLFSPointer(b)
+	return ok && got.OID == ptr.OID, nil
 }
 
 func (m mirror) checkoutLFSPath(oid string) string {
