@@ -200,6 +200,16 @@ func TestRestoreReusesSiblingWithoutRollback(t *testing.T) {
 	h.assertFaithful(r3)
 }
 
+func (h *harness) stage(snap *worktree.Snapshot, name string) {
+	h.t.Helper()
+	blob := filepath.Join(h.t.TempDir(), "blob")
+	if err := os.WriteFile(blob, []byte(name+"\n"), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+	oid := h.git(h.src, "hash-object", "--no-filters", blob)
+	snap.Index = append(snap.Index, worktree.IndexEntry{Path: name, Mode: "100644", OID: oid, Blob: h.put(worktree.MediaBlob, []byte(name+"\n"))})
+}
+
 func TestRestorePathCollision(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -211,13 +221,18 @@ func TestRestorePathCollision(t *testing.T) {
 			}
 		}},
 		{"staged-alias-deleted", func(h *harness, snap *worktree.Snapshot) {
-			for i, name := range []string{"A.txt", "a.txt"} {
-				blob := "blob" + strings.Repeat("x", i)
-				h.f.WriteFile(h.f.Root, blob, name+"\n")
-				oid := h.git(h.src, "hash-object", "--no-filters", filepath.Join(h.f.Root, blob))
-				snap.Index = append(snap.Index, worktree.IndexEntry{Path: name, Mode: "100644", OID: oid, Blob: h.put(worktree.MediaBlob, []byte(name+"\n"))})
-			}
+			h.stage(snap, "A.txt")
+			h.stage(snap, "a.txt")
 			snap.Files = append(snap.Files, worktree.FileEntry{Path: "a.txt", Kind: worktree.FileDeleted})
+		}},
+		{"intent-to-add-deleted", func(h *harness, snap *worktree.Snapshot) {
+			h.stage(snap, "A.txt")
+			snap.IntentToAdd = append(snap.IntentToAdd, worktree.IntentToAdd{Path: "a.txt", Mode: "100644"})
+			snap.Files = append(snap.Files, worktree.FileEntry{Path: "a.txt", Kind: worktree.FileDeleted})
+		}},
+		{"directory-alias", func(h *harness, snap *worktree.Snapshot) {
+			h.stage(snap, "A/x")
+			h.stage(snap, "a/y")
 		}},
 	}
 	for _, tt := range tests {
@@ -313,6 +328,22 @@ func TestRestoreLFSWithoutNetwork(t *testing.T) {
 	h.f.RunGit(h.recv, "config", "lfs.url", lfsURL)
 	fetched := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-fetched"), Fresh: true, FetchLFS: true})
 	h.assertFaithful(fetched)
+
+	cached := vcstest.LFSObjectPath(filepath.Join(h.recv, ".git"), otherOID)
+	if err := os.Remove(cached); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cached, []byte(strings.Repeat("x", len("another published asset"))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-corrupt"), Fresh: true})
+	if corrupt.Exact || !slices.Equal(corrupt.LFSPending, []string{"other.bin"}) || !slices.Equal(corrupt.Differences, []string{"other.bin: lfs object pending"}) {
+		t.Fatalf("restore over a corrupt cached object = %+v", corrupt)
+	}
+	if got := h.f.ReadFile(corrupt.Path, "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
+		t.Fatalf("other.bin = %q, want an unhydrated pointer", got)
+	}
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "lfs-repaired"), Fresh: true, FetchLFS: true}))
 }
 
 func TestRestoreSHA256(t *testing.T) {
