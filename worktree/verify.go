@@ -25,10 +25,11 @@ type VerifyOptions struct {
 }
 
 // Verification is this host's readiness to restore a snapshot. Missing names
-// what blocks it: hex object ids the checkout lacks (required commits, or
-// trees and blobs of the head commit and staged tree), artifact digests the
-// source lacks, and "omitted:<reason>:<path>" for WIP the capture could not
-// carry, so an incomplete snapshot is never Ready.
+// what blocks it: hex object ids the checkout lacks (required commits, or the
+// head commit and the trees and blobs of its tree and the staged tree, never
+// their history), artifact digests the source lacks, and
+// "omitted:<reason>:<path>" for WIP the capture could not carry, so an
+// incomplete snapshot is never Ready.
 type Verification struct {
 	Ready    bool
 	Missing  []string
@@ -36,14 +37,20 @@ type Verification struct {
 }
 
 // Verify proves the receiver can restore snap: the registered checkout holds
-// every required commit (pinned under refs/reposync/pins/ so gc keeps them),
-// each history bundle, staged blob, and shipped LFS object hash-verifies and is
-// imported into the store's mirror, the staged tree is rebuilt there, every
-// tree and blob of the head commit and staged tree is local (never lazily
-// fetched, so a partial or damaged checkout is not Ready), and every file
-// artifact is present in src. It is idempotent, and it rebuilds mirror state
-// whose objects went missing. It returns *GitVersionError when the host's git
-// predates 2.44.
+// every required commit; the commits the snapshot builds on are pinned under
+// refs/reposync/pins/ so gc keeps them — the head commit when there is no
+// history, else every prerequisite a history bundle's own header names that no
+// earlier link of the chain carries, which Requires must name or Verify fails
+// with ErrUndeclaredPrerequisite; each history bundle, staged blob, and shipped
+// LFS object hash-verifies and is imported into the store's mirror, and the
+// staged tree is rebuilt there; exactly what Restore materializes is local and
+// never lazily fetched — the head commit and every tree and blob of its tree
+// and the staged tree, not their history — so a checkout lacking any of them,
+// partial or damaged, is not Ready, while one lacking only history can be; and
+// every file artifact is present in src. A bundle tip the mirror already holds is validated and pinned from the
+// prerequisites recorded when it was imported, without re-reading its artifact.
+// It is idempotent, and it rebuilds mirror state whose objects went missing.
+// It returns *GitVersionError when the host's git predates 2.44.
 func (s *Store) Verify(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts VerifyOptions) (Verification, error) {
 	if err := requireGit(ctx); err != nil {
 		return Verification{}, err
@@ -128,7 +135,7 @@ func (s *Store) verifyLocked(ctx context.Context, reg registry.Registry, snap Sn
 	if err != nil {
 		return v, m, err
 	}
-	entry, absent, err := m.importSnapshot(ctx, snap, src)
+	entry, absent, err := m.importSnapshot(ctx, snap, src, l.Tips)
 	if err != nil {
 		return v, m, errors.Join(err, m.reconcile(ctx, l))
 	}
@@ -207,14 +214,13 @@ func absentArtifacts(ctx context.Context, src ArtifactSource, snap Snapshot) ([]
 	return absent, nil
 }
 
-func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource) (mirrorEntry, []string, error) {
-	entry := mirrorEntry{Requires: snap.Requires}
-	pins := make([]string, len(snap.Requires))
-	for i, oid := range snap.Requires {
-		pins[i] = "update " + pinPrefix + oid + " " + oid
-	}
-	if err := updateRefs(ctx, []string{"-C", m.checkout}, pins); err != nil {
-		return entry, nil, fmt.Errorf("pin required commits: %w", err)
+func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactSource, tips map[string][]string) (mirrorEntry, []string, error) {
+	var entry mirrorEntry
+	if len(snap.History) == 0 {
+		if err := m.pin(ctx, snap.Requires); err != nil {
+			return entry, nil, err
+		}
+		entry.Pins = slices.Clone(snap.Requires)
 	}
 	if err := m.repair(ctx); err != nil {
 		return entry, nil, err
@@ -223,15 +229,37 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 	if err != nil {
 		return entry, nil, err
 	}
-	for _, b := range snap.History {
+	delivered := map[string]bool{}
+	for i, b := range snap.History {
 		entry.Tips = append(entry.Tips, b.Tip)
-		if have[tipPrefix+b.Tip] == b.Tip {
-			continue
+		admit := func(prereqs []string) error {
+			external, err := externalPrerequisites(b, prereqs, snap.Requires, delivered)
+			if err != nil {
+				return err
+			}
+			if err := m.pin(ctx, external); err != nil {
+				return err
+			}
+			entry.Pins = append(entry.Pins, external...)
+			return nil
 		}
-		if err := m.importLink(ctx, src, b); err != nil {
+		prereqs, recorded := tips[b.Tip]
+		if recorded && have[tipPrefix+b.Tip] == b.Tip {
+			err = admit(prereqs)
+		} else if prereqs, err = m.importLink(ctx, src, b, admit); err == nil {
+			tips[b.Tip] = prereqs
+		}
+		if err != nil {
 			return entry, nil, err
 		}
+		if i < len(snap.History)-1 {
+			if err := m.carried(ctx, b.Tip, prereqs, delivered); err != nil {
+				return entry, nil, err
+			}
+		}
 	}
+	slices.Sort(entry.Pins)
+	entry.Pins = slices.Compact(entry.Pins)
 	head, index := snapshotPrefix+snapshotKey(snap)+"/head", snapshotPrefix+snapshotKey(snap)+"/index"
 	cached := have[head] != "" && have[index] != ""
 	roots := []string{snap.Head.Commit}
@@ -279,25 +307,68 @@ func (m mirror) absentClosure(ctx context.Context, commits []string) ([]string, 
 	return absent, nil
 }
 
-func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle) error {
+func (m mirror) pin(ctx context.Context, commits []string) error {
+	lines := make([]string, len(commits))
+	for i, oid := range commits {
+		lines[i] = "update " + pinPrefix + oid + " " + oid
+	}
+	if err := updateRefs(ctx, []string{"-C", m.checkout}, lines); err != nil {
+		return fmt.Errorf("pin required commits: %w", err)
+	}
+	return nil
+}
+
+func externalPrerequisites(b Bundle, prereqs, requires []string, delivered map[string]bool) ([]string, error) {
+	var external []string
+	for _, p := range prereqs {
+		if delivered[p] {
+			continue
+		}
+		if !slices.Contains(requires, p) {
+			return nil, fmt.Errorf("%w: bundle %s builds on %s", ErrUndeclaredPrerequisite, b.Artifact.Digest, p)
+		}
+		external = append(external, p)
+	}
+	return external, nil
+}
+
+func (m mirror) carried(ctx context.Context, tip string, prereqs []string, into map[string]bool) error {
+	out, err := m.git(ctx, nil, nil, append([]string{"rev-list", tip, "--not"}, prereqs...)...)
+	if err != nil {
+		return fmt.Errorf("list commits bundle tip %s carries: %w", tip, err)
+	}
+	for l := range strings.Lines(out) {
+		into[strings.TrimSuffix(l, "\n")] = true
+	}
+	return nil
+}
+
+func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle, admit func(prereqs []string) error) ([]string, error) {
 	spool, err := os.CreateTemp(m.scratch, ".bundle-*")
 	if err != nil {
-		return fmt.Errorf("spool bundle: %w", err)
+		return nil, fmt.Errorf("spool bundle: %w", err)
 	}
 	defer func() { _ = os.Remove(spool.Name()) }()
 	if err := copyVerified(ctx, src, b.Artifact, spool); err != nil {
 		_ = spool.Close()
-		return err
+		return nil, err
 	}
 	if err := spool.Close(); err != nil {
-		return fmt.Errorf("spool bundle: %w", err)
+		return nil, fmt.Errorf("spool bundle: %w", err)
+	}
+	prereqs, err := bundlePrerequisites(spool.Name())
+	if err != nil {
+		return nil, fmt.Errorf("bundle %s: %w", b.Artifact.Digest, err)
+	}
+	if err := admit(prereqs); err != nil {
+		return nil, err
 	}
 	if _, err := m.git(ctx, nil, nil, "bundle", "verify", "-q", spool.Name()); err != nil {
-		return fmt.Errorf("verify bundle %s: %w", b.Artifact.Digest, err)
+		return nil, fmt.Errorf("verify bundle %s: %w", b.Artifact.Digest, err)
 	}
 	heads, err := m.git(ctx, nil, nil, "bundle", "list-heads", spool.Name())
 	if err != nil {
-		return fmt.Errorf("list bundle heads: %w", err)
+		return nil, fmt.Errorf("list bundle heads: %w", err)
 	}
 	var head string
 	for l := range strings.Lines(heads) {
@@ -306,12 +377,12 @@ func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle) er
 		}
 	}
 	if head == "" {
-		return fmt.Errorf("%w: bundle %s does not carry tip %s", ErrArtifactMismatch, b.Artifact.Digest, b.Tip)
+		return nil, fmt.Errorf("%w: bundle %s does not carry tip %s", ErrArtifactMismatch, b.Artifact.Digest, b.Tip)
 	}
 	if _, err := m.git(ctx, nil, nil, "fetch", "-q", "--no-tags", "--no-write-fetch-head", spool.Name(), "+"+head+":"+tipPrefix+b.Tip); err != nil {
-		return fmt.Errorf("import bundle %s: %w", b.Artifact.Digest, err)
+		return nil, fmt.Errorf("import bundle %s: %w", b.Artifact.Digest, err)
 	}
-	return nil
+	return prereqs, nil
 }
 
 func (m mirror) buildIndex(ctx context.Context, snap Snapshot, src ArtifactSource) (string, error) {

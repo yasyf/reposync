@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,6 +32,10 @@ var (
 	// ErrObjectFormat means the receiver checkout's object format differs from
 	// the snapshot's.
 	ErrObjectFormat = errors.New("object format mismatch")
+	// ErrUndeclaredPrerequisite means a history bundle builds on a commit that
+	// neither the manifest's Requires names nor an earlier link of its chain
+	// carries.
+	ErrUndeclaredPrerequisite = errors.New("bundle prerequisite undeclared by the manifest")
 )
 
 type mirror struct {
@@ -50,23 +55,35 @@ func (m mirror) lfsPath(oid string) string {
 }
 
 type mirrorLedger struct {
+	Schema    string                 `json:"schema"`
 	Snapshots map[string]mirrorEntry `json:"snapshots"`
+	Tips      map[string][]string    `json:"tips"`
 }
 
 type mirrorEntry struct {
-	Requires []string `json:"requires"`
-	Tips     []string `json:"tips,omitempty"`
-	LFS      []string `json:"lfs,omitempty"`
+	Pins []string `json:"pins"`
+	Tips []string `json:"tips,omitempty"`
+	LFS  []string `json:"lfs,omitempty"`
 }
 
 func (l mirrorLedger) Validate() error {
-	if l.Snapshots == nil {
-		return errors.New("nil snapshots")
+	if l.Schema != mirrorSchema {
+		return fmt.Errorf("mirror ledger schema %q, want %q", l.Schema, mirrorSchema)
+	}
+	if l.Snapshots == nil || l.Tips == nil {
+		return errors.New("nil snapshots or tips")
 	}
 	for key := range l.Snapshots {
 		wt, digest, ok := strings.Cut(key, "/")
 		if !ok || !isHex(wt, 32) || !isHex(digest, 64) {
 			return fmt.Errorf("snapshot key %q", key)
+		}
+	}
+	for tip, prereqs := range l.Tips {
+		for _, oid := range append([]string{tip}, prereqs...) {
+			if !isHex(oid, 40) && !isHex(oid, 64) {
+				return fmt.Errorf("tip %q prerequisite %q", tip, oid)
+			}
 		}
 	}
 	return nil
@@ -75,8 +92,8 @@ func (l mirrorLedger) Validate() error {
 func (l mirrorLedger) keep() (pins, tips, lfs map[string]bool) {
 	pins, tips, lfs = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, e := range l.Snapshots {
-		for _, r := range e.Requires {
-			pins[r] = true
+		for _, p := range e.Pins {
+			pins[p] = true
 		}
 		for _, t := range e.Tips {
 			tips[t] = true
@@ -89,10 +106,12 @@ func (l mirrorLedger) keep() (pins, tips, lfs map[string]bool) {
 }
 
 func (m mirror) load() (mirrorLedger, error) {
-	return readDurable(m.ledger, mirrorLedger{Snapshots: map[string]mirrorEntry{}})
+	return readDurable(m.ledger, mirrorLedger{Schema: mirrorSchema, Snapshots: map[string]mirrorEntry{}, Tips: map[string][]string{}})
 }
 
 func (m mirror) save(l mirrorLedger) error {
+	_, tips, _ := l.keep()
+	maps.DeleteFunc(l.Tips, func(tip string, _ []string) bool { return !tips[tip] })
 	return writeDurable(m.ledger, l)
 }
 

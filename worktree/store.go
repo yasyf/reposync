@@ -21,6 +21,7 @@ import (
 const (
 	lockWait     = 10 * time.Second
 	ledgerSchema = "reposync-worktree-ledger-v2"
+	mirrorSchema = "reposync-mirror-ledger-v2"
 )
 
 // Store is reposync's private on-disk state for worktree capture and restore:
@@ -70,7 +71,7 @@ func (s *Store) mirrorDir(origin string) string {
 }
 
 func (s *Store) mirrorLedgerPath(origin string) string {
-	return filepath.Join(s.root, "mirror", repoKey(origin)+".json")
+	return filepath.Join(s.root, "mirror", repoKey(origin)+"."+mirrorSchema+".json")
 }
 
 func (s *Store) tempDir() string {
