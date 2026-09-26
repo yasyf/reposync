@@ -41,11 +41,12 @@ type RestoreOptions struct {
 	// FetchLFS allows fetching LFS base assets missing locally from the LFS
 	// remote; cc-sync sets it only when network policy allows bulk transfer.
 	FetchLFS bool
-	// ApplySparse re-applies the snapshot's sparse-checkout patterns in the
-	// recovery worktree with git sparse-checkout, which enables
-	// extensions.worktreeConfig in the receiving repository's config. Without
-	// it a sparse source restores as a full checkout that Restore reports as
-	// inexact.
+	// ApplySparse re-applies the snapshot's sparse-checkout patterns and
+	// skip-worktree exceptions in the recovery worktree with git
+	// sparse-checkout, which enables extensions.worktreeConfig in the receiving
+	// repository's config. Without it a sparse source restores as a full
+	// checkout that Restore reports as inexact; a sparse receiving checkout's
+	// own selection is never inherited either way.
 	ApplySparse bool
 }
 
@@ -161,8 +162,26 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", "-b", branch, dest, ns+"head"); err != nil {
 		return Restored{}, fmt.Errorf("add recovery worktree: %w", err)
 	}
+	admin, err := linkedAdminDir(dest, m.common)
+	if err != nil {
+		return Restored{}, err
+	}
+	inherited, err := sparseEnabled(ctx, dest, "core.sparseCheckout")
+	if err != nil {
+		return Restored{}, err
+	}
+	if inherited {
+		if _, err := recvGit(ctx, skip, nil, "-C", dest, "sparse-checkout", "disable"); err != nil {
+			return Restored{}, fmt.Errorf("disable inherited sparse-checkout: %w", err)
+		}
+	}
 	if _, err := recvGit(ctx, skip, nil, "-C", dest, "read-tree", "-u", "--reset", ns+"index^{tree}"); err != nil {
 		return Restored{}, fmt.Errorf("check out staged tree: %w", err)
+	}
+	if opts.ApplySparse && snap.Sparse != nil {
+		if err := applySparse(ctx, dest, *snap.Sparse); err != nil {
+			return Restored{}, err
+		}
 	}
 	overwritten := map[string]bool{}
 	for _, f := range snap.Files {
@@ -171,12 +190,6 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	pending, err := m.hydrateLFS(ctx, snap, dest, opts.FetchLFS, overwritten)
 	if err != nil {
 		return Restored{}, err
-	}
-	var sparse *Sparse
-	if opts.ApplySparse && snap.Sparse != nil {
-		if sparse, err = m.applySparse(ctx, dest, *snap.Sparse); err != nil {
-			return Restored{}, err
-		}
 	}
 	if err := applyFiles(ctx, dest, src, snap.Files); err != nil {
 		return Restored{}, err
@@ -190,7 +203,7 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if err := m.writeMarker(dest, snap); err != nil {
 		return Restored{}, err
 	}
-	diffs, err := fidelity(ctx, dest, snap, pending, sparse)
+	diffs, err := fidelity(ctx, dest, admin, snap, pending)
 	if err != nil {
 		return Restored{}, err
 	}
@@ -543,20 +556,17 @@ func (m mirror) publishLFS(o LFSObject) error {
 }
 
 func lfsPointers(ctx context.Context, dest string) (map[string]lfsPointer, error) {
-	staged, err := recvGit(ctx, nil, nil, "-C", dest, "ls-files", "-z", "-s")
+	staged, err := recvGit(ctx, nil, nil, "-C", dest, "ls-files", "-z", "-s", "-t")
 	if err != nil {
 		return nil, err
 	}
 	oids := map[string]string{}
 	var paths []string
-	for rec := range strings.SplitSeq(strings.TrimSuffix(staged, "\x00"), "\x00") {
-		meta, p, ok := strings.Cut(rec, "\t")
-		f := strings.Fields(meta)
-		if !ok || len(f) != 3 || (f[0] != "100644" && f[0] != "100755") {
-			continue
+	for _, b := range stagedBlobs(staged) {
+		if !b.skipWorktree {
+			oids[b.path] = b.oid
+			paths = append(paths, b.path)
 		}
-		oids[p] = f[1]
-		paths = append(paths, p)
 	}
 	if len(paths) == 0 {
 		return nil, nil
@@ -613,29 +623,96 @@ func checkoutPointers(ctx context.Context, dest string, paths []string, oids map
 	return pointers, nil
 }
 
-func (m mirror) applySparse(ctx context.Context, dest string, sp Sparse) (*Sparse, error) {
+func applySparse(ctx context.Context, dest string, sp Sparse) error {
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
 	patterns := strings.NewReader(strings.Join(sp.Patterns, "\n") + "\n")
 	if _, err := recvGit(ctx, skip, patterns, "-C", dest, "sparse-checkout", "set", "--no-cone", "--stdin"); err != nil {
-		return nil, fmt.Errorf("apply sparse-checkout patterns: %w", err)
+		return fmt.Errorf("apply sparse-checkout patterns: %w", err)
 	}
 	if sp.Cone {
 		if _, err := recvGit(ctx, skip, nil, "-C", dest, "sparse-checkout", "reapply", "--cone"); err != nil {
-			return nil, fmt.Errorf("apply cone sparse-checkout: %w", err)
+			return fmt.Errorf("apply cone sparse-checkout: %w", err)
 		}
 	}
-	cone, err := recvGit(ctx, nil, nil, "-C", dest, "config", "--type=bool", "--get", "core.sparseCheckoutCone")
+	skipped, err := skipWorktree(ctx, dest, nil)
 	if err != nil {
-		return nil, fmt.Errorf("read applied sparse-checkout mode: %w", err)
+		return err
 	}
-	admin, err := linkedAdminDir(dest, m.common)
+	got, err := sparseExceptions(ctx, dest, nil, skipped)
+	if err != nil {
+		return err
+	}
+	var materialize, hide []string
+	for _, p := range symmetricDifference(sp.Exceptions, got) {
+		if skipped[p] {
+			materialize = append(materialize, p)
+		} else {
+			hide = append(hide, p)
+		}
+	}
+	if len(materialize) > 0 {
+		paths := strings.Join(materialize, "\x00") + "\x00"
+		if _, err := recvGit(ctx, skip, strings.NewReader(paths), "-C", dest, "update-index", "--no-skip-worktree", "-z", "--stdin"); err != nil {
+			return fmt.Errorf("clear skip-worktree exceptions: %w", err)
+		}
+		if _, err := recvGit(ctx, skip, strings.NewReader(paths), "-C", dest, "checkout-index", "-f", "-z", "--stdin"); err != nil {
+			return fmt.Errorf("materialize skip-worktree exceptions: %w", err)
+		}
+	}
+	if len(hide) > 0 {
+		if _, err := recvGit(ctx, skip, strings.NewReader(strings.Join(hide, "\x00")+"\x00"), "-C", dest, "update-index", "--skip-worktree", "-z", "--stdin"); err != nil {
+			return fmt.Errorf("set skip-worktree exceptions: %w", err)
+		}
+		root, err := os.OpenRoot(dest)
+		if err != nil {
+			return fmt.Errorf("open recovery worktree: %w", err)
+		}
+		defer func() { _ = root.Close() }()
+		for _, p := range hide {
+			if err := root.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove skip-worktree exception %s: %w", p, err)
+			}
+		}
+	}
+	return nil
+}
+
+func symmetricDifference(a, b []string) []string {
+	var diff []string
+	for _, p := range a {
+		if !slices.Contains(b, p) {
+			diff = append(diff, p)
+		}
+	}
+	for _, p := range b {
+		if !slices.Contains(a, p) {
+			diff = append(diff, p)
+		}
+	}
+	return diff
+}
+
+func sparseEnabled(ctx context.Context, dest, key string) (bool, error) {
+	out, err := recvGit(ctx, nil, nil, "-C", dest, "config", "--type=bool", "--default=false", "--get", key)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", key, err)
+	}
+	return strings.TrimSpace(out) == "true", nil
+}
+
+func checkoutSparse(ctx context.Context, dest, admin string) (*Sparse, error) {
+	enabled, err := sparseEnabled(ctx, dest, "core.sparseCheckout")
+	if err != nil || !enabled {
+		return nil, err
+	}
+	cone, err := sparseEnabled(ctx, dest, "core.sparseCheckoutCone")
 	if err != nil {
 		return nil, err
 	}
-	return readSparse(admin, strings.TrimSpace(cone) == "true")
+	return readSparse(ctx, dest, nil, admin, cone)
 }
 
-func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string, sparse *Sparse) ([]string, error) {
+func fidelity(ctx context.Context, dest, admin string, snap Snapshot, pending []string) ([]string, error) {
 	st, err := readStatus(ctx, dest, []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null'"})
 	if err != nil {
 		return nil, err
@@ -695,10 +772,16 @@ func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string,
 	for _, p := range pending {
 		diffs = append(diffs, p+": lfs object pending")
 	}
+	sparse, err := checkoutSparse(ctx, dest, admin)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case snap.Sparse != nil && sparse == nil:
-		diffs = append(diffs, fmt.Sprintf("sparse checkout expanded to full: source cone %t, patterns %q", snap.Sparse.Cone, snap.Sparse.Patterns))
-	case sparse != nil && (sparse.Cone != snap.Sparse.Cone || !slices.Equal(sparse.Patterns, snap.Sparse.Patterns)):
+		diffs = append(diffs, fmt.Sprintf("sparse checkout expanded to full: source cone %t, patterns %q, exceptions %q", snap.Sparse.Cone, snap.Sparse.Patterns, snap.Sparse.Exceptions))
+	case snap.Sparse == nil && sparse != nil:
+		diffs = append(diffs, fmt.Sprintf("sparse checkout: want full, got %+v", *sparse))
+	case sparse != nil && !sparse.equal(*snap.Sparse):
 		diffs = append(diffs, fmt.Sprintf("sparse checkout: want %+v, got %+v", *snap.Sparse, *sparse))
 	}
 	slices.Sort(diffs)
