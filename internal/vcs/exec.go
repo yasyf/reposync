@@ -42,6 +42,12 @@ var baseGitConfig = [][2]string{
 	{"maintenance.auto", "false"},
 }
 
+var readOnlyGitConfig = [][2]string{
+	{"core.fsmonitor", "false"},
+	{"core.hooksPath", os.DevNull},
+	{"core.splitIndex", "false"},
+}
+
 // cmdError is a failed git/jj invocation, carrying the exit code and trimmed
 // stderr so callers classify failures structurally instead of sniffing the
 // argv-bearing message text.
@@ -104,9 +110,11 @@ func Exec(ctx context.Context, c Cmd) error {
 
 // ReadOnlyGitEnv is the environment for git reads against a repository
 // reposync must never write: no optional index refresh (GIT_OPTIONAL_LOCKS=0),
-// no credential prompt, and the default gc/maintenance suppression.
+// no credential prompt, no hook or fsmonitor callback, no shared split-index
+// file written beside a private index, and the default gc/maintenance
+// suppression.
 func ReadOnlyGitEnv() []string {
-	return append(configEnv(nil), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	return append(configEnv(readOnlyGitConfig), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
 }
 
 // FilterOverrideEnv is ReadOnlyGitEnv plus command-scope config that blanks
@@ -130,7 +138,7 @@ func FilterOverrideEnv(ctx context.Context, dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	pairs := make([][2]string, 0, 3*len(drivers))
+	pairs := slices.Clone(readOnlyGitConfig)
 	for _, d := range drivers {
 		pairs = append(
 			pairs,
