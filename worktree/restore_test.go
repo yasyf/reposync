@@ -201,26 +201,58 @@ func TestRestoreReusesSiblingWithoutRollback(t *testing.T) {
 }
 
 func TestRestorePathCollision(t *testing.T) {
+	tests := []struct {
+		name  string
+		alias func(h *harness, snap *worktree.Snapshot)
+	}{
+		{"untracked", func(h *harness, snap *worktree.Snapshot) {
+			for _, name := range []string{"A.txt", "a.txt"} {
+				snap.Files = append(snap.Files, worktree.FileEntry{Path: name, Kind: worktree.FileRegular, Content: h.put(worktree.MediaFile, []byte(name)), Untracked: true})
+			}
+		}},
+		{"staged-alias-deleted", func(h *harness, snap *worktree.Snapshot) {
+			for i, name := range []string{"A.txt", "a.txt"} {
+				blob := "blob" + strings.Repeat("x", i)
+				h.f.WriteFile(h.f.Root, blob, name+"\n")
+				oid := h.git(h.src, "hash-object", "--no-filters", filepath.Join(h.f.Root, blob))
+				snap.Index = append(snap.Index, worktree.IndexEntry{Path: name, Mode: "100644", OID: oid, Blob: h.put(worktree.MediaBlob, []byte(name+"\n"))})
+			}
+			snap.Files = append(snap.Files, worktree.FileEntry{Path: "a.txt", Kind: worktree.FileDeleted})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			caseFold, _, err := worktree.Folding(filepath.Join(h.f.Root, "dest"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !caseFold {
+				t.Skip("temp dir is on a case-sensitive filesystem")
+			}
+			snap := h.capture()
+			tt.alias(h, &snap)
+			slices.SortFunc(snap.Index, func(a, b worktree.IndexEntry) int { return strings.Compare(a.Path, b.Path) })
+			slices.SortFunc(snap.Files, func(a, b worktree.FileEntry) int { return strings.Compare(a.Path, b.Path) })
+			snap = h.seal(snap)
+			dest := filepath.Join(h.f.Root, "dest")
+			if _, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest}); !errors.Is(err, worktree.ErrPathCollision) {
+				t.Fatalf("restore error = %v, want ErrPathCollision", err)
+			}
+			if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("collision created %s: %v", dest, err)
+			}
+		})
+	}
+}
+
+func TestRestoreSkipsReceiverFSMonitor(t *testing.T) {
 	h := newGitHarness(t)
-	caseFold, _, err := worktree.Folding(filepath.Join(h.f.Root, "dest"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !caseFold {
-		t.Skip("temp dir is on a case-sensitive filesystem")
-	}
-	snap := h.capture()
-	for _, name := range []string{"A.txt", "a.txt"} {
-		snap.Files = append(snap.Files, worktree.FileEntry{Path: name, Kind: worktree.FileRegular, Content: h.put(worktree.MediaFile, []byte(name)), Untracked: true})
-	}
-	slices.SortFunc(snap.Files, func(a, b worktree.FileEntry) int { return strings.Compare(a.Path, b.Path) })
-	snap = h.seal(snap)
-	dest := filepath.Join(h.f.Root, "dest")
-	if _, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest}); !errors.Is(err, worktree.ErrPathCollision) {
-		t.Fatalf("restore error = %v, want ErrPathCollision", err)
-	}
-	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("collision created %s: %v", dest, err)
+	h.f.WriteFile(h.src, "README.md", "edited\n")
+	snap := h.seal(h.capture())
+	h.f.RunGit(h.recv, "config", "core.fsmonitor", sentinelScript(t, filepath.Join(h.f.Root, "fsmonitor.sh")))
+	if r := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}); !r.Exact {
+		t.Fatalf("restore not exact: %+v", r)
 	}
 }
 

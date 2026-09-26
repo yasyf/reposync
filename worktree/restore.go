@@ -281,17 +281,14 @@ func (m mirror) checkCollisions(ctx context.Context, snap Snapshot, dest string)
 	if err != nil {
 		return err
 	}
-	deleted := map[string]bool{}
 	var paths []string
 	for _, f := range snap.Files {
-		if f.Kind == FileDeleted {
-			deleted[f.Path] = true
-		} else {
+		if f.Kind != FileDeleted {
 			paths = append(paths, f.Path)
 		}
 	}
 	for p := range strings.SplitSeq(strings.TrimSuffix(tree, "\x00"), "\x00") {
-		if p != "" && !deleted[p] {
+		if p != "" {
 			paths = append(paths, p)
 		}
 	}
@@ -513,8 +510,8 @@ func (m mirror) checkoutLFSPath(oid string) string {
 
 func (m mirror) publishLFS(o LFSObject) error {
 	dest := m.checkoutLFSPath(o.OID)
-	if sizeIs(dest, o.Size) {
-		return nil
+	if ok, err := holds(dest, o.OID, o.Size); err != nil || ok {
+		return err
 	}
 	return publishVerified(dest, func(w io.Writer) error {
 		f, err := os.Open(m.lfsPath(o.OID))
@@ -598,7 +595,7 @@ func checkoutPointers(ctx context.Context, dest string, paths []string, oids map
 }
 
 func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string) ([]string, error) {
-	st, err := readStatus(ctx, dest, []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null'"})
+	st, err := readStatus(ctx, dest, []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null' 'core.fsmonitor'='false'", "GIT_NO_LAZY_FETCH=1"})
 	if err != nil {
 		return nil, err
 	}

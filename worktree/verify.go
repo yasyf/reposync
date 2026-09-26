@@ -347,8 +347,8 @@ func (m mirror) importBlob(ctx context.Context, src ArtifactSource, e IndexEntry
 
 func (m mirror) importLFS(ctx context.Context, src ArtifactSource, o LFSObject) error {
 	dest := m.lfsPath(o.OID)
-	if sizeIs(dest, o.Size) {
-		return nil
+	if ok, err := holds(dest, o.OID, o.Size); err != nil || ok {
+		return err
 	}
 	return publishVerified(dest, func(w io.Writer) error { return copyVerified(ctx, src, o.Artifact, w) })
 }

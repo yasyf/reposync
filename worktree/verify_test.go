@@ -1,6 +1,7 @@
 package worktree_test
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"maps"
@@ -286,5 +287,67 @@ func TestVerifyPinsIdempotenceAndRelease(t *testing.T) {
 	}
 	if refs := h.mirrorRefs(); len(refs) != 0 {
 		t.Fatalf("mirror refs after releasing all = %v", refs)
+	}
+}
+
+func TestVerifyRebuildsDamagedMirror(t *testing.T) {
+	h := newGitHarness(t)
+	h.f.WriteFile(h.src, "staged.txt", "only in the mirror\n")
+	h.f.RunGit(h.src, "add", "staged.txt")
+	snap := h.seal(h.capture())
+	if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("first verify not ready: %+v", v)
+	}
+	oid := h.git(h.src, "rev-parse", ":staged.txt")
+	if err := os.Remove(filepath.Join(h.mirrorDir(), "objects", oid[:2], oid[2:])); err != nil {
+		t.Fatal(err)
+	}
+	if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("verify after damage not ready: %+v", v)
+	}
+	h.git(h.f.Root, "--git-dir="+h.mirrorDir(), "cat-file", "-e", oid)
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+}
+
+func TestVerifyReplacesCorruptLFSObject(t *testing.T) {
+	f := vcstest.New(t)
+	f.EnableLFS("*.bin")
+	h := newHarness(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+	data := "staged lfs object\x00"
+	h.f.WriteFile(h.src, "new.bin", data)
+	h.f.RunGit(h.src, "add", "new.bin")
+	snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+	oid := vcstest.SHA256([]byte(data))
+	corrupt := func(path string) {
+		t.Helper()
+		if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, len(data)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("verify not ready: %+v", v)
+	}
+	mirrored := vcstest.LFSObjectPath(h.mirrorDir(), oid)
+	corrupt(mirrored)
+	if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready || h.f.ReadFile(filepath.Dir(mirrored), filepath.Base(mirrored)) != data {
+		t.Fatalf("verify kept a corrupt mirrored lfs object: %+v", v)
+	}
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "first")}))
+	corrupt(vcstest.LFSObjectPath(filepath.Join(h.recv, ".git"), oid))
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "second"), Fresh: true}))
+}
+
+func TestVerifyNeverLazyFetches(t *testing.T) {
+	f := vcstest.New(t)
+	f.RunGit(f.Origin, "config", "uploadpack.allowFilter", "true")
+	f.RunGit(f.Origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+	recv := filepath.Join(f.Root, "recv")
+	f.RunGit(f.Root, "clone", "-q", "--filter=tree:0", "file://"+f.Origin, recv)
+	h := newHarness(t, f, f.GitClone(filepath.Join(f.Root, "src")), recv)
+	f.AdvanceOrigin("only on origin")
+	h.git(h.src, "pull", "-q", "--ff-only")
+	next := h.git(h.src, "rev-parse", "HEAD")
+	if v := h.verify(h.seal(h.capture()), worktree.VerifyOptions{}); v.Ready || !slices.Equal(v.Missing, []string{next}) {
+		t.Fatalf("verify = %+v, want not ready missing %s with no lazy fetch", v, next)
 	}
 }

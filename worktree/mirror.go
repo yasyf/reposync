@@ -104,8 +104,8 @@ func recvGit(ctx context.Context, env []string, stdin io.Reader, args ...string)
 	var out bytes.Buffer
 	err := vcs.Exec(ctx, vcs.Cmd{
 		Name:   "git",
-		Args:   append([]string{"-c", "core.hooksPath=/dev/null"}, args...),
-		Env:    append([]string{"GIT_TERMINAL_PROMPT=0"}, env...),
+		Args:   append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}, args...),
+		Env:    append([]string{"GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1"}, env...),
 		Stdin:  stdin,
 		Stdout: &out,
 	})
@@ -181,13 +181,45 @@ func (m mirror) repair(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var del []string
+	var present, del []string
 	for ref, oid := range refs {
 		if slices.Contains(absent, oid+"^{tree}") {
 			del = append(del, "delete "+ref)
+		} else {
+			present = append(present, ref)
+		}
+	}
+	broken, err := m.unreachable(ctx, present)
+	if err != nil {
+		return err
+	}
+	for i := 0; broken && i < len(present); i++ {
+		damaged, err := m.unreachable(ctx, present[i:i+1])
+		if err != nil {
+			return err
+		}
+		if damaged {
+			del = append(del, "delete "+present[i])
 		}
 	}
 	return updateRefs(ctx, []string{"--git-dir=" + m.dir}, del)
+}
+
+func (m mirror) unreachable(ctx context.Context, refs []string) (bool, error) {
+	if len(refs) == 0 {
+		return false, nil
+	}
+	args := append([]string{"rev-list", "--objects", "--missing=print"}, refs...)
+	out, err := m.git(ctx, nil, nil, append(args, "--not", "--alternate-refs")...)
+	if err != nil {
+		return false, fmt.Errorf("check mirror objects: %w", err)
+	}
+	for l := range strings.Lines(out) {
+		if strings.HasPrefix(l, "?") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m mirror) reconcile(ctx context.Context, l mirrorLedger) error {
@@ -299,6 +331,23 @@ func publishVerified(dest string, write func(io.Writer) error) error {
 		return fmt.Errorf("publish %s: %w", dest, err)
 	}
 	return nil
+}
+
+func holds(path, oid string, size int64) (bool, error) {
+	//nolint:gosec // G304: an oid-addressed LFS object under a store- or checkout-owned LFS directory.
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("open lfs object %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	err = verifiedCopy(io.Discard, f, ArtifactRef{Digest: digestPrefix + oid, Size: size, Media: MediaLFSObject})
+	if errors.Is(err, ErrArtifactMismatch) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func sizeIs(path string, size int64) bool {
