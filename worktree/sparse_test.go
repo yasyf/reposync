@@ -1,8 +1,11 @@
 package worktree_test
 
 import (
+	"maps"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/yasyf/reposync/internal/vcs/vcstest"
@@ -51,6 +54,54 @@ func TestCaptureSparse(t *testing.T) {
 			snap := mustCapture(t, openStore(t), discoverAt(t, src, src), newHarness(t, f, src, src).art)
 			if !reflect.DeepEqual(snap.Sparse, tt.want) {
 				t.Fatalf("Sparse = %+v, want %+v", snap.Sparse, tt.want)
+			}
+		})
+	}
+}
+
+func TestRestoreSparse(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		apply bool
+		list  string
+	}{
+		{"default-expands-and-says-so", []string{"kept"}, false, ""},
+		{"apply-cone", []string{"kept"}, true, "kept"},
+		{"apply-no-cone", []string{"--no-cone", "/kept/"}, true, "/kept/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			src := sparseSource(t, f, false, tt.args...)
+			rt := newRoundTrip(t, f, src, f.GitClone(filepath.Join(f.Root, "recv")))
+			rt.f.WriteFile(rt.src, "kept/inside.txt", "edited inside\n")
+			snap, want := rt.tick()
+			if snap.Sparse == nil {
+				t.Fatal("capture dropped the sparse-checkout configuration")
+			}
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered"), ApplySparse: tt.apply})
+			if !reflect.DeepEqual(r.Sparse, snap.Sparse) {
+				t.Fatalf("Restored.Sparse = %+v, want %+v", r.Sparse, snap.Sparse)
+			}
+			got := rt.worktreeFiles(r.Path)
+			if !tt.apply {
+				expansion := slices.ContainsFunc(r.Differences, func(d string) bool {
+					return strings.Contains(d, "sparse checkout expanded to full") && strings.Contains(d, "/kept/")
+				})
+				if r.Exact || !expansion || !f.FileExists(r.Path, "excluded/outside.txt") {
+					t.Fatalf("restored %+v, want Exact=false naming the full expansion of %v", r, snap.Sparse.Patterns)
+				}
+				return
+			}
+			if !r.Exact || len(r.Differences) != 0 || !maps.Equal(want.files, got) {
+				t.Fatalf("restored %+v files differ at %q", r, changed(want.files, got))
+			}
+			if status := rt.status(r.Path); !slices.Equal(want.status, status) {
+				t.Fatalf("status differs:\nsource   %q\nrestored %q", want.status, status)
+			}
+			if list := rt.git(r.Path, "sparse-checkout", "list"); list != tt.list {
+				t.Fatalf("sparse-checkout list = %q, want %q", list, tt.list)
 			}
 		})
 	}
