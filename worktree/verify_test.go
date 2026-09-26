@@ -2,7 +2,9 @@ package worktree_test
 
 import (
 	"bytes"
+	"compress/zlib"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -423,5 +425,62 @@ func TestVerifyRequiresLocalBaseObjects(t *testing.T) {
 			}
 			h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
 		})
+	}
+}
+
+func TestVerifyHealsCorruptStagedBlob(t *testing.T) {
+	tests := []struct {
+		name    string
+		between func(h *harness, snap worktree.Snapshot)
+	}{
+		{"cached snapshot", func(*harness, worktree.Snapshot) {}},
+		{"released snapshot", func(h *harness, snap worktree.Snapshot) {
+			if err := h.store.Release(h.t.Context(), h.recvReg(), snap); err != nil {
+				h.t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			h.f.WriteFile(h.src, "staged.txt", "original staged bytes\n")
+			h.f.RunGit(h.src, "add", "staged.txt")
+			snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready {
+				t.Fatalf("first verify = %+v, want ready", v)
+			}
+			oid := h.git(h.src, "rev-parse", ":staged.txt")
+			writeLooseBlob(t, filepath.Join(h.mirrorDir(), "objects", oid[:2], oid[2:]), "CORRUPTED staged bytes\n")
+			if got := h.git(h.mirrorDir(), "cat-file", "blob", oid); got != "CORRUPTED staged bytes" {
+				t.Fatalf("mirror serves %q, want the corrupt bytes", got)
+			}
+
+			tt.between(h, snap)
+			if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready || len(v.Missing) != 0 {
+				t.Fatalf("re-verify = %+v, want ready", v)
+			}
+			if got := h.git(h.mirrorDir(), "cat-file", "blob", oid); got != "original staged bytes" {
+				t.Fatalf("mirror serves %q after re-verify, want the staged bytes", got)
+			}
+			h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+		})
+	}
+}
+
+func writeLooseBlob(t *testing.T, path, content string) {
+	t.Helper()
+	var encoded bytes.Buffer
+	zw := zlib.NewWriter(&encoded)
+	if _, err := fmt.Fprintf(zw, "blob %d\x00%s", len(content), content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

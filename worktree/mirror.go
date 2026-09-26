@@ -102,14 +102,18 @@ func snapshotKey(s Snapshot) string {
 
 func recvGit(ctx context.Context, env []string, stdin io.Reader, args ...string) (string, error) {
 	var out bytes.Buffer
-	err := vcs.Exec(ctx, vcs.Cmd{
+	err := recvGitTo(ctx, env, stdin, &out, args...)
+	return out.String(), err
+}
+
+func recvGitTo(ctx context.Context, env []string, stdin io.Reader, stdout io.Writer, args ...string) error {
+	return vcs.Exec(ctx, vcs.Cmd{
 		Name:   "git",
 		Args:   append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}, args...),
 		Env:    append([]string{"GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1"}, env...),
 		Stdin:  stdin,
-		Stdout: &out,
+		Stdout: stdout,
 	})
-	return out.String(), err
 }
 
 func (m mirror) git(ctx context.Context, env []string, stdin io.Reader, args ...string) (string, error) {

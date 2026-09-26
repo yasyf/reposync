@@ -252,6 +252,9 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 			return entry, nil, fmt.Errorf("record snapshot refs: %w", err)
 		}
 	}
+	if err := m.healStaged(ctx, snap, src); err != nil {
+		return entry, nil, err
+	}
 	for _, o := range snap.LFSObjects {
 		if err := m.importLFS(ctx, src, o); err != nil {
 			return entry, nil, err
@@ -359,25 +362,56 @@ func (m mirror) buildIndex(ctx context.Context, snap Snapshot, src ArtifactSourc
 }
 
 func (m mirror) importBlob(ctx context.Context, src ArtifactSource, e IndexEntry) error {
-	pr, pw := io.Pipe()
-	copied := make(chan error, 1)
-	go func() {
-		err := copyVerified(ctx, src, *e.Blob, pw)
-		_ = pw.CloseWithError(err)
-		copied <- err
-	}()
-	out, err := m.git(ctx, nil, pr, "hash-object", "-w", "--no-filters", "--stdin")
-	_ = pr.CloseWithError(io.ErrClosedPipe)
-	if cerr := <-copied; cerr != nil && !errors.Is(cerr, io.ErrClosedPipe) {
-		return fmt.Errorf("staged blob %s: %w", e.Path, cerr)
-	}
+	got, err := m.hashObject(ctx, func(w io.Writer) error { return copyVerified(ctx, src, *e.Blob, w) }, "-w")
 	if err != nil {
 		return fmt.Errorf("staged blob %s: %w", e.Path, err)
 	}
-	if got := strings.TrimSpace(out); got != e.OID {
+	if got != e.OID {
 		return fmt.Errorf("%w: staged blob %s hashes to %s, manifest says %s", ErrArtifactMismatch, e.Path, got, e.OID)
 	}
 	return nil
+}
+
+func (m mirror) healStaged(ctx context.Context, snap Snapshot, src ArtifactSource) error {
+	var checked []string
+	for _, e := range snap.Index {
+		if e.Blob == nil || slices.Contains(checked, e.OID) {
+			continue
+		}
+		checked = append(checked, e.OID)
+		stored, err := m.hashObject(ctx, func(w io.Writer) error {
+			return recvGitTo(ctx, nil, nil, w, "--git-dir="+m.dir, "cat-file", "blob", e.OID)
+		})
+		if err != nil {
+			return fmt.Errorf("stored staged blob %s: %w", e.Path, err)
+		}
+		if stored == e.OID {
+			continue
+		}
+		if err := os.Remove(filepath.Join(m.dir, "objects", e.OID[:2], e.OID[2:])); err != nil {
+			return fmt.Errorf("drop corrupt staged blob %s: %w", e.Path, err)
+		}
+		if err := m.importBlob(ctx, src, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m mirror) hashObject(ctx context.Context, write func(io.Writer) error, args ...string) (string, error) {
+	pr, pw := io.Pipe()
+	written := make(chan error, 1)
+	go func() {
+		err := write(pw)
+		_ = pw.CloseWithError(err)
+		written <- err
+	}()
+	out, err := m.git(ctx, nil, pr, append([]string{"hash-object", "--no-filters", "--stdin"}, args...)...)
+	_ = pr.CloseWithError(io.ErrClosedPipe)
+	if werr := <-written; werr != nil && !errors.Is(werr, io.ErrClosedPipe) {
+		return "", werr
+	}
+	return strings.TrimSpace(out), err
 }
 
 func (m mirror) importLFS(ctx context.Context, src ArtifactSource, o LFSObject) error {
