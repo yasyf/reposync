@@ -255,10 +255,11 @@ func Encode(s Snapshot) ([]byte, error) {
 	return b, nil
 }
 
-// Decode parses and validates a snapshot manifest: the schema, object ids,
-// artifact refs, sort order, digest, and path safety (every path clean,
-// relative, valid UTF-8, NUL-free, with no ".." and no ".git" component under
-// case folding). Failures wrap ErrInvalidSnapshot.
+// Decode parses and validates a snapshot manifest: the schema, the worktree ID's
+// derivation, object ids, artifact refs (one size per digest), sort order,
+// digest, and path safety (every path clean, relative, valid UTF-8, NUL-free,
+// with no ".." and no ".git" component under case folding). Failures wrap
+// ErrInvalidSnapshot.
 func Decode(b []byte) (Snapshot, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -306,6 +307,7 @@ func (s Snapshot) check() error {
 		return nil
 	}
 	checks := []error{
+		oid("worktree.head", s.Worktree.Head),
 		oid("head.commit", s.Head.Commit),
 		oid("head.trunk_tip", s.Head.TrunkTip),
 		oid("head.trunk_base", s.Head.TrunkBase),
@@ -314,6 +316,8 @@ func (s Snapshot) check() error {
 		s.checkFiles(),
 		s.checkLFS(),
 		s.checkOmitted(),
+		s.checkJJ(oid),
+		s.checkArtifactSizes(),
 	}
 	for _, err := range checks {
 		if err != nil {
@@ -487,6 +491,25 @@ func (s Snapshot) checkLFS() error {
 	}
 	if len(referenced) != len(shipped) {
 		return fmt.Errorf("%d shipped lfs objects, %d referenced", len(shipped), len(referenced))
+	}
+	return nil
+}
+
+func (s Snapshot) checkJJ(oid func(field, v string) error) error {
+	if s.JJ == nil {
+		return nil
+	}
+	return oid("jj.working_copy_commit", s.JJ.WorkingCopyCommit)
+}
+
+func (s Snapshot) checkArtifactSizes() error {
+	sizes := map[string]int64{}
+	for _, r := range s.Artifacts() {
+		size, seen := sizes[r.Digest]
+		if seen && size != r.Size {
+			return fmt.Errorf("artifact %s declared at sizes %d and %d", r.Digest, size, r.Size)
+		}
+		sizes[r.Digest] = r.Size
 	}
 	return nil
 }

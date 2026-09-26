@@ -35,7 +35,7 @@ func validSnapshot(t *testing.T) Snapshot {
 		Schema: SnapshotSchema,
 		Source: "host-a",
 		Worktree: Worktree{
-			ID: strings.Repeat("e", 32), Origin: "https://example.com/r.git", Relpath: "r", Trunk: "main",
+			ID: worktreeID("https://example.com/r.git", "/src/r", 7), Origin: "https://example.com/r.git", Relpath: "r", Trunk: "main",
 			Root: "/src/r", GitDir: "/src/r/.git", CommonDir: "/src/r/.git", Kind: KindGit,
 			Branch: "feat", Head: oid('1'), Incarnation: 7,
 		},
@@ -96,6 +96,14 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if _, err := Encode(sealed(t, incomplete)); err != nil {
 		t.Fatalf("Encode incomplete snapshot: %v", err)
 	}
+
+	shared := s
+	sameBytes := ArtifactRef{Digest: s.Index[0].Blob.Digest, Size: s.Index[0].Blob.Size, Media: MediaFile}
+	shared.Files = append(append([]FileEntry(nil), s.Files...), FileEntry{Path: "same-as-staged.txt", Kind: FileRegular, Content: &sameBytes, Untracked: true})
+	shared.JJ = &JJ{Workspace: "default", ChangeID: strings.Repeat("k", 32), WorkingCopyCommit: oid('6')}
+	if _, err := Encode(sealed(t, shared)); err != nil {
+		t.Fatalf("Encode snapshot sharing one digest across media: %v", err)
+	}
 }
 
 func TestEncodeDecodeRejectsInvalid(t *testing.T) {
@@ -142,6 +150,19 @@ func TestEncodeDecodeRejectsInvalid(t *testing.T) {
 		{"history not ending at head", func(s *Snapshot) { s.History[0].Tip = oid('5') }, true, "want head"},
 		{"requires without history", func(s *Snapshot) { s.History, s.Head.Ahead = nil, 0 }, true, "without history"},
 		{"bad worktree kind", func(s *Snapshot) { s.Worktree.Kind = "svn" }, true, `kind "svn"`},
+		{"one digest at two sizes", func(s *Snapshot) {
+			s.Files[0].Content = &ArtifactRef{Digest: s.Index[0].Blob.Digest, Size: 4, Media: MediaFile}
+		}, true, "declared at sizes 3 and 4"},
+		{"bundle digest reused by an lfs object at another size", func(s *Snapshot) {
+			s.History[0].Artifact.Digest = s.LFSObjects[0].Artifact.Digest
+		}, true, "declared at sizes 100 and 9"},
+		{"worktree id unrelated to its fields", func(s *Snapshot) { s.Worktree.ID = strings.Repeat("0", 32) }, true, "does not derive from origin, root, and incarnation"},
+		{"worktree id from another incarnation", func(s *Snapshot) { s.Worktree.Incarnation = 8 }, true, "does not derive from origin, root, and incarnation"},
+		{"worktree head not an object id", func(s *Snapshot) { s.Worktree.Head = "not-an-object-id" }, true, `worktree.head "not-an-object-id" is not a sha1 object id`},
+		{"worktree head of another format", func(s *Snapshot) { s.Worktree.Head = strings.Repeat("1", 64) }, true, "worktree.head"},
+		{"jj working copy commit not an object id", func(s *Snapshot) {
+			s.JJ = &JJ{Workspace: "default", ChangeID: strings.Repeat("k", 32), WorkingCopyCommit: "xyz"}
+		}, true, `jj.working_copy_commit "xyz" is not a sha1 object id`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

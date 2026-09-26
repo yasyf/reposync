@@ -101,11 +101,13 @@ func Discover(ctx context.Context, reg registry.Registry) ([]Worktree, []Skip, e
 }
 
 // Locate returns the worktree whose symlink-resolved Root most deeply contains
-// path.
+// path. A relative path is taken against the process working directory. Each
+// component resolves in order, so ".." climbs out of a symlink's target as the
+// kernel does, and components that no longer exist are taken lexically.
 func Locate(wts []Worktree, path string) (Worktree, bool) {
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := resolvePhysical(path)
 	if err != nil {
-		resolved = filepath.Clean(path)
+		return Worktree{}, false
 	}
 	var best Worktree
 	found := false
@@ -116,6 +118,31 @@ func Locate(wts []Worktree, path string) (Worktree, bool) {
 		}
 	}
 	return best, found
+}
+
+func resolvePhysical(path string) (string, error) {
+	sep := string(filepath.Separator)
+	if !filepath.IsAbs(path) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("working directory for %s: %w", path, err)
+		}
+		path = wd + sep + path
+	}
+	resolved := sep
+	for _, part := range strings.Split(path, sep) {
+		switch part {
+		case "", ".":
+		case "..":
+			resolved = filepath.Dir(resolved)
+		default:
+			resolved = filepath.Join(resolved, part)
+			if target, err := filepath.EvalSymlinks(resolved); err == nil {
+				resolved = target
+			}
+		}
+	}
+	return resolved, nil
 }
 
 func discoverRepo(ctx context.Context, repo registry.Repo) ([]Worktree, []Skip, error) {
@@ -283,12 +310,12 @@ func isDir(path string) bool {
 
 func (w Worktree) check() error {
 	switch {
-	case !isHex(w.ID, 32):
-		return fmt.Errorf("id %q", w.ID)
 	case w.Origin == "":
 		return fmt.Errorf("empty origin")
 	case !filepath.IsAbs(w.Root) || !filepath.IsAbs(w.CommonDir):
 		return fmt.Errorf("root %q and common dir %q must be absolute", w.Root, w.CommonDir)
+	case w.ID != worktreeID(w.Origin, w.Root, w.Incarnation):
+		return fmt.Errorf("id %q does not derive from origin, root, and incarnation", w.ID)
 	}
 	switch w.Kind {
 	case KindGit, KindJJColocated:
