@@ -76,3 +76,14 @@ func Load() (Registry, error) {
 	})
 	return result, nil
 }
+
+// ByOrigin returns the propagating repository registered under origin. A
+// local-only entry never matches, even when it records an origin.
+func (r Registry) ByOrigin(origin string) (Repo, bool) {
+	for _, repo := range r.Repos {
+		if !repo.LocalOnly && origin != "" && repo.Origin == origin {
+			return repo, true
+		}
+	}
+	return Repo{}, false
+}

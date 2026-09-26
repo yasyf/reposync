@@ -149,3 +149,31 @@ func removeRepo(t *testing.T, relpath string) {
 		t.Fatalf("remove repo: %v", err)
 	}
 }
+
+func TestByOrigin(t *testing.T) {
+	reg := Registry{Repos: []Repo{
+		{Relpath: "alpha", Origin: "https://example.com/shared.git", LocalOnly: true},
+		{Relpath: "beta", Origin: "https://example.com/shared.git"},
+		{Relpath: "gamma", Origin: "https://example.com/gamma.git"},
+		{Relpath: "scratch"},
+	}}
+	tests := []struct {
+		name   string
+		origin string
+		want   string
+		ok     bool
+	}{
+		{"propagating entry wins over a local-only one", "https://example.com/shared.git", "beta", true},
+		{"single propagating entry", "https://example.com/gamma.git", "gamma", true},
+		{"unknown origin", "https://example.com/missing.git", "", false},
+		{"empty origin never matches an originless entry", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := reg.ByOrigin(tc.origin)
+			if ok != tc.ok || got.Relpath != tc.want {
+				t.Fatalf("ByOrigin(%q) = (%q, %v), want (%q, %v)", tc.origin, got.Relpath, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}

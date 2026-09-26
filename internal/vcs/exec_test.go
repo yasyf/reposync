@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,4 +108,124 @@ func TestRunSuppressesAutoMaintenance(t *testing.T) {
 	if strings.TrimSpace(got) != "false" {
 		t.Fatalf("maintenance.auto = %q, want false", strings.TrimSpace(got))
 	}
+}
+
+func TestExecStreamsStdinAndStdout(t *testing.T) {
+	var out strings.Builder
+	err := Exec(context.Background(), Cmd{
+		Dir:    t.TempDir(),
+		Name:   "git",
+		Args:   []string{"hash-object", "--stdin"},
+		Stdin:  strings.NewReader("hello\n"),
+		Stdout: &out,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "ce013625030ba8dba906f756967f9e9ca394464a" {
+		t.Fatalf("hash-object = %q, want the blob id of hello", got)
+	}
+}
+
+func TestReadOnlyGitEnv(t *testing.T) {
+	env := ReadOnlyGitEnv()
+	for _, want := range []string{"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=gc.auto"} {
+		if !slices.Contains(env, want) {
+			t.Errorf("ReadOnlyGitEnv() = %v, missing %q", env, want)
+		}
+	}
+}
+
+// TestFilterOverrideEnv proves the override blanks every configured clean and
+// process driver (dotted driver names included) and marks it not required: a
+// status read over a filtered path never runs the sentinel-writing filter, yet
+// still reports the raw-byte difference.
+func TestFilterOverrideEnv(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	sentinel := filepath.Join(t.TempDir(), "filter-ran")
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := run(context.Background(), dir, "git", append([]string{"-C", dir}, args...)...)
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return out
+	}
+	git("init", "-q")
+	git("config", "user.name", "T")
+	git("config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.dat filter=spy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.dat"), []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "init")
+	git("config", "filter.spy.clean", "touch "+sentinel+"; cat")
+	git("config", "filter.spy.required", "true")
+	git("config", "filter.dotted.name.process", "false")
+
+	env, err := FilterOverrideEnv(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("FilterOverrideEnv: %v", err)
+	}
+	keys := map[string]string{}
+	for i := 0; ; i++ {
+		k, ok := envValue(env, fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		if !ok {
+			break
+		}
+		v, _ := envValue(env, fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		keys[k] = v
+	}
+	want := map[string]string{
+		"gc.auto": "0", "maintenance.auto": "false",
+		"filter.spy.clean": "", "filter.spy.process": "", "filter.spy.required": "false",
+		"filter.dotted.name.clean": "", "filter.dotted.name.process": "", "filter.dotted.name.required": "false",
+	}
+	if fmt.Sprint(keys) != fmt.Sprint(want) {
+		t.Fatalf("override config = %v, want %v", keys, want)
+	}
+	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "8" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 8", n)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "a.dat"), []byte("two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	err = Exec(context.Background(), Cmd{Dir: dir, Name: "git", Args: []string{"-C", dir, "status", "--porcelain"}, Env: env, Stdout: &out})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if got := out.String(); got != " M a.dat\n" {
+		t.Fatalf("status = %q, want a.dat modified", got)
+	}
+	if _, err := os.Stat(sentinel); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clean filter ran during status: stat sentinel = %v", err)
+	}
+
+	empty := t.TempDir()
+	if _, err := run(context.Background(), empty, "git", "-C", empty, "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	env, err = FilterOverrideEnv(context.Background(), empty)
+	if err != nil {
+		t.Fatalf("FilterOverrideEnv without drivers: %v", err)
+	}
+	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "2" {
+		t.Fatalf("GIT_CONFIG_COUNT without drivers = %q, want 2", n)
+	}
+}
+
+func envValue(env []string, key string) (string, bool) {
+	for _, kv := range slices.Backward(env) {
+		if v, ok := strings.CutPrefix(kv, key+"="); ok {
+			return v, true
+		}
+	}
+	return "", false
 }

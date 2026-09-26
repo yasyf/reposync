@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,10 +35,11 @@ const gitSSHCommand = "ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveIn
 // direct or spawned by jj — so no invocation ever runs a synchronous gc/
 // pack-refs inside a killable window. reposync is a syncer, not a maintainer:
 // repo gc stays with the user's own git usage.
-var gitConfigEnv = []string{
-	"GIT_CONFIG_COUNT=2",
-	"GIT_CONFIG_KEY_0=gc.auto", "GIT_CONFIG_VALUE_0=0",
-	"GIT_CONFIG_KEY_1=maintenance.auto", "GIT_CONFIG_VALUE_1=false",
+var gitConfigEnv = configEnv(nil)
+
+var baseGitConfig = [][2]string{
+	{"gc.auto", "0"},
+	{"maintenance.auto", "false"},
 }
 
 // cmdError is a failed git/jj invocation, carrying the exit code and trimmed
@@ -55,26 +59,37 @@ func (e *cmdError) Error() string {
 
 func (e *cmdError) Unwrap() error { return e.err }
 
-func run(ctx context.Context, dir, name string, args ...string) (string, error) {
-	return runStdin(ctx, dir, "", name, args...)
+// Cmd is one git or jj invocation for Exec. Env is appended after the
+// reposync defaults, so a later GIT_CONFIG_COUNT (from ReadOnlyGitEnv or
+// FilterOverrideEnv) replaces the default one. Stdin and Stdout stream; stderr
+// is captured into the returned error.
+type Cmd struct {
+	Dir    string
+	Name   string
+	Args   []string
+	Env    []string
+	Stdin  io.Reader
+	Stdout io.Writer
 }
 
-func runStdin(ctx context.Context, dir, stdin, name string, args ...string) (string, error) {
+// Exec runs c in its own process group under the per-invocation timeout: a
+// canceled context sends SIGTERM to the whole group before Go's SIGKILL
+// backstop. A failure carries the exit code and trimmed stderr.
+func Exec(ctx context.Context, c Cmd) error {
 	ctx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 	//nolint:gosec // G204: reposync drives git/jj by design; name and args come from trusted repo config and internal call sites, not untrusted input.
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
 	cmd.WaitDelay = termGrace
-	cmd.Dir = dir
+	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCommand)
 	cmd.Env = append(cmd.Env, gitConfigEnv...)
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
+	cmd.Env = append(cmd.Env, c.Env...)
+	cmd.Stdin = c.Stdin
+	cmd.Stdout = c.Stdout
+	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		code := -1
@@ -82,9 +97,97 @@ func runStdin(ctx context.Context, dir, stdin, name string, args ...string) (str
 		if errors.As(err, &exitErr) {
 			code = exitErr.ExitCode()
 		}
-		return stdout.String(), &cmdError{name: name, args: args, code: code, stderr: strings.TrimSpace(stderr.String()), err: err}
+		return &cmdError{name: c.Name, args: c.Args, code: code, stderr: strings.TrimSpace(stderr.String()), err: err}
 	}
-	return stdout.String(), nil
+	return nil
+}
+
+// ReadOnlyGitEnv is the environment for git reads against a repository
+// reposync must never write: no optional index refresh (GIT_OPTIONAL_LOCKS=0),
+// no credential prompt, and the default gc/maintenance suppression.
+func ReadOnlyGitEnv() []string {
+	return append(configEnv(nil), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+}
+
+// FilterOverrideEnv is ReadOnlyGitEnv plus command-scope config that blanks
+// the clean and process command of every filter driver configured for the
+// repository at dir and marks each driver not required, so a status read
+// hashes raw worktree bytes and never runs a filter that writes (git-lfs's
+// clean filter writes <common>/lfs/objects).
+func FilterOverrideEnv(ctx context.Context, dir string) ([]string, error) {
+	var out bytes.Buffer
+	err := Exec(ctx, Cmd{
+		Dir:    dir,
+		Name:   "git",
+		Args:   []string{"-C", dir, "config", "-z", "--get-regexp", `^filter\..*\.(clean|process)$`},
+		Env:    ReadOnlyGitEnv(),
+		Stdout: &out,
+	})
+	if err != nil && exitCode(err) != 1 {
+		return nil, fmt.Errorf("list filter drivers in %s: %w", dir, err)
+	}
+	drivers, err := filterDrivers(out.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	pairs := make([][2]string, 0, 3*len(drivers))
+	for _, d := range drivers {
+		pairs = append(pairs,
+			[2]string{"filter." + d + ".clean", ""},
+			[2]string{"filter." + d + ".process", ""},
+			[2]string{"filter." + d + ".required", "false"},
+		)
+	}
+	return append(configEnv(pairs), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0"), nil
+}
+
+func filterDrivers(out []byte) ([]string, error) {
+	seen := map[string]bool{}
+	var drivers []string
+	for rec := range bytes.SplitSeq(out, []byte{0}) {
+		if len(rec) == 0 {
+			continue
+		}
+		key, _, _ := bytes.Cut(rec, []byte{'\n'})
+		name, ok := strings.CutPrefix(string(key), "filter.")
+		if !ok {
+			return nil, fmt.Errorf("unexpected filter config key %q", key)
+		}
+		dot := strings.LastIndexByte(name, '.')
+		if dot <= 0 {
+			return nil, fmt.Errorf("unexpected filter config key %q", key)
+		}
+		driver := name[:dot]
+		if !seen[driver] {
+			seen[driver] = true
+			drivers = append(drivers, driver)
+		}
+	}
+	return drivers, nil
+}
+
+func configEnv(extra [][2]string) []string {
+	pairs := append(slices.Clone(baseGitConfig), extra...)
+	env := make([]string, 0, 1+2*len(pairs))
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(pairs)))
+	for i, p := range pairs {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, p[0]), fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, p[1]))
+	}
+	return env
+}
+
+func run(ctx context.Context, dir, name string, args ...string) (string, error) {
+	return runStdin(ctx, dir, "", name, args...)
+}
+
+func runStdin(ctx context.Context, dir, stdin, name string, args ...string) (string, error) {
+	var stdout bytes.Buffer
+	c := Cmd{Dir: dir, Name: name, Args: args, Stdout: &stdout}
+	if stdin != "" {
+		c.Stdin = strings.NewReader(stdin)
+	}
+	err := Exec(ctx, c)
+	return stdout.String(), err
 }
 
 // exitCode returns the exit code carried by the cmdError in err's chain, or -1
