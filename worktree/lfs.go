@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -145,6 +146,10 @@ func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObj
 	if err := s.run(ctx, nil, &commits, "rev-list", head, "^"+trunkTip); err != nil {
 		return nil, err
 	}
+	transitions, err := s.attributeHistoryLFS(ctx, commits.String())
+	if err != nil {
+		return nil, err
+	}
 	if err := s.run(ctx, &commits, &out, "diff-tree", "--stdin", "-r", "-m", "--root", "--raw", "--no-abbrev", "-z", "--no-renames"); err != nil {
 		return nil, err
 	}
@@ -175,10 +180,88 @@ func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObj
 			return nil, err
 		}
 	}
-	var refs []LFSObjectRef
+	refs := transitions
 	for _, b := range blobs {
 		if p, ok := pointers[b.oid]; ok && (p.Canonical || attrs[b.commit][b.path] == lfsFilter) {
 			refs = append(refs, LFSObjectRef{Path: b.path, OID: p.OID, Size: p.Size})
+		}
+	}
+	return refs, nil
+}
+
+func (s source) attributeHistoryLFS(ctx context.Context, commits string) ([]LFSObjectRef, error) {
+	var out bytes.Buffer
+	if err := s.run(ctx, strings.NewReader(commits), &out, "diff-tree", "--stdin", "-r", "-m", "--root", "--name-only", "-z", "--no-renames", "--", ":(glob)**/.gitattributes"); err != nil {
+		return nil, err
+	}
+	dirs := map[string][]string{}
+	var commit string
+	for tok := range strings.SplitSeq(out.String(), "\x00") {
+		switch tok = strings.Trim(tok, "\n"); {
+		case tok == "":
+		case isHex(tok, 40) || isHex(tok, 64):
+			commit = tok
+		default:
+			dirs[commit] = append(dirs[commit], path.Dir(tok))
+		}
+	}
+	var refs []LFSObjectRef
+	for _, commit := range slices.Sorted(maps.Keys(dirs)) {
+		slices.Sort(dirs[commit])
+		got, err := s.attributeTransitions(ctx, commit, slices.Compact(dirs[commit]))
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, got...)
+	}
+	return refs, nil
+}
+
+func (s source) attributeTransitions(ctx context.Context, commit string, dirs []string) ([]LFSObjectRef, error) {
+	ids, err := s.output(ctx, "rev-list", "--parents", "-n1", commit)
+	if err != nil {
+		return nil, err
+	}
+	var listed bytes.Buffer
+	if err := s.run(ctx, nil, &listed, append([]string{"ls-tree", "-r", "-z", commit, "--"}, dirs...)...); err != nil {
+		return nil, err
+	}
+	oids := map[string]string{}
+	for rec := range strings.SplitSeq(strings.TrimSuffix(listed.String(), "\x00"), "\x00") {
+		meta, path, _ := strings.Cut(rec, "\t")
+		if f := strings.Fields(meta); len(f) == 3 && (f[0] == "100644" || f[0] == "100755") {
+			oids[path] = f[2]
+		}
+	}
+	paths := slices.Sorted(maps.Keys(oids))
+	after, err := s.filterAttr(ctx, paths, "--source="+commit)
+	if err != nil {
+		return nil, err
+	}
+	var before []map[string]string
+	for _, parent := range strings.Fields(ids)[1:] {
+		attrs, err := s.filterAttr(ctx, paths, "--source="+parent)
+		if err != nil {
+			return nil, err
+		}
+		before = append(before, attrs)
+	}
+	var transitioned, blobs []string
+	for _, p := range paths {
+		if after[p] == lfsFilter && (len(before) == 0 || slices.ContainsFunc(before, func(attrs map[string]string) bool { return attrs[p] != lfsFilter })) {
+			transitioned = append(transitioned, p)
+			blobs = append(blobs, oids[p])
+		}
+	}
+	slices.Sort(blobs)
+	pointers, err := s.readPointers(ctx, slices.Compact(blobs))
+	if err != nil {
+		return nil, err
+	}
+	var refs []LFSObjectRef
+	for _, p := range transitioned {
+		if ptr, ok := pointers[oids[p]]; ok {
+			refs = append(refs, LFSObjectRef{Path: p, OID: ptr.OID, Size: ptr.Size})
 		}
 	}
 	return refs, nil
