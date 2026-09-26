@@ -73,6 +73,8 @@ func jjWorkspaces(ctx context.Context, main Worktree) ([]Worktree, []Skip, error
 	return wts, skips, nil
 }
 
+const jjFilesTemplate = `self.files().map(|e| e.path() ++ "\0").join("")`
+
 func jjRead(ctx context.Context, root string, args ...string) (string, error) {
 	var out bytes.Buffer
 	err := vcs.Exec(ctx, vcs.Cmd{

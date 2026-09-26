@@ -48,11 +48,19 @@ type CaptureOptions struct {
 var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 
 // Capture snapshots wt's uncommitted and unpublished work into sink without
-// writing the source repository: no index refresh, no filter, no hook, no jj
-// snapshot. It returns *DeferredError mid-operation, ErrBusy on a live lock
-// or a HEAD, index, or file that moved during the capture, *PartialError when
-// a progress budget ran out, and *MissingLFSError when a required LFS object
-// is absent locally. An unchanged worktree yields the same Digest with no Put.
+// writing the source repository: no index refresh, no fsmonitor, no filter in
+// the repository or any populated submodule, no hook, no jj snapshot. A tracked
+// path whose assume-unchanged or skip-worktree index flag hides its worktree
+// state from git status is captured when its raw worktree bytes, type, or exec
+// bit differ from the index entry; a skip-worktree path absent from a sparse
+// checkout is the sparse pattern's doing, not an edit. With core.filemode=false
+// the index mode is authoritative: the repository ignores the exec bit, so a
+// chmod alone is not work in progress. A KindJJWorkspace captures every file
+// its @ tracks, even one .gitignore now matches. It returns *DeferredError
+// mid-operation, ErrBusy on a live lock or a HEAD, index, or file that moved
+// during the capture, *PartialError when a progress budget ran out, and
+// *MissingLFSError when a required LFS object is absent locally. An unchanged
+// worktree yields the same Digest with no Put.
 func (s *Store) Capture(ctx context.Context, wt Worktree, sink ArtifactSink, opts CaptureOptions) (Snapshot, error) {
 	if opts.Source == "" {
 		return Snapshot{}, errors.New("capture: empty source")
@@ -130,10 +138,12 @@ type capture struct {
 }
 
 type fileCandidate struct {
-	path      string
-	untracked bool
-	indexMode string
-	indexOID  string
+	path            string
+	untracked       bool
+	indexMode       string
+	indexOID        string
+	assumeUnchanged bool
+	skipWorktree    bool
 }
 
 type guard struct {
@@ -196,6 +206,21 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	}
 	snap.History, snap.Requires = hist.links, hist.requires
 	files := c.classify(status, &snap)
+	fileMode := cfg["core.filemode"] != "false"
+	if c.wt.Kind == KindJJWorkspace {
+		tracked, err := c.jjTracked(ctx, status)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		files = append(files, tracked...)
+	} else {
+		hidden, deleted, err := c.hidden(ctx, status, snap.ObjectFormat, fileMode, cfg["core.sparsecheckout"] == "true")
+		if err != nil {
+			return Snapshot{}, err
+		}
+		files = append(files, hidden...)
+		snap.Files = append(snap.Files, deleted...)
+	}
 	_, lfsClean := cfg["filter.lfs.clean"]
 	_, lfsProcess := cfg["filter.lfs.process"]
 	usesLFS := lfsClean || lfsProcess
@@ -225,7 +250,6 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	fileMode := cfg["core.filemode"] != "false"
 	entries, err := c.captureFiles(ctx, files, attrs, fileMode)
 	if err != nil {
 		return Snapshot{}, err
@@ -362,6 +386,45 @@ func (c *capture) refreshPrivateIndex(ctx context.Context, parent string) error 
 		return err
 	}
 	return c.src.run(ctx, nil, nil, "update-index", "-q", "--refresh")
+}
+
+func (c *capture) jjTracked(ctx context.Context, status statusReport) ([]fileCandidate, error) {
+	tracked, err := jjRead(ctx, c.wt.Root, "log", "--no-graph", "-r", "@", "-T", jjFilesTemplate)
+	if err != nil {
+		return nil, err
+	}
+	var index bytes.Buffer
+	if err := c.src.run(ctx, nil, &index, "ls-files", "-z"); err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for p := range strings.SplitSeq(index.String(), "\x00") {
+		known[p] = true
+	}
+	for _, p := range status.untracked {
+		known[p] = true
+	}
+	root, err := os.OpenRoot(c.wt.Root)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	var files []fileCandidate
+	for p := range strings.SplitSeq(tracked, "\x00") {
+		if p == "" || known[p] {
+			continue
+		}
+		info, err := root.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("lstat %s: %w", p, err)
+		case !info.IsDir():
+			files = append(files, fileCandidate{path: p, untracked: true})
+		}
+	}
+	return files, nil
 }
 
 func (c *capture) head(ctx context.Context, status statusReport, snap *Snapshot) error {
@@ -715,7 +778,9 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 	if err != nil {
 		return pendingFile{}, false, fmt.Errorf("lstat %s: %w", f.path, err)
 	}
-	p := pendingFile{cand: f, stat: statOf(info), entry: FileEntry{Path: f.path, Untracked: f.untracked}}
+	p := pendingFile{cand: f, stat: statOf(info), entry: FileEntry{
+		Path: f.path, Untracked: f.untracked, AssumeUnchanged: f.assumeUnchanged, SkipWorktree: f.skipWorktree,
+	}}
 	switch mode := info.Mode(); {
 	case mode&fs.ModeSymlink != 0:
 		target, err := root.Readlink(f.path)

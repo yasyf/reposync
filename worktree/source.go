@@ -20,11 +20,15 @@ type source struct {
 }
 
 func newSource(ctx context.Context, wt Worktree, privateIndex string) (source, error) {
-	configDir := wt.Root
-	if wt.Kind == KindJJWorkspace {
-		configDir = wt.CommonDir
+	dirs := []string{wt.CommonDir}
+	if wt.Kind != KindJJWorkspace {
+		subs, err := submoduleRoots(ctx, wt.Root)
+		if err != nil {
+			return source{}, err
+		}
+		dirs = append([]string{wt.Root}, subs...)
 	}
-	env, err := vcs.FilterOverrideEnv(ctx, configDir)
+	env, err := vcs.FilterOverrideEnv(ctx, dirs...)
 	if err != nil {
 		return source{}, err
 	}

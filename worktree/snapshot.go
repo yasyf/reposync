@@ -110,6 +110,10 @@ type FileEntry struct {
 	Executable bool         `json:"executable,omitempty"`
 	Content    *ArtifactRef `json:"content,omitempty"`
 	Untracked  bool         `json:"untracked,omitempty"`
+	// AssumeUnchanged and SkipWorktree are the index flags that hid this
+	// tracked path's worktree state from git status; Restore re-applies them.
+	AssumeUnchanged bool `json:"assume_unchanged,omitempty"`
+	SkipWorktree    bool `json:"skip_worktree,omitempty"`
 }
 
 // LFSObject is a shipped git-lfs object; Artifact.Digest is "sha256:"+OID.
@@ -430,10 +434,13 @@ func (s Snapshot) checkFiles() error {
 		if err := checkPath(f.Path); err != nil {
 			return fmt.Errorf("files[%d]: %w", i, err)
 		}
+		if f.Untracked && (f.AssumeUnchanged || f.SkipWorktree) {
+			return fmt.Errorf("files[%d] %q: untracked path carries index flags", i, f.Path)
+		}
 		switch f.Kind {
 		case FileDeleted:
 			if f.Content != nil || f.Executable || f.Untracked {
-				return fmt.Errorf("files[%d] %q: deletion carries content or flags", i, f.Path)
+				return fmt.Errorf("files[%d] %q: deletion carries content, exec bit, or untracked", i, f.Path)
 			}
 		case FileSymlink, FileRegular:
 			if f.Content == nil {

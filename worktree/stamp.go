@@ -20,18 +20,19 @@ import (
 // Stamp returns a hex sha256 over wt's code work in progress: the worktree
 // kind, any in-progress git or jj operation marker, HEAD, branch, and upstream,
 // the stat of the per-worktree index file, every porcelain-v2 status record,
-// and the lstat of every changed and untracked path. An unstaged edit to a
-// tracked file or a new non-ignored file changes it with HEAD and the index
-// untouched; a change confined to ignored paths does not, because git prunes
-// ignored directories itself. A directory path (a submodule or an untracked
-// nested repository, whose content Capture omits) hashes as its bare path, so
-// only its status record moves the stamp. Stamp reads the source as Capture
-// does and never writes it: no index refresh, no fsmonitor, no filter drivers
-// in the repository or any submodule, and jj reads pinned to the current
-// operation without a snapshot. A KindJJWorkspace has no index of its own, so
-// its stamp covers the workspace's @ and @- commit ids and the lstat of every
-// file either commit tracks plus every non-ignored file instead of status
-// records.
+// every assume-unchanged or skip-worktree index entry, and the lstat of every
+// changed, untracked, or so-flagged path. An unstaged edit to a tracked file,
+// including one a flag hides from status, or a new non-ignored file changes it
+// with HEAD and the index untouched; a change confined to ignored paths does
+// not, because git prunes ignored directories itself. A directory path (a
+// submodule or an untracked nested repository, whose content Capture omits)
+// hashes as its bare path, so only its status record moves the stamp. Stamp
+// reads the source as Capture does and never writes it: no index refresh, no
+// fsmonitor, no filter drivers in the repository or any submodule, and jj reads
+// pinned to the current operation without a snapshot. A KindJJWorkspace has no
+// index of its own, so its stamp covers the workspace's @ and @- commit ids and
+// the lstat of every file either commit tracks plus every non-ignored file
+// instead of status records.
 func Stamp(ctx context.Context, wt Worktree) (string, error) {
 	records, err := stampRecords(ctx, wt)
 	if err != nil {
@@ -91,6 +92,15 @@ func gitStatusRecords(ctx context.Context, wt Worktree) ([]string, []string, err
 	if err != nil {
 		return nil, nil, err
 	}
+	var out bytes.Buffer
+	err = vcs.Exec(ctx, vcs.Cmd{Dir: wt.Root, Name: "git", Args: append([]string{"-C", wt.Root}, flaggedArgs...), Env: env, Stdout: &out})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list index flags in %s: %w", wt.Root, err)
+	}
+	flagged, err := parseFlagged(out.String())
+	if err != nil {
+		return nil, nil, err
+	}
 	entries := make([]string, 0, len(st.changed)+len(st.unmerged)+len(st.untracked))
 	paths := slices.Concat(st.unmerged, st.untracked)
 	for _, e := range st.changed {
@@ -103,6 +113,10 @@ func gitStatusRecords(ctx context.Context, wt Worktree) ([]string, []string, err
 	}
 	for _, p := range st.untracked {
 		entries = append(entries, fmt.Sprintf("? %q", p))
+	}
+	for _, e := range flagged {
+		entries = append(entries, fmt.Sprintf("flag %t %t %s %s %q", e.assumeUnchanged, e.skipWorktree, e.mode, e.oid, e.path))
+		paths = append(paths, e.path)
 	}
 	slices.Sort(entries)
 	head := fmt.Sprintf("head %q %q %q", st.commit, st.branch, st.upstream)
@@ -162,7 +176,7 @@ func submoduleRoots(ctx context.Context, dir string) ([]string, error) {
 }
 
 func jjWorkspaceFiles(ctx context.Context, wt Worktree) ([]string, error) {
-	tracked, err := jjRead(ctx, wt.Root, "log", "--no-graph", "-r", "@ | @-", "-T", `self.files().map(|e| e.path() ++ "\0").join("")`)
+	tracked, err := jjRead(ctx, wt.Root, "log", "--no-graph", "-r", "@ | @-", "-T", jjFilesTemplate)
 	if err != nil {
 		return nil, err
 	}

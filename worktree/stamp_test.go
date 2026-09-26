@@ -102,6 +102,24 @@ func TestStampChanges(t *testing.T) {
 			needsIndex: true,
 		},
 		{
+			name: "edit hidden by assume-unchanged",
+			prepare: func(_ *testing.T, f *vcstest.Fixture, _ stampKind, root string) {
+				f.RunGit(root, "update-index", "--assume-unchanged", "a.txt")
+			},
+			mutate:     write("a.txt", "hidden edit\n"),
+			changes:    true,
+			needsIndex: true,
+		},
+		{
+			name: "edit hidden by skip-worktree",
+			prepare: func(_ *testing.T, f *vcstest.Fixture, _ stampKind, root string) {
+				f.RunGit(root, "update-index", "--skip-worktree", "a.txt")
+			},
+			mutate:     write("a.txt", "hidden edit\n"),
+			changes:    true,
+			needsIndex: true,
+		},
+		{
 			name:    "new commit",
 			mutate:  func(_ *testing.T, f *vcstest.Fixture, k stampKind, root string) { k.commit(f, root) },
 			changes: true,
