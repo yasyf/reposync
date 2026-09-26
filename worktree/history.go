@@ -34,14 +34,18 @@ func (s *Store) captureHistory(ctx context.Context, wt Worktree, objectFormat st
 		}
 		if !published {
 			l.Chain = nil
+		} else {
+			held, err := chainHeld(ctx, l.Chain, sink)
+			if err != nil {
+				return history{}, err
+			}
+			if !held {
+				l.Chain = nil
+			}
 		}
 	}
 	if n := len(l.Chain); n > 0 && l.Chain[n-1].Bundle.Tip == head.Commit {
-		held, err := chainHeld(ctx, l.Chain, sink)
-		if err != nil || held {
-			return chainHistory(l.Chain), err
-		}
-		l.Chain = nil
+		return chainHistory(l.Chain), nil
 	}
 	excludes := []string{head.TrunkTip}
 	appending, err := canAppend(ctx, scratch, l.Chain, head.Commit, maxLinks)
@@ -69,7 +73,7 @@ func (s *Store) captureHistory(ctx context.Context, wt Worktree, objectFormat st
 
 func allPublished(ctx context.Context, scratch string, commits []string, trunkTip string) (bool, error) {
 	for _, c := range commits {
-		present, err := scratchTest(ctx, scratch, "cat-file", "-e", c+"^{commit}")
+		present, err := scratchTest(ctx, scratch, "cat-file", "-e", c)
 		if err != nil || !present {
 			return false, err
 		}
