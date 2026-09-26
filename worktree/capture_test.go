@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,24 @@ func filePaths(snap worktree.Snapshot) []string {
 	return paths
 }
 
+func sentinelScript(t *testing.T, script string) string {
+	t.Helper()
+	sentinel := script + ".ran"
+	if err := os.MkdirAll(filepath.Dir(script), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G306: the script must be executable to run as a hook.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch '"+sentinel+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := os.Stat(sentinel); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s ran: %v", script, err)
+		}
+	})
+	return script
+}
+
 func readArtifact(t *testing.T, src worktree.ArtifactSource, ref worktree.ArtifactRef) string {
 	t.Helper()
 	r, err := src.Open(context.Background(), ref)
@@ -139,6 +158,54 @@ func TestCaptureReadOnly(t *testing.T) {
 			ws := f.JJWorkspace(repo, filepath.Join(f.Root, "ws"), "second")
 			f.WriteFile(ws, "README.md", "workspace edit\n")
 			f.WriteFile(ws, "new.txt", "workspace new\n")
+			return repo, ws, []string{filepath.Join(repo, ".git"), filepath.Join(repo, ".jj"), filepath.Join(ws, ".jj")}
+		}},
+		{"assume-unchanged-edit", []string{"file:README.md"}, func(_ *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "update-index", "--assume-unchanged", "README.md")
+			f.WriteFile(repo, "README.md", "hidden edit\n")
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"assume-unchanged-deleted", []string{string(worktree.FileDeleted) + ":README.md"}, func(t *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "update-index", "--assume-unchanged", "README.md")
+			if err := os.Remove(filepath.Join(repo, "README.md")); err != nil {
+				t.Fatal(err)
+			}
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"assume-unchanged-untouched", nil, func(_ *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "update-index", "--assume-unchanged", "README.md")
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"skip-worktree-edit", []string{"file:README.md"}, func(_ *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "update-index", "--skip-worktree", "README.md")
+			f.WriteFile(repo, "README.md", "hidden edit\n")
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"skip-worktree-sparse-absence", nil, func(t *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.RunGit(repo, "update-index", "--skip-worktree", "README.md")
+			if err := os.Remove(filepath.Join(repo, "README.md")); err != nil {
+				t.Fatal(err)
+			}
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"git-fsmonitor-hook", []string{"file:README.md"}, func(t *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.GitClone(filepath.Join(f.Root, "repo"))
+			f.WriteFile(repo, "README.md", "edit\n")
+			f.RunGit(repo, "config", "core.fsmonitor", sentinelScript(t, filepath.Join(f.Root, "fsmonitor.sh")))
+			return repo, repo, []string{filepath.Join(repo, ".git")}
+		}},
+		{"jj-workspace-hooks-and-split-index", []string{"file:README.md"}, func(t *testing.T, f *vcstest.Fixture) (string, string, []string) {
+			repo := f.JJClone(filepath.Join(f.Root, "repo"))
+			ws := f.JJWorkspace(repo, filepath.Join(f.Root, "ws"), "second")
+			f.WriteFile(ws, "README.md", "workspace edit\n")
+			f.RunGit(repo, "config", "core.splitIndex", "true")
+			f.RunGit(repo, "config", "core.fsmonitor", sentinelScript(t, filepath.Join(f.Root, "fsmonitor.sh")))
+			sentinelScript(t, filepath.Join(repo, ".git", "hooks", "post-index-change"))
 			return repo, ws, []string{filepath.Join(repo, ".git"), filepath.Join(repo, ".jj"), filepath.Join(ws, ".jj")}
 		}},
 		{"lfs-and-filter", []string{"file:base.bin", "file:x.fake"}, func(t *testing.T, f *vcstest.Fixture) (string, string, []string) {
@@ -239,6 +306,24 @@ func TestCaptureDeferral(t *testing.T) {
 		}, isDeferred},
 		{"jj-working-copy-lock", true, func(_ *testing.T, f *vcstest.Fixture, repo string, _ *worktreetest.Store) {
 			f.WriteFile(repo, ".jj/working_copy/working_copy.lock", "")
+		}, isBusy},
+		{"mode-changed-mid-read", false, func(t *testing.T, f *vcstest.Fixture, repo string, sink *worktreetest.Store) {
+			f.WriteFile(repo, "dirty.txt", "dirty\n")
+			changed := false
+			sink.OnPut = func(worktree.ArtifactRef) {
+				if changed {
+					return
+				}
+				changed = true
+				path := filepath.Join(repo, "dirty.txt")
+				if err := os.WriteFile(path, []byte("rewritten mid-read\n"), 0o600); err != nil {
+					t.Error(err)
+				}
+				//nolint:gosec // G302: the test flips the executable bit to race the capture.
+				if err := os.Chmod(path, 0o700); err != nil {
+					t.Error(err)
+				}
+			}
 		}, isBusy},
 		{"head-moved", false, func(_ *testing.T, f *vcstest.Fixture, repo string, sink *worktreetest.Store) {
 			f.WriteFile(repo, "dirty.txt", "dirty\n")
@@ -371,6 +456,32 @@ func TestCaptureIncremental(t *testing.T) {
 	}
 }
 
+func TestCaptureRevalidatesRewrittenTrunk(t *testing.T) {
+	f := vcstest.New(t)
+	repo := f.GitClone(filepath.Join(f.Root, "repo"))
+	c0 := strings.TrimSpace(f.RunGit(repo, "rev-parse", "HEAD"))
+	commit := func(name string) string {
+		f.WriteFile(repo, name, name+"\n")
+		f.RunGit(repo, "add", name)
+		f.RunGit(repo, "commit", "-qm", name)
+		return strings.TrimSpace(f.RunGit(repo, "rev-parse", "HEAD"))
+	}
+	c1 := commit("c1.txt")
+	f.RunGit(repo, "push", "-q", "origin", "main")
+	commit("c2.txt")
+	wt := discoverAt(t, repo, repo)
+	st, sink := openStore(t), worktreetest.New()
+	if first := mustCapture(t, st, wt, sink); !slices.Equal(first.Requires, []string{c1}) {
+		t.Fatalf("first requires %v, want [%s]", first.Requires, c1)
+	}
+	f.RunGit(repo, "push", "-qf", "origin", c0+":refs/heads/main")
+	f.RunGit(repo, "fetch", "-q", "origin")
+	again := mustCapture(t, st, wt, sink)
+	if !slices.Equal(again.Requires, []string{c0}) || len(again.History) != 1 || !slices.Equal(again.History[0].Prerequisites, []string{c0}) {
+		t.Fatalf("after trunk rewind: requires %v history %+v, want a chain cut from %s", again.Requires, again.History, c0)
+	}
+}
+
 func patchLedger(t *testing.T, storeRoot, worktreeID, path string, ref worktree.ArtifactRef) {
 	t.Helper()
 	ledgerPath := filepath.Join(storeRoot, "source", worktreeID+".json")
@@ -456,6 +567,24 @@ func TestCaptureOmissions(t *testing.T) {
 			f.RunGit(repo, "commit", "-qm", "submodule")
 			f.WriteFile(filepath.Join(repo, "sub"), "README.md", "dirty inside\n")
 		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
+		{"dirty-submodule-own-filter", func(t *testing.T, f *vcstest.Fixture, repo string) {
+			f.RunGit(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+			f.RunGit(repo, "commit", "-qm", "submodule")
+			sub := filepath.Join(repo, "sub")
+			f.RunGit(sub, "config", "filter.subf.clean", sentinelScript(t, filepath.Join(f.Root, "subfilter.sh"))+" && cat")
+			gitDir := strings.TrimSpace(f.RunGit(sub, "rev-parse", "--absolute-git-dir"))
+			if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(gitDir, "info", "attributes"), []byte("README.md filter=subf\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			readme := f.ReadFile(sub, "README.md")
+			if strings.ToUpper(readme) == readme {
+				t.Fatalf("README.md %q has no lowercase to flip", readme)
+			}
+			f.WriteFile(sub, "README.md", strings.ToUpper(readme))
+		}, []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}},
 		{"nested-repo", func(_ *testing.T, f *vcstest.Fixture, repo string) {
 			f.RunGit(repo, "init", "-q", filepath.Join(repo, "nested"))
 			f.WriteFile(filepath.Join(repo, "nested"), "x.txt", "x\n")
@@ -493,11 +622,62 @@ func TestCaptureLFS(t *testing.T) {
 		repo   string
 		common string
 	}
+	shipped := func(path, content string) func(*testing.T, env, worktree.Snapshot, *worktreetest.Store, error) {
+		return func(t *testing.T, _ env, snap worktree.Snapshot, sink *worktreetest.Store, err error) {
+			oid := vcstest.SHA256([]byte(content))
+			want := []worktree.LFSObjectRef{{Path: path, OID: oid, Size: int64(len(content))}}
+			if err != nil || snap.LFS == nil || !reflect.DeepEqual(snap.LFS.Objects, want) || len(snap.LFSObjects) != 1 || snap.LFSObjects[0].OID != oid {
+				t.Fatalf("err %v lfs %+v objects %+v, want %+v shipped", err, snap.LFS, snap.LFSObjects, want)
+			}
+			if got := readArtifact(t, sink, snap.LFSObjects[0].Artifact); got != content {
+				t.Fatalf("lfs object %q, want %q", got, content)
+			}
+		}
+	}
+	commitFile := func(e env, path, content string) {
+		e.f.WriteFile(e.repo, path, content)
+		e.f.RunGit(e.repo, "add", path)
+		e.f.RunGit(e.repo, "commit", "-qm", "add "+path)
+	}
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, e env)
 		check func(t *testing.T, e env, snap worktree.Snapshot, sink *worktreetest.Store, err error)
 	}{
+		{"history-without-filter-config", func(_ *testing.T, e env) {
+			commitFile(e, "hist.bin", "history\x00\x04")
+			e.f.RunGit(e.repo, "config", "--remove-section", "filter.lfs")
+		}, shipped("hist.bin", "history\x00\x04")},
+		{"history-after-attributes-deleted", func(_ *testing.T, e env) {
+			commitFile(e, "hist.bin", "history\x00\x04")
+			e.f.RunGit(e.repo, "rm", "-q", "hist.bin", ".gitattributes")
+			e.f.RunGit(e.repo, "commit", "-qm", "drop lfs")
+		}, shipped("hist.bin", "history\x00\x04")},
+		{"added-only-in-merge", func(_ *testing.T, e env) {
+			e.f.RunGit(e.repo, "checkout", "-qb", "side")
+			commitFile(e, "side.txt", "side\n")
+			e.f.RunGit(e.repo, "checkout", "-q", "main")
+			commitFile(e, "main.txt", "main\n")
+			e.f.RunGit(e.repo, "merge", "-q", "--no-commit", "side")
+			e.f.WriteFile(e.repo, "merged.bin", "merged\x00\x06")
+			e.f.RunGit(e.repo, "add", "merged.bin")
+			e.f.RunGit(e.repo, "commit", "-qm", "merge")
+			e.f.RunGit(e.repo, "rm", "-q", "merged.bin")
+			e.f.RunGit(e.repo, "commit", "-qm", "drop merged")
+		}, shipped("merged.bin", "merged\x00\x06")},
+		{"executable-bit-on-unchanged-lfs-file", func(t *testing.T, e env) {
+			//nolint:gosec // G302: the test sets the executable bit a WIP mode edit carries.
+			if err := os.Chmod(filepath.Join(e.repo, "base.bin"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, _ env, snap worktree.Snapshot, sink *worktreetest.Store, err error) {
+			if err != nil || len(snap.Files) != 1 || snap.Files[0].Path != "base.bin" || !snap.Files[0].Executable {
+				t.Fatalf("err %v files %+v, want base.bin captured executable", err, snap.Files)
+			}
+			if got := readArtifact(t, sink, *snap.Files[0].Content); got != base {
+				t.Fatalf("shipped %q, want the raw bytes", got)
+			}
+		}},
 		{
 			"unchanged-lfs-repo-is-complete", func(*testing.T, env) {},
 			func(t *testing.T, e env, snap worktree.Snapshot, _ *worktreetest.Store, err error) {

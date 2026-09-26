@@ -23,16 +23,25 @@ func (s *Store) captureHistory(ctx context.Context, wt Worktree, objectFormat st
 		l.Chain = nil
 		return history{requires: []string{head.Commit}}, nil
 	}
+	scratch := s.scratchDir(wt.Origin)
+	if err := initBareAlternate(ctx, scratch, objectFormat, filepath.Join(wt.CommonDir, "objects")); err != nil {
+		return history{}, err
+	}
+	if n := len(l.Chain); n > 0 {
+		published, err := allPublished(ctx, scratch, l.Chain[n-1].Requires, head.TrunkTip)
+		if err != nil {
+			return history{}, err
+		}
+		if !published {
+			l.Chain = nil
+		}
+	}
 	if n := len(l.Chain); n > 0 && l.Chain[n-1].Bundle.Tip == head.Commit {
 		held, err := chainHeld(ctx, l.Chain, sink)
 		if err != nil || held {
 			return chainHistory(l.Chain), err
 		}
 		l.Chain = nil
-	}
-	scratch := s.scratchDir(wt.Origin)
-	if err := initBareAlternate(ctx, scratch, objectFormat, filepath.Join(wt.CommonDir, "objects")); err != nil {
-		return history{}, err
 	}
 	excludes := []string{head.TrunkTip}
 	appending, err := canAppend(ctx, scratch, l.Chain, head.Commit, maxLinks)
@@ -56,6 +65,20 @@ func (s *Store) captureHistory(ctx context.Context, wt Worktree, objectFormat st
 	}
 	l.Chain = append(l.Chain, link)
 	return chainHistory(l.Chain), nil
+}
+
+func allPublished(ctx context.Context, scratch string, commits []string, trunkTip string) (bool, error) {
+	for _, c := range commits {
+		present, err := scratchTest(ctx, scratch, "cat-file", "-e", c+"^{commit}")
+		if err != nil || !present {
+			return false, err
+		}
+		published, err := scratchTest(ctx, scratch, "merge-base", "--is-ancestor", c, trunkTip)
+		if err != nil || !published {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func chainHeld(ctx context.Context, chain []chainLink, sink ArtifactSink) (bool, error) {

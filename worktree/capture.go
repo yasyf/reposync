@@ -3,13 +3,17 @@ package worktree
 import (
 	"bytes"
 	"context"
+	"crypto/sha1" //nolint:gosec // G505: sha1 is the object id of a sha1-format git repository, not a security primitive.
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -122,6 +126,7 @@ type capture struct {
 	limits    Limits
 	budget    budget
 	src       source
+	format    string
 	prev      ledger
 	next      ledger
 	remaining []string
@@ -132,6 +137,7 @@ type capture struct {
 type fileCandidate struct {
 	path      string
 	untracked bool
+	hidden    bool
 	indexMode string
 	indexOID  string
 }
@@ -172,6 +178,7 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if snap.ObjectFormat, err = c.src.output(ctx, "rev-parse", "--show-object-format"); err != nil {
 		return Snapshot{}, err
 	}
+	c.format = snap.ObjectFormat
 	cfg, err := c.src.config(ctx, `^(core\.filemode|core\.sparsecheckout|core\.sparsecheckoutcone|filter\.lfs\.(clean|process)|lfs\.url|remote\.origin\.lfsurl)$`, "")
 	if err != nil {
 		return Snapshot{}, err
@@ -196,26 +203,28 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	}
 	snap.History, snap.Requires = hist.links, hist.requires
 	files := c.classify(status, &snap)
-	_, lfsClean := cfg["filter.lfs.clean"]
-	_, lfsProcess := cfg["filter.lfs.process"]
-	usesLFS := lfsClean || lfsProcess
-	attrs := map[string]string{}
+	hidden, err := c.hidden(ctx, status, &snap)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	files = append(files, hidden...)
+	attrs, err := c.lfsAttrs(ctx, snap.Index, files)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	var lfsRefs []LFSObjectRef
-	if usesLFS {
-		if attrs, err = c.lfsAttrs(ctx, snap.Index, files); err != nil {
+	if snap.Head.Ahead > 0 {
+		if lfsRefs, err = c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip, snap.Head.TrunkBase); err != nil {
 			return Snapshot{}, err
-		}
-		if snap.Head.Ahead > 0 {
-			if lfsRefs, err = c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip, snap.Head.TrunkBase); err != nil {
-				return Snapshot{}, err
-			}
 		}
 	}
 	staged, err := c.captureIndex(ctx, snap.Index, attrs)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if usesLFS {
+	_, lfsClean := cfg["filter.lfs.clean"]
+	_, lfsProcess := cfg["filter.lfs.process"]
+	if lfsClean || lfsProcess || len(lfsRefs) > 0 || slices.Contains(slices.Collect(maps.Values(attrs)), lfsFilter) {
 		info, err := c.lfsInfo(ctx, cfg, append(lfsRefs, staged...))
 		if err != nil {
 			return Snapshot{}, err
@@ -423,6 +432,119 @@ func (c *capture) classify(status statusReport, snap *Snapshot) []fileCandidate 
 	return files
 }
 
+func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapshot) ([]fileCandidate, error) {
+	flags, err := readIndexFlags(ctx, c.src.dir, c.src.env)
+	if err != nil {
+		return nil, err
+	}
+	listed := map[string]bool{}
+	for _, e := range status.changed {
+		listed[e.path] = e.y != '.'
+	}
+	for _, p := range flags.gitlinks {
+		if listed[p] {
+			continue
+		}
+		dirty, err := submoduleDirty(ctx, filepath.Join(c.wt.Root, p))
+		if err != nil {
+			return nil, err
+		}
+		if dirty {
+			c.omitted = append(c.omitted, Omission{Path: p, Reason: OmitSubmodule})
+		}
+	}
+	root, err := os.OpenRoot(c.wt.Root)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	dirs := map[string]bool{".": true}
+	var files []fileCandidate
+	for _, e := range flags.flagged {
+		if listed[e.path] || !blobModes[e.mode] {
+			continue
+		}
+		present, err := presentIn(root, dirs, e.path)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case present:
+			files = append(files, fileCandidate{path: e.path, hidden: true, indexMode: e.mode, indexOID: e.oid})
+		case !e.skipWorktree:
+			snap.Files = append(snap.Files, FileEntry{Path: e.path, Kind: FileDeleted})
+		}
+	}
+	return files, nil
+}
+
+func submoduleDirty(ctx context.Context, dir string) (bool, error) {
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("stat submodule %s: %w", dir, err)
+	}
+	env, err := vcs.FilterOverrideEnv(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	env = append(env, "GIT_NO_LAZY_FETCH=1")
+	status, err := readStatus(ctx, dir, env)
+	if err != nil {
+		return false, err
+	}
+	if len(status.changed)+len(status.unmerged)+len(status.untracked) > 0 {
+		return true, nil
+	}
+	flags, err := readIndexFlags(ctx, dir, env)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range flags.gitlinks {
+		if dirty, err := submoduleDirty(ctx, filepath.Join(dir, p)); err != nil || dirty {
+			return dirty, err
+		}
+	}
+	return false, nil
+}
+
+func presentIn(root *os.Root, dirs map[string]bool, name string) (bool, error) {
+	if ok, err := dirPresent(root, dirs, path.Dir(name)); err != nil || !ok {
+		return false, err
+	}
+	_, err := root.Lstat(filepath.FromSlash(name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lstat %s: %w", name, err)
+	}
+	return true, nil
+}
+
+func dirPresent(root *os.Root, dirs map[string]bool, dir string) (bool, error) {
+	if ok, seen := dirs[dir]; seen {
+		return ok, nil
+	}
+	ok, err := dirPresent(root, dirs, path.Dir(dir))
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		info, err := root.Lstat(filepath.FromSlash(dir))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			ok = false
+		case err != nil:
+			return false, fmt.Errorf("lstat %s: %w", dir, err)
+		default:
+			ok = info.IsDir()
+		}
+	}
+	dirs[dir] = ok
+	return ok, nil
+}
+
 func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []fileCandidate) (map[string]string, error) {
 	var paths []string
 	for _, e := range index {
@@ -434,7 +556,7 @@ func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []file
 		}
 	}
 	slices.Sort(paths)
-	return c.src.filterAttr(ctx, slices.Compact(paths))
+	return c.src.filterAttr(ctx, "", slices.Compact(paths))
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {
@@ -725,6 +847,9 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 		p.entry.Kind, p.target, p.known = FileSymlink, []byte(target), true
 		ref := contentRef([]byte(target))
 		p.entry.Content = &ref
+		if f.hidden && f.indexMode == "120000" && c.blobOID(p.target) == f.indexOID {
+			return pendingFile{}, false, nil
+		}
 		return p, true, nil
 	case mode.IsRegular():
 		p.entry.Kind = FileRegular
@@ -738,33 +863,74 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 		c.omitted = append(c.omitted, Omission{Path: f.path, Reason: OmitSpecialFile})
 		return pendingFile{}, false, nil
 	}
-	if cached, ok := c.prev.Files[f.path]; ok && cached.Stat == p.stat {
+	cached, hit := c.prev.Files[f.path]
+	hit = hit && cached.Stat == p.stat
+	if hit {
 		ref := cached.Content
 		p.entry.Content, p.known = &ref, true
 	}
 	ptr, isLFS := pointers[f.indexOID]
-	if f.untracked || !isLFS || !ptr.Canonical {
+	isLFS = isLFS && ptr.Canonical && !f.untracked
+	if !isLFS && !f.hidden {
 		if p.known {
 			c.next.Files[f.path] = cachedFile{Stat: p.stat, Content: *p.entry.Content}
 		}
 		return p, true, nil
 	}
-	if !p.known {
-		ref, stat, err := readStable(root, f.path, p.stat, func(r io.Reader) (ArtifactRef, error) {
-			h := sha256.New()
-			n, err := io.Copy(h, r)
-			return ArtifactRef{Digest: digestPrefix + hex.EncodeToString(h.Sum(nil)), Size: n, Media: MediaFile}, err
-		})
+	var blobOID string
+	if hit {
+		blobOID = cached.BlobOID
+	}
+	if !p.known || (!isLFS && blobOID == "") {
+		ref, oid, stat, err := c.hashFile(root, f.path, p.stat)
 		if err != nil {
 			return pendingFile{}, false, err
 		}
-		p.stat, p.entry.Content, p.known = stat, &ref, true
+		p.stat, p.entry.Content, p.known, blobOID = stat, &ref, true, oid
 	}
-	c.next.Files[f.path] = cachedFile{Stat: p.stat, Content: *p.entry.Content}
-	if ptr.OID == strings.TrimPrefix(p.entry.Content.Digest, digestPrefix) && ptr.Size == p.entry.Content.Size {
+	c.next.Files[f.path] = cachedFile{Stat: p.stat, Content: *p.entry.Content, BlobOID: blobOID}
+	same := blobOID == f.indexOID
+	if isLFS {
+		same = ptr.OID == strings.TrimPrefix(p.entry.Content.Digest, digestPrefix) && ptr.Size == p.entry.Content.Size
+	}
+	if same && f.indexMode == regularMode(p.entry.Executable) {
 		return pendingFile{}, false, nil
 	}
 	return p, true, nil
+}
+
+func regularMode(executable bool) string {
+	if executable {
+		return "100755"
+	}
+	return "100644"
+}
+
+func (c *capture) blobHash(size int64) hash.Hash {
+	h := sha256.New()
+	if c.format == "sha1" {
+		//nolint:gosec // G401: sha1 is the object id of a sha1-format git repository, not a security primitive.
+		h = sha1.New()
+	}
+	h.Write([]byte("blob " + strconv.FormatInt(size, 10) + "\x00"))
+	return h
+}
+
+func (c *capture) blobOID(b []byte) string {
+	h := c.blobHash(int64(len(b)))
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (c *capture) hashFile(root *os.Root, name string, want fileStat) (ArtifactRef, string, fileStat, error) {
+	var oid string
+	ref, stat, err := readStable(root, name, want, func(r io.Reader, size int64) (ArtifactRef, error) {
+		content, blob := sha256.New(), c.blobHash(size)
+		n, err := io.Copy(io.MultiWriter(content, blob), r)
+		oid = hex.EncodeToString(blob.Sum(nil))
+		return ArtifactRef{Digest: digestPrefix + hex.EncodeToString(content.Sum(nil)), Size: n, Media: MediaFile}, err
+	})
+	return ref, oid, stat, err
 }
 
 func (c *capture) putFile(ctx context.Context, root *os.Root, p pendingFile) (ArtifactRef, error) {
@@ -775,7 +941,7 @@ func (c *capture) putFile(ctx context.Context, root *os.Root, p pendingFile) (Ar
 		}
 		return ref, nil
 	}
-	ref, stat, err := readStable(root, p.cand.path, p.stat, func(r io.Reader) (ArtifactRef, error) {
+	ref, stat, err := readStable(root, p.cand.path, p.stat, func(r io.Reader, _ int64) (ArtifactRef, error) {
 		return c.sink.Put(ctx, MediaFile, r)
 	})
 	if err != nil {
@@ -785,23 +951,28 @@ func (c *capture) putFile(ctx context.Context, root *os.Root, p pendingFile) (Ar
 	return ref, nil
 }
 
-func readStable(root *os.Root, path string, want fileStat, consume func(io.Reader) (ArtifactRef, error)) (ArtifactRef, fileStat, error) {
+func readStable(root *os.Root, name string, want fileStat, consume func(r io.Reader, size int64) (ArtifactRef, error)) (ArtifactRef, fileStat, error) {
+	mode := want.Mode
 	for range 2 {
-		ref, err := readOnce(root, path, consume)
+		size := want.Size
+		ref, err := readOnce(root, name, func(r io.Reader) (ArtifactRef, error) { return consume(r, size) })
 		if err != nil {
 			return ArtifactRef{}, fileStat{}, err
 		}
-		info, err := root.Lstat(path)
+		info, err := root.Lstat(name)
 		if err != nil {
-			return ArtifactRef{}, fileStat{}, fmt.Errorf("%w: re-lstat %s: %w", ErrBusy, path, err)
+			return ArtifactRef{}, fileStat{}, fmt.Errorf("%w: re-lstat %s: %w", ErrBusy, name, err)
 		}
 		now := statOf(info)
+		if now.Mode != mode {
+			return ArtifactRef{}, fileStat{}, fmt.Errorf("%w: %s changed type or mode mid-capture", ErrBusy, name)
+		}
 		if now == want && ref.Size == want.Size {
 			return ref, now, nil
 		}
 		want = now
 	}
-	return ArtifactRef{}, fileStat{}, fmt.Errorf("%w: %s kept changing", ErrBusy, path)
+	return ArtifactRef{}, fileStat{}, fmt.Errorf("%w: %s kept changing", ErrBusy, name)
 }
 
 func readOnce(root *os.Root, path string, consume func(io.Reader) (ArtifactRef, error)) (ArtifactRef, error) {

@@ -177,6 +177,7 @@ type fileStat struct {
 type cachedFile struct {
 	Stat    fileStat    `json:"stat"`
 	Content ArtifactRef `json:"content"`
+	BlobOID string      `json:"blob_oid,omitempty"`
 }
 
 type cachedBlob struct {
