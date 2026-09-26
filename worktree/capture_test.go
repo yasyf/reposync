@@ -3,10 +3,13 @@ package worktree_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -799,4 +802,198 @@ func TestCaptureLFS(t *testing.T) {
 			tt.check(t, e, snap, sink, err)
 		})
 	}
+}
+
+func TestCaptureIntentToAddOverHeadPath(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(f *vcstest.Fixture, src string)
+		file  worktree.FileEntry
+	}{
+		{"deleted", func(_ *vcstest.Fixture, src string) {
+			if err := os.Remove(filepath.Join(src, "README.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, worktree.FileEntry{Path: "README.md", Kind: worktree.FileDeleted}},
+		{"assume-unchanged", func(f *vcstest.Fixture, src string) {
+			f.RunGit(src, "update-index", "--assume-unchanged", "README.md")
+			f.WriteFile(src, "README.md", "hidden intent-to-add\n")
+		}, worktree.FileEntry{Path: "README.md", Kind: worktree.FileRegular, AssumeUnchanged: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			rt := newRoundTrip(t, f, f.GitClone(filepath.Join(f.Root, "src")), f.GitClone(filepath.Join(f.Root, "recv")))
+			f.RunGit(rt.src, "rm", "-q", "--cached", "README.md")
+			f.RunGit(rt.src, "add", "-N", "README.md")
+			tt.setup(f, rt.src)
+
+			snap, _ := rt.tick()
+			if !snap.Complete || len(snap.IntentToAdd) != 1 || snap.IntentToAdd[0].Path != "README.md" {
+				t.Fatalf("complete=%v intent-to-add %+v, want README.md", snap.Complete, snap.IntentToAdd)
+			}
+			if !slices.Equal(snap.Index, []worktree.IndexEntry{{Path: "README.md"}}) {
+				t.Fatalf("index %+v, want only the README.md removal", snap.Index)
+			}
+			got, ok := fileEntry(snap, "README.md")
+			if !ok || got.Kind != tt.file.Kind || got.AssumeUnchanged != tt.file.AssumeUnchanged {
+				t.Fatalf("file %+v (present %v), want %+v", got, ok, tt.file)
+			}
+		})
+	}
+}
+
+func TestCaptureIntentToAddIndexMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		symlink bool
+		after   func(t *testing.T, f *vcstest.Fixture, src string)
+		want    string
+	}{
+		{"deleted executable", false, func(t *testing.T, _ *vcstest.Fixture, src string) {
+			if err := os.Remove(filepath.Join(src, "ita")); err != nil {
+				t.Fatal(err)
+			}
+		}, "100755"},
+		{"deleted symlink", true, func(t *testing.T, _ *vcstest.Fixture, src string) {
+			if err := os.Remove(filepath.Join(src, "ita")); err != nil {
+				t.Fatal(err)
+			}
+		}, "120000"},
+		{"chmod after add", false, func(t *testing.T, _ *vcstest.Fixture, src string) {
+			if err := os.Chmod(filepath.Join(src, "ita"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "100755"},
+		{"symlink replaced by file", true, func(t *testing.T, f *vcstest.Fixture, src string) {
+			if err := os.Remove(filepath.Join(src, "ita")); err != nil {
+				t.Fatal(err)
+			}
+			f.WriteFile(src, "ita", "regular now\n")
+		}, "120000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			src := f.GitClone(filepath.Join(f.Root, "src"))
+			if tt.symlink {
+				if err := os.Symlink("README.md", filepath.Join(src, "ita")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeBytes(t, src, "ita", []byte("new work\n"))
+				//nolint:gosec // G302: the intent-to-add entry must record an executable index mode.
+				if err := os.Chmod(filepath.Join(src, "ita"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.RunGit(src, "add", "-N", "ita")
+			tt.after(t, f, src)
+
+			snap := mustCapture(t, openStore(t), discoverAt(t, src, src), worktreetest.New())
+			want := []worktree.IntentToAdd{{Path: "ita", Mode: tt.want}}
+			if !snap.Complete || !slices.Equal(snap.IntentToAdd, want) {
+				t.Fatalf("complete=%v intent-to-add %+v, want %+v", snap.Complete, snap.IntentToAdd, want)
+			}
+		})
+	}
+}
+
+func TestCaptureSparseDeletedIntentToAdd(t *testing.T) {
+	f := vcstest.New(t)
+	writeBytes(t, f.Seed, "kept/base", []byte("base\n"))
+	f.RunGit(f.Seed, "add", "-A")
+	f.RunGit(f.Seed, "commit", "-qm", "base")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	src := f.GitClone(filepath.Join(f.Root, "src"))
+	f.RunGit(src, "sparse-checkout", "set", "kept")
+	f.WriteFile(src, "ita", "new\n")
+	f.RunGit(src, "add", "-N", "ita")
+	f.RunGit(src, "update-index", "--skip-worktree", "ita")
+	if err := os.Remove(filepath.Join(src, "ita")); err != nil {
+		t.Fatal(err)
+	}
+
+	snap := mustCapture(t, openStore(t), discoverAt(t, src, src), worktreetest.New())
+	if !snap.Complete || len(snap.IntentToAdd) != 1 || snap.IntentToAdd[0].Path != "ita" {
+		t.Fatalf("complete=%v intent-to-add %+v, want ita", snap.Complete, snap.IntentToAdd)
+	}
+	got, ok := fileEntry(snap, "ita")
+	if want := (worktree.FileEntry{Path: "ita", Kind: worktree.FileDeleted, SkipWorktree: true}); !ok || got != want {
+		t.Fatalf("file %+v (present %v), want %+v", got, ok, want)
+	}
+}
+
+func TestCaptureStagedGitlinkIsOmitted(t *testing.T) {
+	f := vcstest.New(t)
+	f.RunGit(f.Seed, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+	f.RunGit(f.Seed, "commit", "-qm", "add sub")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	src := f.GitClone(filepath.Join(f.Root, "src"))
+	f.RunGit(src, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	sub := filepath.Join(src, "sub")
+	f.ConfigGit(sub)
+	f.WriteFile(sub, "UNPUBLISHED", "only copy of work\n")
+	f.RunGit(sub, "add", "UNPUBLISHED")
+	f.RunGit(sub, "commit", "-qm", "private submodule work")
+	f.RunGit(src, "add", "sub")
+
+	snap := mustCapture(t, openStore(t), discoverAt(t, src, src), worktreetest.New())
+	want := []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}
+	if snap.Complete || !slices.Equal(snap.Omitted, want) {
+		t.Fatalf("complete=%v omitted %+v, want %+v", snap.Complete, snap.Omitted, want)
+	}
+}
+
+func TestCaptureSplitIndexSourceContentUntouched(t *testing.T) {
+	f := vcstest.New(t)
+	f.RunGit(f.Seed, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+	f.RunGit(f.Seed, "commit", "-qm", "add sub")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	repo := f.GitClone(filepath.Join(f.Root, "repo"))
+	f.RunGit(repo, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+	f.WriteFile(repo, "README.md", "unstaged\n")
+	f.RunGit(repo, "update-index", "--split-index")
+	f.RunGit(filepath.Join(repo, "sub"), "update-index", "--split-index")
+	gitDir := filepath.Join(repo, ".git")
+	for _, dir := range []string{gitDir, filepath.Join(gitDir, "modules", "sub")} {
+		if shared, _ := filepath.Glob(filepath.Join(dir, "sharedindex.*")); len(shared) != 1 {
+			t.Fatalf("%s: shared indexes %v, want exactly one", dir, shared)
+		}
+	}
+	before := contentState(t, gitDir)
+
+	wt := discoverAt(t, repo, repo)
+	snap := mustCapture(t, openStore(t), wt, worktreetest.New())
+	if _, err := worktree.Stamp(t.Context(), wt); err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Complete {
+		t.Fatalf("omitted %+v", snap.Omitted)
+	}
+	if after := contentState(t, gitDir); !maps.Equal(before, after) {
+		t.Fatalf("source .git content changed:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+func contentState(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		//nolint:gosec // G304: hashing files under a test-controlled source .git.
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		state[p] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
