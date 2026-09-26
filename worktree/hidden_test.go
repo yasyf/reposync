@@ -352,7 +352,7 @@ func TestRoundTripDeletedIntentToAdd(t *testing.T) {
 }
 
 func itaPaths(snap worktree.Snapshot) []string {
-	var paths []string
+	paths := make([]string, 0, len(snap.IntentToAdd))
 	for _, e := range snap.IntentToAdd {
 		paths = append(paths, e.Path)
 	}

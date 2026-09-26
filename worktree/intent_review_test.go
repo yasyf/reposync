@@ -17,7 +17,7 @@ func TestCaptureIntentToAddOverHeadPath(t *testing.T) {
 		setup func(f *vcstest.Fixture, src string)
 		file  worktree.FileEntry
 	}{
-		{"deleted", func(f *vcstest.Fixture, src string) {
+		{"deleted", func(_ *vcstest.Fixture, src string) {
 			if err := os.Remove(filepath.Join(src, "README.md")); err != nil {
 				t.Fatal(err)
 			}
@@ -57,18 +57,18 @@ func TestCaptureIntentToAddIndexMode(t *testing.T) {
 		after   func(t *testing.T, f *vcstest.Fixture, src string)
 		want    string
 	}{
-		{"deleted executable", false, func(t *testing.T, f *vcstest.Fixture, src string) {
+		{"deleted executable", false, func(t *testing.T, _ *vcstest.Fixture, src string) {
 			if err := os.Remove(filepath.Join(src, "ita")); err != nil {
 				t.Fatal(err)
 			}
 		}, "100755"},
-		{"deleted symlink", true, func(t *testing.T, f *vcstest.Fixture, src string) {
+		{"deleted symlink", true, func(t *testing.T, _ *vcstest.Fixture, src string) {
 			if err := os.Remove(filepath.Join(src, "ita")); err != nil {
 				t.Fatal(err)
 			}
 		}, "120000"},
-		{"chmod after add", false, func(t *testing.T, f *vcstest.Fixture, src string) {
-			if err := os.Chmod(filepath.Join(src, "ita"), 0o644); err != nil {
+		{"chmod after add", false, func(t *testing.T, _ *vcstest.Fixture, src string) {
+			if err := os.Chmod(filepath.Join(src, "ita"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}, "100755"},
@@ -89,7 +89,8 @@ func TestCaptureIntentToAddIndexMode(t *testing.T) {
 				}
 			} else {
 				writeBytes(t, src, "ita", []byte("new work\n"))
-				if err := os.Chmod(filepath.Join(src, "ita"), 0o755); err != nil {
+				//nolint:gosec // G302: the intent-to-add entry must record an executable index mode.
+				if err := os.Chmod(filepath.Join(src, "ita"), 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
