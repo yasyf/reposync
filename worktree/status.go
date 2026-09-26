@@ -1,12 +1,9 @@
 package worktree
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/yasyf/reposync/internal/vcs"
@@ -14,7 +11,7 @@ import (
 
 var statusArgs = []string{
 	"status", "--porcelain=v2", "-z", "--branch",
-	"--untracked-files=all", "--ignored=no", "--no-renames", "--ignore-submodules=dirty",
+	"--untracked-files=all", "--ignored=no", "--no-renames", "--ignore-submodules=none",
 }
 
 type statusReport struct {
@@ -35,16 +32,6 @@ type statusEntry struct {
 	oidHead      string
 	oidIndex     string
 	path         string
-}
-
-type flaggedEntry struct {
-	path, mode, oid string
-	skipWorktree    bool
-}
-
-type indexFlags struct {
-	flagged  []flaggedEntry
-	gitlinks []string
 }
 
 func (e statusEntry) submoduleChanged() bool {
@@ -123,53 +110,4 @@ func (r *statusReport) add(rec string) error {
 		return nil
 	}
 	return fmt.Errorf("unexpected status record %q", rec)
-}
-
-func readIndexFlags(ctx context.Context, dir string, env []string) (indexFlags, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	pr, pw := io.Pipe()
-	done := make(chan error, 1)
-	go func() {
-		err := vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: []string{"-C", dir, "ls-files", "-v", "-s", "-z"}, Env: env, Stdout: pw})
-		_ = pw.CloseWithError(err)
-		done <- err
-	}()
-	flags, err := parseIndexFlags(bufio.NewReader(pr))
-	if err != nil {
-		cancel()
-		_ = pr.CloseWithError(err)
-		<-done
-		return indexFlags{}, fmt.Errorf("ls-files %s: %w", dir, err)
-	}
-	if err := <-done; err != nil {
-		return indexFlags{}, fmt.Errorf("ls-files %s: %w", dir, err)
-	}
-	return flags, nil
-}
-
-func parseIndexFlags(br *bufio.Reader) (indexFlags, error) {
-	var flags indexFlags
-	for {
-		rec, err := br.ReadString(0)
-		if errors.Is(err, io.EOF) && rec == "" {
-			return flags, nil
-		}
-		if err != nil {
-			return indexFlags{}, err
-		}
-		meta, path, ok := strings.Cut(strings.TrimSuffix(rec, "\x00"), "\t")
-		f := strings.Fields(meta)
-		if !ok || len(f) != 4 || len(f[0]) != 1 {
-			return indexFlags{}, fmt.Errorf("malformed ls-files record %q", rec)
-		}
-		tag := f[0][0]
-		assumeUnchanged, skipWorktree := tag >= 'a' && tag <= 'z', tag == 'S' || tag == 's'
-		switch {
-		case f[1] == "160000":
-			flags.gitlinks = append(flags.gitlinks, path)
-		case (assumeUnchanged || skipWorktree) && f[3] == "0":
-			flags.flagged = append(flags.flagged, flaggedEntry{path: path, mode: f[1], oid: f[2], skipWorktree: skipWorktree})
-		}
-	}
 }

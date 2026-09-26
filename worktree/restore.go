@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -163,14 +164,26 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if err != nil {
 		return Restored{}, err
 	}
-	if err := applyFiles(ctx, dest, src, snap.Files); err != nil {
+	ita := map[string]bool{}
+	for _, p := range snap.IntentToAdd {
+		ita[p] = true
+	}
+	var files, placeholders []FileEntry
+	for _, f := range snap.Files {
+		if f.Kind == FileDeleted && ita[f.Path] {
+			placeholders = append(placeholders, f)
+		} else {
+			files = append(files, f)
+		}
+	}
+	if err := applyFiles(ctx, dest, src, files); err != nil {
 		return Restored{}, err
 	}
-	if len(snap.IntentToAdd) > 0 {
-		paths := strings.NewReader(strings.Join(snap.IntentToAdd, "\x00") + "\x00")
-		if _, err := recvGit(ctx, []string{"GIT_LITERAL_PATHSPECS=1"}, paths, "-C", dest, "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-			return Restored{}, fmt.Errorf("mark intent-to-add: %w", err)
-		}
+	if err := markIntentToAdd(ctx, dest, src, snap.IntentToAdd, placeholders); err != nil {
+		return Restored{}, err
+	}
+	if err := applyFlags(ctx, dest, snap.Files); err != nil {
+		return Restored{}, err
 	}
 	if err := m.writeMarker(dest, snap); err != nil {
 		return Restored{}, err
@@ -348,6 +361,31 @@ func folding(dest string) (caseFold, normFold bool, err error) {
 	}
 	base := filepath.Base(name)
 	return same(strings.ToUpper(base)), same(norm.NFD.String(base)), nil
+}
+
+func markIntentToAdd(ctx context.Context, dest string, src ArtifactSource, paths []string, placeholders []FileEntry) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	root, err := os.OpenRoot(dest)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dest, err)
+	}
+	defer func() { _ = root.Close() }()
+	for _, f := range placeholders {
+		name := filepath.FromSlash(f.Path)
+		if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			return fmt.Errorf("intent-to-add placeholder %s: %w", f.Path, err)
+		}
+		if err := root.WriteFile(name, nil, 0o644); err != nil {
+			return fmt.Errorf("intent-to-add placeholder %s: %w", f.Path, err)
+		}
+	}
+	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	if _, err := recvGit(ctx, []string{"GIT_LITERAL_PATHSPECS=1"}, stdin, "-C", dest, "add", "-N", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+		return fmt.Errorf("mark intent-to-add: %w", err)
+	}
+	return applyFiles(ctx, dest, src, placeholders)
 }
 
 func applyFiles(ctx context.Context, dest string, src ArtifactSource, files []FileEntry) error {
@@ -610,7 +648,12 @@ func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string)
 		ps.index = mode + " " + oid
 		want[e.Path] = ps
 	}
+	flagged := map[string]FileEntry{}
 	for _, f := range snap.Files {
+		if f.AssumeUnchanged || f.SkipWorktree {
+			flagged[f.Path] = f
+			continue
+		}
 		ps := want[f.Path]
 		switch {
 		case f.Untracked:
@@ -640,7 +683,23 @@ func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string)
 	for _, p := range st.untracked {
 		got[p] = pathState{work: "untracked"}
 	}
-	var diffs []string
+	var unseen []string
+	for p, w := range want {
+		if _, ok := got[p]; !ok && w.work == "untracked" {
+			unseen = append(unseen, p)
+		}
+	}
+	ignored, err := checkIgnored(ctx, dest, unseen)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range ignored {
+		got[p] = pathState{work: "untracked"}
+	}
+	diffs, err := flagDiffs(ctx, dest, flagged)
+	if err != nil {
+		return nil, err
+	}
 	for p, w := range want {
 		if g := got[p]; g != w {
 			diffs = append(diffs, fmt.Sprintf("%s: want %+v, got %+v", p, w, g))
@@ -655,5 +714,47 @@ func fidelity(ctx context.Context, dest string, snap Snapshot, pending []string)
 		diffs = append(diffs, p+": lfs object pending")
 	}
 	slices.Sort(diffs)
+	return diffs, nil
+}
+
+func checkIgnored(ctx context.Context, dest string, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	out, err := recvGit(ctx, nil, stdin, "-C", dest, "check-ignore", "-z", "--stdin")
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("check-ignore: %w", err)
+	}
+	return strings.FieldsFunc(out, func(r rune) bool { return r == 0 }), nil
+}
+
+func flagDiffs(ctx context.Context, dest string, want map[string]FileEntry) ([]string, error) {
+	if len(want) == 0 {
+		return nil, nil
+	}
+	out, err := recvGit(ctx, nil, nil, append([]string{"-C", dest}, flaggedArgs...)...)
+	if err != nil {
+		return nil, fmt.Errorf("read index flags: %w", err)
+	}
+	entries, err := parseFlagged(out)
+	if err != nil {
+		return nil, err
+	}
+	got := map[string]flaggedEntry{}
+	for _, e := range entries {
+		got[e.path] = e
+	}
+	var diffs []string
+	for p, f := range want {
+		if g := got[p]; g.assumeUnchanged != f.AssumeUnchanged || g.skipWorktree != f.SkipWorktree {
+			diffs = append(diffs, fmt.Sprintf("%s: want assume-unchanged=%t skip-worktree=%t, got %t %t",
+				p, f.AssumeUnchanged, f.SkipWorktree, g.assumeUnchanged, g.skipWorktree))
+		}
+	}
 	return diffs, nil
 }

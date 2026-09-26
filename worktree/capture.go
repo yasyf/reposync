@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"maps"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -52,11 +51,21 @@ type CaptureOptions struct {
 var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 
 // Capture snapshots wt's uncommitted and unpublished work into sink without
-// writing the source repository: no index refresh, no filter, no hook, no jj
-// snapshot. It returns *DeferredError mid-operation, ErrBusy on a live lock
-// or a HEAD, index, or file that moved during the capture, *PartialError when
-// a progress budget ran out, and *MissingLFSError when a required LFS object
-// is absent locally. An unchanged worktree yields the same Digest with no Put.
+// writing the source repository: no index refresh, no fsmonitor, no filter in
+// the repository or any populated submodule, no hook, no jj snapshot. A tracked
+// path whose assume-unchanged or skip-worktree index flag hides its worktree
+// state from git status is captured when its raw worktree bytes, type, or exec
+// bit differ from the index entry, and always when it is intent-to-add; a
+// so-flagged submodule with local changes is omitted like any other; and a
+// skip-worktree path absent from a sparse checkout whose patterns exclude it
+// is the sparse pattern's doing, not an edit. With core.filemode=false
+// the index mode is authoritative: the repository ignores the exec bit, so a
+// chmod alone is not work in progress. A KindJJWorkspace captures every file
+// its @ tracks, even one .gitignore now matches. It returns *DeferredError
+// mid-operation, ErrBusy on a live lock or a HEAD, index, or file that moved
+// during the capture, *PartialError when a progress budget ran out, and
+// *MissingLFSError when a required LFS object is absent locally. An unchanged
+// worktree yields the same Digest with no Put.
 func (s *Store) Capture(ctx context.Context, wt Worktree, sink ArtifactSink, opts CaptureOptions) (Snapshot, error) {
 	if opts.Source == "" {
 		return Snapshot{}, errors.New("capture: empty source")
@@ -132,14 +141,17 @@ type capture struct {
 	remaining []string
 	missing   []LFSObjectRef
 	omitted   []Omission
+	ita       map[string]bool
 }
 
 type fileCandidate struct {
-	path      string
-	untracked bool
-	hidden    bool
-	indexMode string
-	indexOID  string
+	path            string
+	untracked       bool
+	hidden          bool
+	indexMode       string
+	indexOID        string
+	assumeUnchanged bool
+	skipWorktree    bool
 }
 
 type guard struct {
@@ -161,14 +173,14 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	c.next = newLedger(c.wt.ID)
 	c.next.Chain = slices.Clone(c.prev.Chain)
 	c.next.Files, c.next.Blobs = map[string]cachedFile{}, map[string]cachedBlob{}
-	if c.src, err = newSource(ctx, c.wt, c.store.privateIndexPath(c.wt.ID)); err != nil {
-		return Snapshot{}, err
-	}
 	snap := Snapshot{Schema: SnapshotSchema, Worktree: c.wt}
 	if c.wt.Kind != KindGit {
 		if snap.JJ, snap.Head.Commit, err = c.jjState(ctx); err != nil {
 			return Snapshot{}, err
 		}
+	}
+	if c.src, err = newSource(ctx, c.wt, c.store.privateIndexPath(c.wt.ID), snap.Head.Commit); err != nil {
+		return Snapshot{}, err
 	}
 	if c.wt.Kind == KindJJWorkspace {
 		if err := c.refreshPrivateIndex(ctx, snap.Head.Commit); err != nil {
@@ -202,12 +214,24 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	snap.History, snap.Requires = hist.links, hist.requires
-	files := c.classify(status, &snap)
-	hidden, err := c.hidden(ctx, status, &snap)
+	files, err := c.classify(ctx, status, &snap)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	files = append(files, hidden...)
+	fileMode := cfg["core.filemode"] != "false"
+	if c.wt.Kind == KindJJWorkspace {
+		tracked, err := c.jjTracked(ctx, status)
+		if err != nil {
+			return Snapshot{}, err
+		}
+		files = append(files, tracked...)
+	} else {
+		hidden, err := c.hidden(ctx, status, &snap, cfg["core.sparsecheckout"] == "true")
+		if err != nil {
+			return Snapshot{}, err
+		}
+		files = append(files, hidden...)
+	}
 	attrs, err := c.lfsAttrs(ctx, snap.Index, files)
 	if err != nil {
 		return Snapshot{}, err
@@ -234,7 +258,6 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	fileMode := cfg["core.filemode"] != "false"
 	entries, err := c.captureFiles(ctx, files, attrs, fileMode)
 	if err != nil {
 		return Snapshot{}, err
@@ -373,6 +396,45 @@ func (c *capture) refreshPrivateIndex(ctx context.Context, parent string) error 
 	return c.src.run(ctx, nil, nil, "update-index", "-q", "--refresh")
 }
 
+func (c *capture) jjTracked(ctx context.Context, status statusReport) ([]fileCandidate, error) {
+	tracked, err := jjRead(ctx, c.wt.Root, "log", "--no-graph", "-r", "@", "-T", jjFilesTemplate)
+	if err != nil {
+		return nil, err
+	}
+	var index bytes.Buffer
+	if err := c.src.run(ctx, nil, &index, "ls-files", "-z"); err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for p := range strings.SplitSeq(index.String(), "\x00") {
+		known[p] = true
+	}
+	for _, p := range status.untracked {
+		known[p] = true
+	}
+	root, err := os.OpenRoot(c.wt.Root)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	var files []fileCandidate
+	for p := range strings.SplitSeq(tracked, "\x00") {
+		if p == "" || known[p] {
+			continue
+		}
+		info, err := root.Lstat(p)
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("lstat %s: %w", p, err)
+		case !info.IsDir():
+			files = append(files, fileCandidate{path: p, untracked: true})
+		}
+	}
+	return files, nil
+}
+
 func (c *capture) head(ctx context.Context, status statusReport, snap *Snapshot) error {
 	if c.wt.Kind != KindJJWorkspace {
 		if status.commit == "" {
@@ -398,7 +460,7 @@ func (c *capture) head(ctx context.Context, status statusReport, snap *Snapshot)
 	return nil
 }
 
-func (c *capture) classify(status statusReport, snap *Snapshot) []fileCandidate {
+func (c *capture) classify(ctx context.Context, status statusReport, snap *Snapshot) ([]fileCandidate, error) {
 	var files []fileCandidate
 	for _, e := range status.changed {
 		if e.submoduleChanged() {
@@ -414,6 +476,15 @@ func (c *capture) classify(status statusReport, snap *Snapshot) []fileCandidate 
 		}
 		switch e.y {
 		case 'D':
+			if c.wt.Kind != KindJJWorkspace && e.x == '.' {
+				ita, err := c.intentToAdd(ctx, e.path, e.oidIndex)
+				if err != nil {
+					return nil, err
+				}
+				if ita {
+					snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+				}
+			}
 			snap.Files = append(snap.Files, FileEntry{Path: e.path, Kind: FileDeleted})
 		case 'A':
 			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
@@ -429,120 +500,7 @@ func (c *capture) classify(status statusReport, snap *Snapshot) []fileCandidate 
 		}
 		files = append(files, fileCandidate{path: p, untracked: true})
 	}
-	return files
-}
-
-func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapshot) ([]fileCandidate, error) {
-	flags, err := readIndexFlags(ctx, c.src.dir, c.src.env)
-	if err != nil {
-		return nil, err
-	}
-	listed := map[string]bool{}
-	for _, e := range status.changed {
-		listed[e.path] = e.y != '.'
-	}
-	for _, p := range flags.gitlinks {
-		if listed[p] {
-			continue
-		}
-		dirty, err := submoduleDirty(ctx, filepath.Join(c.wt.Root, p))
-		if err != nil {
-			return nil, err
-		}
-		if dirty {
-			c.omitted = append(c.omitted, Omission{Path: p, Reason: OmitSubmodule})
-		}
-	}
-	root, err := os.OpenRoot(c.wt.Root)
-	if err != nil {
-		return nil, fmt.Errorf("open worktree root: %w", err)
-	}
-	defer func() { _ = root.Close() }()
-	dirs := map[string]bool{".": true}
-	var files []fileCandidate
-	for _, e := range flags.flagged {
-		if listed[e.path] || !blobModes[e.mode] {
-			continue
-		}
-		present, err := presentIn(root, dirs, e.path)
-		if err != nil {
-			return nil, err
-		}
-		switch {
-		case present:
-			files = append(files, fileCandidate{path: e.path, hidden: true, indexMode: e.mode, indexOID: e.oid})
-		case !e.skipWorktree:
-			snap.Files = append(snap.Files, FileEntry{Path: e.path, Kind: FileDeleted})
-		}
-	}
 	return files, nil
-}
-
-func submoduleDirty(ctx context.Context, dir string) (bool, error) {
-	if _, err := os.Lstat(filepath.Join(dir, ".git")); errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	} else if err != nil {
-		return false, fmt.Errorf("stat submodule %s: %w", dir, err)
-	}
-	env, err := vcs.FilterOverrideEnv(ctx, dir)
-	if err != nil {
-		return false, err
-	}
-	env = append(env, "GIT_NO_LAZY_FETCH=1")
-	status, err := readStatus(ctx, dir, env)
-	if err != nil {
-		return false, err
-	}
-	if len(status.changed)+len(status.unmerged)+len(status.untracked) > 0 {
-		return true, nil
-	}
-	flags, err := readIndexFlags(ctx, dir, env)
-	if err != nil {
-		return false, err
-	}
-	for _, p := range flags.gitlinks {
-		if dirty, err := submoduleDirty(ctx, filepath.Join(dir, p)); err != nil || dirty {
-			return dirty, err
-		}
-	}
-	return false, nil
-}
-
-func presentIn(root *os.Root, dirs map[string]bool, name string) (bool, error) {
-	if ok, err := dirPresent(root, dirs, path.Dir(name)); err != nil || !ok {
-		return false, err
-	}
-	_, err := root.Lstat(filepath.FromSlash(name))
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("lstat %s: %w", name, err)
-	}
-	return true, nil
-}
-
-func dirPresent(root *os.Root, dirs map[string]bool, dir string) (bool, error) {
-	if ok, seen := dirs[dir]; seen {
-		return ok, nil
-	}
-	ok, err := dirPresent(root, dirs, path.Dir(dir))
-	if err != nil {
-		return false, err
-	}
-	if ok {
-		info, err := root.Lstat(filepath.FromSlash(dir))
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			ok = false
-		case err != nil:
-			return false, fmt.Errorf("lstat %s: %w", dir, err)
-		default:
-			ok = info.IsDir()
-		}
-	}
-	dirs[dir] = ok
-	return ok, nil
 }
 
 func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []fileCandidate) (map[string]string, error) {
@@ -837,7 +795,9 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 	if err != nil {
 		return pendingFile{}, false, fmt.Errorf("lstat %s: %w", f.path, err)
 	}
-	p := pendingFile{cand: f, stat: statOf(info), entry: FileEntry{Path: f.path, Untracked: f.untracked}}
+	p := pendingFile{cand: f, stat: statOf(info), entry: FileEntry{
+		Path: f.path, Untracked: f.untracked, AssumeUnchanged: f.assumeUnchanged, SkipWorktree: f.skipWorktree,
+	}}
 	switch mode := info.Mode(); {
 	case mode&fs.ModeSymlink != 0:
 		target, err := root.Readlink(f.path)

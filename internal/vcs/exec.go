@@ -110,48 +110,62 @@ func Exec(ctx context.Context, c Cmd) error {
 
 // ReadOnlyGitEnv is the environment for git reads against a repository
 // reposync must never write: no optional index refresh (GIT_OPTIONAL_LOCKS=0),
-// no credential prompt, no hook or fsmonitor callback, no shared split-index
-// file written beside a private index, and the default gc/maintenance
+// no hook or fsmonitor callback (core.hooksPath and core.fsmonitor=false, which
+// a submodule's child git inherits), no shared split-index file written beside
+// a private index, no lazy fetch of an object a partial clone lacks
+// (GIT_NO_LAZY_FETCH=1), no credential prompt, and the default gc/maintenance
 // suppression.
 func ReadOnlyGitEnv() []string {
-	return append(configEnv(readOnlyGitConfig), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	return readOnlyEnv(nil)
 }
 
 // FilterOverrideEnv is ReadOnlyGitEnv plus command-scope config that blanks
-// the clean and process command of every filter driver configured for the
-// repository at dir and marks each driver not required, so a status read
+// the clean and process command of every filter driver configured for any
+// repository in dirs and marks each driver not required, so a status read
 // hashes raw worktree bytes and never runs a filter that writes (git-lfs's
-// clean filter writes <common>/lfs/objects).
-func FilterOverrideEnv(ctx context.Context, dir string) ([]string, error) {
-	var out bytes.Buffer
-	err := Exec(ctx, Cmd{
-		Dir:    dir,
-		Name:   "git",
-		Args:   []string{"-C", dir, "config", "-z", "--get-regexp", `^filter\..*\.(clean|process)$`},
-		Env:    ReadOnlyGitEnv(),
-		Stdout: &out,
-	})
-	if err != nil && exitCode(err) != 1 {
-		return nil, fmt.Errorf("list filter drivers in %s: %w", dir, err)
+// clean filter writes <common>/lfs/objects). A status that recurses into
+// submodules runs their child gits under this same config, so dirs must name
+// every submodule the read visits.
+func FilterOverrideEnv(ctx context.Context, dirs ...string) ([]string, error) {
+	seen := map[string]bool{}
+	var pairs [][2]string
+	for _, dir := range dirs {
+		var out bytes.Buffer
+		err := Exec(ctx, Cmd{
+			Dir:    dir,
+			Name:   "git",
+			Args:   []string{"-C", dir, "config", "-z", "--get-regexp", `^filter\..*\.(clean|process)$`},
+			Env:    ReadOnlyGitEnv(),
+			Stdout: &out,
+		})
+		if err != nil && exitCode(err) != 1 {
+			return nil, fmt.Errorf("list filter drivers in %s: %w", dir, err)
+		}
+		drivers, err := filterDrivers(out.Bytes())
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range drivers {
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			pairs = append(
+				pairs,
+				[2]string{"filter." + d + ".clean", ""},
+				[2]string{"filter." + d + ".process", ""},
+				[2]string{"filter." + d + ".required", "false"},
+			)
+		}
 	}
-	drivers, err := filterDrivers(out.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	pairs := slices.Clone(readOnlyGitConfig)
-	for _, d := range drivers {
-		pairs = append(
-			pairs,
-			[2]string{"filter." + d + ".clean", ""},
-			[2]string{"filter." + d + ".process", ""},
-			[2]string{"filter." + d + ".required", "false"},
-		)
-	}
-	return append(configEnv(pairs), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0"), nil
+	return readOnlyEnv(pairs), nil
+}
+
+func readOnlyEnv(extra [][2]string) []string {
+	return append(configEnv(slices.Concat(readOnlyGitConfig, extra)), "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0")
 }
 
 func filterDrivers(out []byte) ([]string, error) {
-	seen := map[string]bool{}
 	var drivers []string
 	for rec := range bytes.SplitSeq(out, []byte{0}) {
 		if len(rec) == 0 {
@@ -166,11 +180,7 @@ func filterDrivers(out []byte) ([]string, error) {
 		if dot <= 0 {
 			return nil, fmt.Errorf("unexpected filter config key %q", key)
 		}
-		driver := name[:dot]
-		if !seen[driver] {
-			seen[driver] = true
-			drivers = append(drivers, driver)
-		}
+		drivers = append(drivers, name[:dot])
 	}
 	return drivers, nil
 }

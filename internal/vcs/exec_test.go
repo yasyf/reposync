@@ -130,7 +130,7 @@ func TestExecStreamsStdinAndStdout(t *testing.T) {
 func TestReadOnlyGitEnv(t *testing.T) {
 	env := ReadOnlyGitEnv()
 	for _, want := range []string{
-		"GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=5", "GIT_CONFIG_KEY_0=gc.auto",
+		"GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_COUNT=5", "GIT_CONFIG_KEY_0=gc.auto",
 		"GIT_CONFIG_KEY_2=core.fsmonitor", "GIT_CONFIG_VALUE_2=false",
 		"GIT_CONFIG_KEY_3=core.hooksPath", "GIT_CONFIG_VALUE_3=" + os.DevNull,
 		"GIT_CONFIG_KEY_4=core.splitIndex", "GIT_CONFIG_VALUE_4=false",
@@ -169,7 +169,17 @@ func TestFilterOverrideEnv(t *testing.T) {
 	git("config", "filter.spy.required", "true")
 	git("config", "filter.dotted.name.process", "false")
 
-	env, err := FilterOverrideEnv(context.Background(), dir)
+	other := t.TempDir()
+	if _, err := run(context.Background(), other, "git", "-C", other, "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range [][2]string{{"filter.spy.clean", "cat"}, {"filter.other.process", "false"}} {
+		if _, err := run(context.Background(), other, "git", "-C", other, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	env, err := FilterOverrideEnv(context.Background(), dir, other)
 	if err != nil {
 		t.Fatalf("FilterOverrideEnv: %v", err)
 	}
@@ -187,12 +197,13 @@ func TestFilterOverrideEnv(t *testing.T) {
 		"core.fsmonitor": "false", "core.hooksPath": os.DevNull, "core.splitIndex": "false",
 		"filter.spy.clean": "", "filter.spy.process": "", "filter.spy.required": "false",
 		"filter.dotted.name.clean": "", "filter.dotted.name.process": "", "filter.dotted.name.required": "false",
+		"filter.other.clean": "", "filter.other.process": "", "filter.other.required": "false",
 	}
 	if fmt.Sprint(keys) != fmt.Sprint(want) {
 		t.Fatalf("override config = %v, want %v", keys, want)
 	}
-	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "11" {
-		t.Fatalf("GIT_CONFIG_COUNT = %q, want 11", n)
+	if n, _ := envValue(env, "GIT_CONFIG_COUNT"); n != "14" {
+		t.Fatalf("GIT_CONFIG_COUNT = %q, want 14", n)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "a.dat"), []byte("two\n"), 0o600); err != nil {
