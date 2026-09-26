@@ -109,8 +109,11 @@ type pathState struct {
 // staged index exactly, shipped and locally available LFS objects hydrated,
 // then every worktree file, symlink, deletion, and intent-to-add. Hooks never
 // run. Unless opts.Fresh, an existing recovery checkout of the same source
-// worktree is returned as Reused with no file touched. It returns
-// *GitVersionError when the host's git predates 2.44.
+// worktree is returned as Reused with no file touched. A Restore that fails or
+// whose ctx is cancelled removes the worktree, recovery branch, and parent
+// directories it created, so a retry can reuse opts.Dest; it never removes
+// anything that existed before it began. It returns *GitVersionError when the
+// host's git predates 2.44.
 func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts RestoreOptions) (Restored, error) {
 	if !filepath.IsAbs(opts.Dest) {
 		return Restored{}, fmt.Errorf("restore destination %q is not absolute", opts.Dest)
@@ -155,18 +158,65 @@ func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapsho
 }
 
 func (m mirror) restore(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch string) (Restored, error) {
-	ns := recoveryPrefix + strings.TrimPrefix(snap.Digest, digestPrefix)[:12] + "/"
-	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
-	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
-		return Restored{}, fmt.Errorf("fetch snapshot into checkout: %w", err)
+	parents, err := absentParents(opts.Dest)
+	if err != nil {
+		return Restored{}, err
 	}
+	ns := recoveryPrefix + strings.TrimPrefix(snap.Digest, digestPrefix)[:12] + "/"
 	r, err := m.materialize(ctx, snap, src, opts, branch, ns)
-	return r, errors.Join(err, updateRefs(ctx, []string{"-C", m.checkout}, []string{"delete " + ns + "head", "delete " + ns + "index"}))
+	cleanup := context.WithoutCancel(ctx)
+	if err := errors.Join(err, updateRefs(cleanup, []string{"-C", m.checkout}, []string{"delete " + ns + "head", "delete " + ns + "index"})); err != nil {
+		return Restored{}, errors.Join(err, m.discard(cleanup, opts.Dest, branch, snap.Head.Commit, parents))
+	}
+	return r, nil
+}
+
+func absentParents(dest string) ([]string, error) {
+	var absent []string
+	for dir := filepath.Dir(dest); ; dir = filepath.Dir(dir) {
+		_, err := os.Lstat(dir)
+		if err == nil {
+			return absent, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("stat %s: %w", dir, err)
+		}
+		absent = append(absent, dir)
+	}
+}
+
+func (m mirror) discard(ctx context.Context, dest, branch, head string, parents []string) error {
+	var errs []error
+	if _, err := linkedAdminDir(dest, m.common); err == nil {
+		if _, err := recvGit(ctx, nil, nil, "-C", m.checkout, "worktree", "remove", "--force", "--force", dest); err != nil {
+			errs = append(errs, fmt.Errorf("remove recovery worktree: %w", err))
+		}
+	}
+	ref := "refs/heads/" + branch
+	heads, err := listRefs(ctx, []string{"-C", m.checkout}, ref)
+	switch {
+	case err != nil:
+		errs = append(errs, err)
+	case heads[ref] != "":
+		if err := updateRefs(ctx, []string{"-C", m.checkout}, []string{"delete " + ref + " " + head}); err != nil {
+			errs = append(errs, fmt.Errorf("delete recovery branch: %w", err))
+		}
+	}
+	for _, dir := range parents {
+		if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove created parent: %w", err))
+			break
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch, ns string) (Restored, error) {
 	dest := opts.Dest
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
+	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
+		return Restored{}, fmt.Errorf("fetch snapshot into checkout: %w", err)
+	}
 	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", "-b", branch, dest, ns+"head"); err != nil {
 		return Restored{}, fmt.Errorf("add recovery worktree: %w", err)
 	}
