@@ -73,14 +73,15 @@ func (s source) config(ctx context.Context, pattern string, file string) (map[st
 	return values, nil
 }
 
-func (s source) filterAttr(ctx context.Context, paths []string) (map[string]string, error) {
+func (s source) filterAttr(ctx context.Context, paths []string, opts ...string) (map[string]string, error) {
 	attrs := map[string]string{}
 	if len(paths) == 0 {
 		return attrs, nil
 	}
 	var out bytes.Buffer
 	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
-	if err := s.run(ctx, stdin, &out, "check-attr", "-z", "--stdin", "filter"); err != nil {
+	args := append(append([]string{"check-attr"}, opts...), "-z", "--stdin", "filter")
+	if err := s.run(ctx, stdin, &out, args...); err != nil {
 		return nil, err
 	}
 	fields := strings.Split(strings.TrimSuffix(out.String(), "\x00"), "\x00")

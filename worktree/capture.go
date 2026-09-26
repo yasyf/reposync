@@ -202,7 +202,7 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	attrs := map[string]string{}
 	var lfsRefs []LFSObjectRef
 	if usesLFS {
-		if attrs, err = c.lfsAttrs(ctx, snap.Index, files); err != nil {
+		if attrs, err = c.lfsAttrs(ctx, snap.Head.Commit, snap.Index, files); err != nil {
 			return Snapshot{}, err
 		}
 		if snap.Head.Ahead > 0 {
@@ -423,7 +423,7 @@ func (c *capture) classify(status statusReport, snap *Snapshot) []fileCandidate 
 	return files
 }
 
-func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []fileCandidate) (map[string]string, error) {
+func (c *capture) lfsAttrs(ctx context.Context, head string, index []IndexEntry, files []fileCandidate) (map[string]string, error) {
 	var paths []string
 	for _, e := range index {
 		paths = append(paths, e.Path)
@@ -434,7 +434,20 @@ func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []file
 		}
 	}
 	slices.Sort(paths)
-	return c.src.filterAttr(ctx, slices.Compact(paths))
+	paths = slices.Compact(paths)
+	attrs := map[string]string{}
+	for _, opts := range [][]string{nil, {"--cached"}, {"--source=" + head}} {
+		got, err := c.src.filterAttr(ctx, paths, opts...)
+		if err != nil {
+			return nil, err
+		}
+		for p, v := range got {
+			if v == lfsFilter {
+				attrs[p] = lfsFilter
+			}
+		}
+	}
+	return attrs, nil
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {
@@ -465,12 +478,6 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 	if err != nil {
 		return nil, err
 	}
-	lfsOID := map[string]bool{}
-	for _, e := range index {
-		if attrs[e.Path] == lfsFilter {
-			lfsOID[e.OID] = true
-		}
-	}
 	var read []string
 	queued := map[string]bool{}
 	for _, e := range index {
@@ -487,7 +494,7 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 	}
 	err = c.src.readBlobs(ctx, read, func(oid string, size int64, r io.Reader) error {
 		var entry cachedBlob
-		if lfsOID[oid] && size <= lfsPointerMax {
+		if size <= lfsPointerMax {
 			b, err := io.ReadAll(r)
 			if err != nil {
 				return fmt.Errorf("read blob %s: %w", oid, err)
@@ -518,7 +525,7 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 			continue
 		}
 		index[i].Blob = &cached.Blob
-		if cached.LFS != nil && attrs[e.Path] == lfsFilter {
+		if cached.LFS != nil && (cached.LFS.strict() || attrs[e.Path] == lfsFilter) {
 			staged = append(staged, LFSObjectRef{Path: e.Path, OID: cached.LFS.OID, Size: cached.LFS.Size})
 		}
 	}

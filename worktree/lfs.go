@@ -70,6 +70,10 @@ func (p lfsPointer) encode() []byte {
 	return []byte(b.String())
 }
 
+func (p lfsPointer) strict() bool {
+	return p.Canonical && !slices.ContainsFunc(p.Extra, func(e string) bool { return !strings.HasPrefix(e, "ext-") })
+}
+
 func (p lfsPointer) artifact() ArtifactRef {
 	return ArtifactRef{Digest: digestPrefix + p.OID, Size: p.Size, Media: MediaLFSObject}
 }
@@ -99,73 +103,82 @@ func (s source) readPointers(ctx context.Context, oids []string) (map[string]lfs
 	return pointers, err
 }
 
+type historyBlob struct {
+	commit, path, oid string
+}
+
 func (s source) historyLFS(ctx context.Context, head, trunkTip, trunkBase string) ([]LFSObjectRef, error) {
-	blobs := map[string]bool{}
+	var blobs []historyBlob
 	for _, args := range [][]string{
-		{"log", "--format=", "--raw", "--no-abbrev", "-z", "--no-renames", head, "^" + trunkTip},
+		{"log", "--format=%H", "--raw", "--no-abbrev", "-z", "--no-renames", head, "^" + trunkTip},
 		{"diff-tree", "-r", "--raw", "--no-abbrev", "-z", "--no-renames", trunkBase, head},
 	} {
 		var out bytes.Buffer
 		if err := s.run(ctx, nil, &out, args...); err != nil {
 			return nil, err
 		}
-		if err := parseRawDiff(out.String(), blobs); err != nil {
+		parsed, err := parseRawDiff(out.String(), head)
+		if err != nil {
 			return nil, err
 		}
+		blobs = append(blobs, parsed...)
 	}
-	paths := slices.Sorted(maps.Keys(blobs))
-	var lfsPaths []string
-	for _, key := range paths {
-		p, _, _ := strings.Cut(key, "\x00")
-		lfsPaths = append(lfsPaths, p)
-	}
-	lfsPaths = slices.Compact(lfsPaths)
-	attrs, err := s.filterAttr(ctx, lfsPaths)
-	if err != nil {
-		return nil, err
-	}
-	var oids []string
-	var candidates [][2]string
-	for _, key := range paths {
-		p, oid, _ := strings.Cut(key, "\x00")
-		if attrs[p] == lfsFilter {
-			candidates = append(candidates, [2]string{p, oid})
-			oids = append(oids, oid)
-		}
+	oids := make([]string, 0, len(blobs))
+	for _, b := range blobs {
+		oids = append(oids, b.oid)
 	}
 	slices.Sort(oids)
 	pointers, err := s.readPointers(ctx, slices.Compact(oids))
 	if err != nil {
 		return nil, err
 	}
+	ambiguous := map[string][]string{}
+	for _, b := range blobs {
+		if p, ok := pointers[b.oid]; ok && !p.strict() {
+			ambiguous[b.commit] = append(ambiguous[b.commit], b.path)
+		}
+	}
+	attrs := map[string]map[string]string{}
+	for _, commit := range slices.Sorted(maps.Keys(ambiguous)) {
+		paths := ambiguous[commit]
+		slices.Sort(paths)
+		if attrs[commit], err = s.filterAttr(ctx, slices.Compact(paths), "--source="+commit); err != nil {
+			return nil, err
+		}
+	}
 	var refs []LFSObjectRef
-	for _, c := range candidates {
-		if ptr, ok := pointers[c[1]]; ok {
-			refs = append(refs, LFSObjectRef{Path: c[0], OID: ptr.OID, Size: ptr.Size})
+	for _, b := range blobs {
+		if p, ok := pointers[b.oid]; ok && (p.strict() || attrs[b.commit][b.path] == lfsFilter) {
+			refs = append(refs, LFSObjectRef{Path: b.path, OID: p.OID, Size: p.Size})
 		}
 	}
 	return refs, nil
 }
 
-func parseRawDiff(out string, blobs map[string]bool) error {
+func parseRawDiff(out, commit string) ([]historyBlob, error) {
+	var blobs []historyBlob
 	tokens := strings.Split(out, "\x00")
 	for i := 0; i < len(tokens); i++ {
 		tok := strings.Trim(tokens[i], "\n")
 		if tok == "" {
 			continue
 		}
+		if isHex(tok, 40) || isHex(tok, 64) {
+			commit = tok
+			continue
+		}
 		if !strings.HasPrefix(tok, ":") || i+1 >= len(tokens) {
-			return fmt.Errorf("raw diff record %q", tok)
+			return nil, fmt.Errorf("raw diff record %q", tok)
 		}
 		i++
 		f := strings.Fields(tok)
 		if len(f) != 5 {
-			return fmt.Errorf("raw diff record %q", tok)
+			return nil, fmt.Errorf("raw diff record %q", tok)
 		}
 		mode, oid := f[1], f[3]
 		if (mode == "100644" || mode == "100755") && strings.Trim(oid, "0") != "" {
-			blobs[tokens[i]+"\x00"+oid] = true
+			blobs = append(blobs, historyBlob{commit: commit, path: tokens[i], oid: oid})
 		}
 	}
-	return nil
+	return blobs, nil
 }
