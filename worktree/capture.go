@@ -56,19 +56,30 @@ var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 // path whose assume-unchanged or skip-worktree index flag hides its worktree
 // state from git status is captured when its raw worktree bytes, type, or exec
 // bit differ from the index entry, and always when it is intent-to-add; a
-// so-flagged submodule with local changes is omitted like any other; and a
-// skip-worktree path absent from a sparse checkout whose patterns exclude it
-// is the sparse pattern's doing, not an edit. With core.filemode=false
-// the index mode is authoritative: the repository ignores the exec bit, so a
-// chmod alone is not work in progress. A KindJJWorkspace captures every file
-// its @ tracks, even one .gitignore now matches. It returns *DeferredError
-// mid-operation, ErrBusy on a live lock or a HEAD, index, or file that moved
+// so-flagged submodule with local changes is omitted like any other; and in a
+// sparse checkout a skip-worktree path absent from disk is carried by
+// Snapshot.Sparse (its patterns and exceptions), not as an edit. An
+// intent-to-add path deleted from disk is recorded as both IntentToAdd and a
+// deletion, so Restore reproduces it exactly. With core.filemode=false the
+// index mode is authoritative: the repository ignores the exec bit, so a chmod
+// alone is not work in progress. A KindJJWorkspace captures every file its @
+// tracks, even one .gitignore now matches.
+//
+// Known limit: a file hidden by assume-unchanged or skip-worktree inside a
+// submodule leaves that submodule looking clean, exactly as git status reports
+// it; a submodule git reports dirty is always an omission.
+//
+// It returns *GitVersionError when the host's git predates 2.44,
+// *DeferredError mid-operation, ErrBusy on a live lock or a HEAD, index, or file that moved
 // during the capture, *PartialError when a progress budget ran out, and
 // *MissingLFSError when a required LFS object is absent locally. An unchanged
 // worktree yields the same Digest with no Put.
 func (s *Store) Capture(ctx context.Context, wt Worktree, sink ArtifactSink, opts CaptureOptions) (Snapshot, error) {
 	if opts.Source == "" {
 		return Snapshot{}, errors.New("capture: empty source")
+	}
+	if err := requireGit(ctx); err != nil {
+		return Snapshot{}, err
 	}
 	lock, err := s.lockRepo(ctx, wt.Origin)
 	if err != nil {
@@ -191,7 +202,11 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	c.format = snap.ObjectFormat
-	cfg, err := c.src.config(ctx, `^(core\.filemode|core\.sparsecheckout|core\.sparsecheckoutcone|filter\.lfs\.(clean|process)|lfs\.url|remote\.origin\.lfsurl)$`, "")
+	cfg, err := c.src.config(ctx, `^(filter\.lfs\.(clean|process)|lfs\.url|remote\.origin\.lfsurl)$`)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	flags, err := c.src.config(ctx, `^core\.(filemode|sparsecheckout|sparsecheckoutcone)$`, "--type=bool")
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -218,7 +233,7 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	fileMode := cfg["core.filemode"] != "false"
+	fileMode := flags["core.filemode"] != "false"
 	if c.wt.Kind == KindJJWorkspace {
 		tracked, err := c.jjTracked(ctx, status)
 		if err != nil {
@@ -226,30 +241,36 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 		}
 		files = append(files, tracked...)
 	} else {
-		hidden, err := c.hidden(ctx, status, &snap, cfg["core.sparsecheckout"] == "true")
+		hidden, err := c.hidden(ctx, status, &snap, flags["core.sparsecheckout"] == "true")
 		if err != nil {
 			return Snapshot{}, err
 		}
 		files = append(files, hidden...)
 	}
-	attrs, err := c.lfsAttrs(ctx, snap.Index, files)
+	attrs, err := c.lfsAttrs(ctx, snap.Head.Commit, changedPaths(snap.Index, files))
 	if err != nil {
 		return Snapshot{}, err
 	}
-	var lfsRefs []LFSObjectRef
+	lfsRefs, err := c.attributeLFS(ctx, status, snap.Head)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	if snap.Head.Ahead > 0 {
-		if lfsRefs, err = c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip, snap.Head.TrunkBase); err != nil {
+		history, err := c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip)
+		if err != nil {
 			return Snapshot{}, err
 		}
+		lfsRefs = append(lfsRefs, history...)
 	}
 	staged, err := c.captureIndex(ctx, snap.Index, attrs)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	lfsRefs = append(lfsRefs, staged...)
 	_, lfsClean := cfg["filter.lfs.clean"]
 	_, lfsProcess := cfg["filter.lfs.process"]
 	if lfsClean || lfsProcess || len(lfsRefs) > 0 || slices.Contains(slices.Collect(maps.Values(attrs)), lfsFilter) {
-		info, err := c.lfsInfo(ctx, cfg, append(lfsRefs, staged...))
+		info, err := c.lfsInfo(ctx, cfg, lfsRefs)
 		if err != nil {
 			return Snapshot{}, err
 		}
@@ -266,8 +287,8 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err := c.recheck(ctx, before, snap.Head.Commit); err != nil {
 		return Snapshot{}, err
 	}
-	if cfg["core.sparsecheckout"] == "true" && c.wt.GitDir != "" {
-		if snap.Sparse, err = readSparse(c.wt.GitDir, cfg["core.sparsecheckoutcone"] == "true"); err != nil {
+	if flags["core.sparsecheckout"] == "true" && c.wt.GitDir != "" {
+		if snap.Sparse, err = readSparse(ctx, c.src.dir, c.src.env, c.wt.GitDir, flags["core.sparsecheckoutcone"] == "true"); err != nil {
 			return Snapshot{}, err
 		}
 	}
@@ -503,7 +524,7 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 	return files, nil
 }
 
-func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []fileCandidate) (map[string]string, error) {
+func changedPaths(index []IndexEntry, files []fileCandidate) []string {
 	var paths []string
 	for _, e := range index {
 		paths = append(paths, e.Path)
@@ -514,7 +535,81 @@ func (c *capture) lfsAttrs(ctx context.Context, index []IndexEntry, files []file
 		}
 	}
 	slices.Sort(paths)
-	return c.src.filterAttr(ctx, "", slices.Compact(paths))
+	return slices.Compact(paths)
+}
+
+func (c *capture) lfsAttrs(ctx context.Context, head string, paths []string) (map[string]string, error) {
+	attrs := map[string]string{}
+	for _, opts := range [][]string{nil, {"--cached"}, {"--source=" + head}} {
+		got, err := c.src.filterAttr(ctx, paths, opts...)
+		if err != nil {
+			return nil, err
+		}
+		for p, v := range got {
+			if v == lfsFilter {
+				attrs[p] = lfsFilter
+			}
+		}
+	}
+	return attrs, nil
+}
+
+func (c *capture) attributeLFS(ctx context.Context, status statusReport, head Head) ([]LFSObjectRef, error) {
+	var committed bytes.Buffer
+	if err := c.src.run(ctx, nil, &committed, "diff-tree", "-r", "--name-only", "-z", "--no-renames", head.TrunkBase, head.Commit, "--", ":(glob)**/.gitattributes"); err != nil {
+		return nil, err
+	}
+	changed := strings.Split(strings.TrimSuffix(committed.String(), "\x00"), "\x00")
+	for _, e := range status.changed {
+		changed = append(changed, e.path)
+	}
+	changed = append(changed, status.untracked...)
+	var dirs []string
+	for _, p := range changed {
+		if filepath.Base(p) == ".gitattributes" {
+			dirs = append(dirs, filepath.Dir(p))
+		}
+	}
+	if len(dirs) == 0 {
+		return nil, nil
+	}
+	var listed bytes.Buffer
+	if err := c.src.run(ctx, nil, &listed, append([]string{"--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"}, dirs...)...); err != nil {
+		return nil, err
+	}
+	var paths []string
+	oids := map[string]string{}
+	for _, b := range stagedBlobs(listed.String()) {
+		paths = append(paths, b.path)
+		oids[b.path] = b.oid
+	}
+	before, err := c.src.filterAttr(ctx, paths, "--source="+head.TrunkBase)
+	if err != nil {
+		return nil, err
+	}
+	after, err := c.lfsAttrs(ctx, head.Commit, paths)
+	if err != nil {
+		return nil, err
+	}
+	var transitioned, blobs []string
+	for _, p := range paths {
+		if after[p] == lfsFilter && before[p] != lfsFilter {
+			transitioned = append(transitioned, p)
+			blobs = append(blobs, oids[p])
+		}
+	}
+	slices.Sort(blobs)
+	pointers, err := c.src.readPointers(ctx, slices.Compact(blobs))
+	if err != nil {
+		return nil, err
+	}
+	var refs []LFSObjectRef
+	for _, p := range transitioned {
+		if ptr, ok := pointers[oids[p]]; ok {
+			refs = append(refs, LFSObjectRef{Path: p, OID: ptr.OID, Size: ptr.Size})
+		}
+	}
+	return refs, nil
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {
@@ -545,12 +640,6 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 	if err != nil {
 		return nil, err
 	}
-	lfsOID := map[string]bool{}
-	for _, e := range index {
-		if attrs[e.Path] == lfsFilter {
-			lfsOID[e.OID] = true
-		}
-	}
 	var read []string
 	queued := map[string]bool{}
 	for _, e := range index {
@@ -566,17 +655,6 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 		read = append(read, e.OID)
 	}
 	err = c.src.readBlobs(ctx, read, func(oid string, size int64, r io.Reader) error {
-		var entry cachedBlob
-		if lfsOID[oid] && size <= lfsPointerMax {
-			b, err := io.ReadAll(r)
-			if err != nil {
-				return fmt.Errorf("read blob %s: %w", oid, err)
-			}
-			if p, ok := parseLFSPointer(b); ok {
-				entry.LFS = &p
-			}
-			r = bytes.NewReader(b)
-		}
 		ref, err := c.sink.Put(ctx, MediaBlob, r)
 		if err != nil {
 			return fmt.Errorf("put blob %s: %w", oid, err)
@@ -584,10 +662,20 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 		if ref.Size != size {
 			return fmt.Errorf("blob %s: put %d bytes, want %d", oid, ref.Size, size)
 		}
-		entry.Blob = ref
-		c.next.Blobs[oid] = entry
+		c.next.Blobs[oid] = cachedBlob{Blob: ref}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	var small []string
+	for _, e := range index {
+		if cached, ok := c.next.Blobs[e.OID]; ok && blobModes[e.Mode] && cached.Blob.Size <= lfsPointerMax {
+			small = append(small, e.OID)
+		}
+	}
+	slices.Sort(small)
+	pointers, err := c.src.readPointers(ctx, slices.Compact(small))
 	if err != nil {
 		return nil, err
 	}
@@ -598,8 +686,8 @@ func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs ma
 			continue
 		}
 		index[i].Blob = &cached.Blob
-		if cached.LFS != nil && attrs[e.Path] == lfsFilter {
-			staged = append(staged, LFSObjectRef{Path: e.Path, OID: cached.LFS.OID, Size: cached.LFS.Size})
+		if p, ok := pointers[e.OID]; ok && (p.Canonical || attrs[e.Path] == lfsFilter) {
+			staged = append(staged, LFSObjectRef{Path: e.Path, OID: p.OID, Size: p.Size})
 		}
 	}
 	return staged, nil
@@ -625,7 +713,7 @@ func (c *capture) lfsInfo(ctx context.Context, cfg map[string]string, refs []LFS
 	if _, err := os.Lstat(lfsconfig); errors.Is(err, fs.ErrNotExist) {
 		return info, nil
 	}
-	file, err := c.src.config(ctx, `^(lfs\.url|remote\.origin\.lfsurl)$`, lfsconfig)
+	file, err := c.src.config(ctx, `^(lfs\.url|remote\.origin\.lfsurl)$`, "-f", lfsconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -972,7 +1060,7 @@ func lstatPath(path string) (fileStat, error) {
 	return statOf(info), nil
 }
 
-func readSparse(gitDir string, cone bool) (*Sparse, error) {
+func readSparse(ctx context.Context, dir string, env []string, gitDir string, cone bool) (*Sparse, error) {
 	//nolint:gosec // G304: the sparse-checkout file of a discovered worktree's admin dir.
 	b, err := os.ReadFile(filepath.Join(gitDir, "info", "sparse-checkout"))
 	if err != nil {
@@ -980,11 +1068,56 @@ func readSparse(gitDir string, cone bool) (*Sparse, error) {
 	}
 	sparse := &Sparse{Cone: cone, Patterns: []string{}}
 	for line := range strings.SplitSeq(string(b), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+		if line = strings.TrimSuffix(line, "\r"); line != "" {
 			sparse.Patterns = append(sparse.Patterns, line)
 		}
 	}
+	skipped, err := skipWorktree(ctx, dir, env)
+	if err != nil {
+		return nil, err
+	}
+	if sparse.Exceptions, err = sparseExceptions(ctx, dir, env, skipped); err != nil {
+		return nil, err
+	}
 	return sparse, nil
+}
+
+func skipWorktree(ctx context.Context, dir string, env []string) (map[string]bool, error) {
+	var out bytes.Buffer
+	if err := vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: []string{"-C", dir, "ls-files", "--sparse", "-t", "-z"}, Env: env, Stdout: &out}); err != nil {
+		return nil, fmt.Errorf("list skip-worktree bits in %s: %w", dir, err)
+	}
+	skipped := map[string]bool{}
+	for rec := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
+		tag, p, ok := strings.Cut(rec, " ")
+		if !ok {
+			return nil, fmt.Errorf("ls-files -t record %q", rec)
+		}
+		if !strings.HasSuffix(p, "/") {
+			skipped[p] = tag == "S"
+		}
+	}
+	return skipped, nil
+}
+
+func sparseExceptions(ctx context.Context, dir string, env []string, skipped map[string]bool) ([]string, error) {
+	paths := slices.Sorted(maps.Keys(skipped))
+	var out bytes.Buffer
+	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
+	if err := vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: []string{"-C", dir, "sparse-checkout", "check-rules", "-z"}, Env: env, Stdin: stdin, Stdout: &out}); err != nil {
+		return nil, fmt.Errorf("check sparse-checkout rules in %s: %w", dir, err)
+	}
+	inside := map[string]bool{}
+	for p := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
+		inside[p] = true
+	}
+	var exceptions []string
+	for _, p := range paths {
+		if skipped[p] == inside[p] {
+			exceptions = append(exceptions, p)
+		}
+	}
+	return exceptions, nil
 }
 
 func sortSnapshot(snap *Snapshot, omitted []Omission) {

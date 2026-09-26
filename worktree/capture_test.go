@@ -484,7 +484,7 @@ func TestCaptureRevalidatesRewrittenTrunk(t *testing.T) {
 
 func patchLedger(t *testing.T, storeRoot, worktreeID, path string, ref worktree.ArtifactRef) {
 	t.Helper()
-	ledgerPath := filepath.Join(storeRoot, "source", worktreeID+".json")
+	ledgerPath := filepath.Join(storeRoot, "source", worktreeID+".reposync-worktree-ledger-v2.json")
 	//nolint:gosec // G304: the ledger under a test-controlled store root.
 	b, err := os.ReadFile(ledgerPath)
 	if err != nil {

@@ -39,8 +39,12 @@ type Verification struct {
 // each history bundle, staged blob, and shipped LFS object hash-verifies and is
 // imported into the store's mirror, the staged tree is rebuilt there, and
 // every file artifact is present in src. It is idempotent, and it rebuilds
-// mirror state whose objects went missing.
+// mirror state whose objects went missing. It returns *GitVersionError when the
+// host's git predates 2.44.
 func (s *Store) Verify(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts VerifyOptions) (Verification, error) {
+	if err := requireGit(ctx); err != nil {
+		return Verification{}, err
+	}
 	if err := snap.validate(); err != nil {
 		return Verification{}, err
 	}

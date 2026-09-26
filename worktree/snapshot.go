@@ -142,6 +142,13 @@ type LFSInfo struct {
 type Sparse struct {
 	Cone     bool     `json:"cone"`
 	Patterns []string `json:"patterns"`
+	// Exceptions are the tracked paths whose skip-worktree bit disagrees with
+	// Patterns: materialized outside them, or hidden inside them.
+	Exceptions []string `json:"exceptions,omitempty"`
+}
+
+func (s Sparse) equal(o Sparse) bool {
+	return s.Cone == o.Cone && slices.Equal(s.Patterns, o.Patterns) && slices.Equal(s.Exceptions, o.Exceptions)
 }
 
 // JJ is informational jj state as of jj's last snapshot.
@@ -322,6 +329,7 @@ func (s Snapshot) check() error {
 		s.checkOmitted(),
 		s.checkJJ(oid),
 		s.checkArtifactSizes(),
+		s.checkSparse(),
 	}
 	for _, err := range checks {
 		if err != nil {
@@ -533,6 +541,21 @@ func (s Snapshot) checkOmitted() error {
 		case OmitSubmodule, OmitNestedRepo, OmitSpecialFile:
 		default:
 			return fmt.Errorf("omitted[%d] %q: reason %q", i, o.Path, o.Reason)
+		}
+	}
+	return nil
+}
+
+func (s Snapshot) checkSparse() error {
+	if s.Sparse == nil {
+		return nil
+	}
+	if err := sortedUnique("sparse.exceptions", s.Sparse.Exceptions, func(p string) string { return p }); err != nil {
+		return err
+	}
+	for i, p := range s.Sparse.Exceptions {
+		if err := checkPath(p); err != nil {
+			return fmt.Errorf("sparse.exceptions[%d]: %w", i, err)
 		}
 	}
 	return nil

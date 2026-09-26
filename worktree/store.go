@@ -20,7 +20,7 @@ import (
 
 const (
 	lockWait     = 10 * time.Second
-	ledgerSchema = "reposync-worktree-ledger-v1"
+	ledgerSchema = "reposync-worktree-ledger-v2"
 )
 
 // Store is reposync's private on-disk state for worktree capture and restore:
@@ -58,7 +58,7 @@ func (s *Store) scratchDir(origin string) string {
 }
 
 func (s *Store) ledgerPath(worktreeID string) string {
-	return filepath.Join(s.root, "source", worktreeID+".json")
+	return filepath.Join(s.root, "source", worktreeID+"."+ledgerSchema+".json")
 }
 
 func (s *Store) privateIndexPath(worktreeID string) string {
@@ -182,7 +182,6 @@ type cachedFile struct {
 
 type cachedBlob struct {
 	Blob ArtifactRef `json:"blob"`
-	LFS  *lfsPointer `json:"lfs,omitempty"`
 }
 
 type chainLink struct {

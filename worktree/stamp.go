@@ -35,8 +35,12 @@ import (
 // operation without a snapshot. A KindJJWorkspace has no
 // index of its own, so its stamp covers the workspace's @ and @- commit ids and
 // the lstat of every file either commit tracks plus every non-ignored file
-// instead of status records.
+// instead of status records. It returns *GitVersionError when the host's git
+// predates 2.44.
 func Stamp(ctx context.Context, wt Worktree) (string, error) {
+	if err := requireGit(ctx); err != nil {
+		return "", err
+	}
 	records, err := stampRecords(ctx, wt)
 	if err != nil {
 		return "", fmt.Errorf("stamp %s: %w", wt.Root, err)

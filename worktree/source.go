@@ -53,11 +53,8 @@ func (s source) output(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-func (s source) config(ctx context.Context, pattern string, file string) (map[string]string, error) {
-	args := []string{"config", "-z"}
-	if file != "" {
-		args = append(args, "-f", file)
-	}
+func (s source) config(ctx context.Context, pattern string, opts ...string) (map[string]string, error) {
+	args := append([]string{"config", "-z"}, opts...)
 	var out bytes.Buffer
 	err := s.run(ctx, nil, &out, append(args, "--get-regexp", pattern)...)
 	var exitErr *exec.ExitError
@@ -75,18 +72,15 @@ func (s source) config(ctx context.Context, pattern string, file string) (map[st
 	return values, nil
 }
 
-func (s source) filterAttr(ctx context.Context, treeish string, paths []string) (map[string]string, error) {
+func (s source) filterAttr(ctx context.Context, paths []string, opts ...string) (map[string]string, error) {
 	attrs := map[string]string{}
 	if len(paths) == 0 {
 		return attrs, nil
 	}
-	args := []string{"check-attr", "-z", "--stdin"}
-	if treeish != "" {
-		args = append(args, "--source="+treeish)
-	}
 	var out bytes.Buffer
 	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
-	if err := s.run(ctx, stdin, &out, append(args, "filter")...); err != nil {
+	args := append(append([]string{"check-attr"}, opts...), "-z", "--stdin", "filter")
+	if err := s.run(ctx, stdin, &out, args...); err != nil {
 		return nil, err
 	}
 	fields := strings.Split(strings.TrimSuffix(out.String(), "\x00"), "\x00")
@@ -125,24 +119,6 @@ func (s source) intentToAdd(ctx context.Context) (map[string]bool, error) {
 		delete(ita, p)
 	}
 	return ita, nil
-}
-
-func (s source) sparseIncluded(ctx context.Context, paths []string) (map[string]bool, error) {
-	included := map[string]bool{}
-	if len(paths) == 0 {
-		return included, nil
-	}
-	var out bytes.Buffer
-	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
-	if err := s.run(ctx, stdin, &out, "sparse-checkout", "check-rules", "-z"); err != nil {
-		return nil, err
-	}
-	for p := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
-		if p != "" {
-			included[p] = true
-		}
-	}
-	return included, nil
 }
 
 func (s source) blobSizes(ctx context.Context, oids []string) (map[string]int64, error) {

@@ -112,19 +112,9 @@ func (c *capture) hidden(ctx context.Context, status statusReport, snap *Snapsho
 }
 
 func (c *capture) hiddenDeletions(ctx context.Context, gone []flaggedEntry, snap *Snapshot, sparse bool) ([]FileEntry, error) {
-	var outside []string
-	for _, e := range gone {
-		if e.skipWorktree && sparse {
-			outside = append(outside, e.path)
-		}
-	}
-	included, err := c.src.sparseIncluded(ctx, outside)
-	if err != nil {
-		return nil, err
-	}
 	var deleted []FileEntry
 	for _, e := range gone {
-		if e.skipWorktree && sparse && !included[e.path] {
+		if e.skipWorktree && sparse {
 			continue
 		}
 		ita, err := c.intentToAdd(ctx, e.path, e.oid)

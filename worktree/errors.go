@@ -31,6 +31,19 @@ var (
 	ErrInvalidSnapshot = errors.New("invalid snapshot")
 )
 
+// GitVersionError means the host's git predates the minimum Capture, Stamp,
+// Verify, and Restore require: git 2.44, for GIT_NO_LAZY_FETCH (a read-only
+// source read must never lazily fetch into a partial clone) and
+// `git sparse-checkout check-rules` (2.42).
+type GitVersionError struct {
+	Have string
+	Want string
+}
+
+func (e *GitVersionError) Error() string {
+	return fmt.Sprintf("git %s is older than the required git %s", e.Have, e.Want)
+}
+
 // DeferredError means the worktree is mid-operation (merge, rebase,
 // cherry-pick, revert, bisect, am, sequencer, unmerged index, jj conflict or
 // merge @) and cannot be captured faithfully until the user finishes it.

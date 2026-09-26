@@ -201,13 +201,11 @@ func TestCaptureSparseDeletion(t *testing.T) {
 			if after := trees(f, filepath.Join(repo, ".git")); !maps.Equal(before, after) {
 				t.Fatalf("capture wrote the source repository: %q", changed(before, after))
 			}
-			if got := filePaths(snap); !snap.Complete || !slices.Equal(got, []string{"deleted:README.md", "deleted:kept/f.txt"}) {
-				t.Fatalf("snapshot complete=%v files=%v, want the two included deletions and not excluded/f.txt", snap.Complete, got)
+			if got := filePaths(snap); !snap.Complete || len(got) != 0 {
+				t.Fatalf("snapshot complete=%v files=%v, want the hidden paths carried by the sparse state alone", snap.Complete, got)
 			}
-			for _, e := range snap.Files {
-				if !e.SkipWorktree || e.AssumeUnchanged {
-					t.Fatalf("%s captured as %+v, want a skip-worktree deletion", e.Path, e)
-				}
+			if snap.Sparse == nil || !slices.Equal(snap.Sparse.Exceptions, []string{"README.md", "kept/f.txt"}) {
+				t.Fatalf("sparse %+v, want the two hidden-inside exceptions and not excluded/f.txt", snap.Sparse)
 			}
 			if snap.Sparse == nil || len(snap.Sparse.Patterns) == 0 {
 				t.Fatalf("sparse %+v, want the recorded patterns", snap.Sparse)
@@ -295,4 +293,60 @@ func fsmonitorHook(t *testing.T, f *vcstest.Fixture, ran string) string {
 		t.Fatal(err)
 	}
 	return hook
+}
+
+func TestRoundTripDeletedIntentToAdd(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		flag  string
+		entry worktree.FileEntry
+		index string
+	}{
+		{"unflagged", "ita.txt", "", worktree.FileEntry{Kind: worktree.FileDeleted}, "H ita.txt"},
+		{"nested", "dir/sub/ita.txt", "", worktree.FileEntry{Kind: worktree.FileDeleted}, "H dir/sub/ita.txt"},
+		{"assume-unchanged", "au.txt", "--assume-unchanged", worktree.FileEntry{Kind: worktree.FileDeleted, AssumeUnchanged: true}, "h au.txt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			rt := newRoundTrip(t, f, f.GitClone(filepath.Join(f.Root, "src")), f.GitClone(filepath.Join(f.Root, "recv")))
+			dir, name := filepath.Split(filepath.FromSlash(tt.path))
+			if err := os.MkdirAll(filepath.Join(rt.src, dir), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			f.WriteFile(filepath.Join(rt.src, dir), name, "about to vanish\n")
+			f.RunGit(rt.src, "add", "-N", tt.path)
+			if tt.flag != "" {
+				f.RunGit(rt.src, "update-index", tt.flag, tt.path)
+			}
+			if err := os.RemoveAll(filepath.Join(rt.src, strings.Split(tt.path, "/")[0])); err != nil {
+				t.Fatal(err)
+			}
+
+			snap, want := rt.tick()
+			if !snap.Complete || !slices.Equal(snap.IntentToAdd, []string{tt.path}) {
+				t.Fatalf("complete=%v intent-to-add %v, want [%s]", snap.Complete, snap.IntentToAdd, tt.path)
+			}
+			i := slices.IndexFunc(snap.Files, func(e worktree.FileEntry) bool { return e.Path == tt.path })
+			if i < 0 {
+				t.Fatalf("no file entry for %s in %v", tt.path, filePaths(snap))
+			}
+			if got := snap.Files[i]; got.Kind != tt.entry.Kind || got.AssumeUnchanged != tt.entry.AssumeUnchanged || got.SkipWorktree != tt.entry.SkipWorktree {
+				t.Fatalf("%s captured as %+v, want %+v", tt.path, snap.Files[i], tt.entry)
+			}
+
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "restored")})
+			rt.assertRestored(snap, r, want)
+			if f.FileExists(r.Path, tt.path) {
+				t.Fatalf("restored worktree still holds the intent-to-add placeholder %s", tt.path)
+			}
+			if flags := strings.Split(rt.git(r.Path, "ls-files", "-v"), "\n"); !slices.Contains(flags, tt.index) {
+				t.Fatalf("restored index %q lacks %q", flags, tt.index)
+			}
+			if src, got := rt.git(rt.src, "diff", "--name-status", "--ita-visible-in-index"), rt.git(r.Path, "diff", "--name-status", "--ita-visible-in-index"); src != got {
+				t.Fatalf("intent-to-add view differs:\nsource   %q\nrestored %q", src, got)
+			}
+		})
+	}
 }

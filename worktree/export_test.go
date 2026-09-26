@@ -25,9 +25,10 @@ const (
 )
 
 var (
-	ListRefs    = listRefs
-	Folding     = folding
-	SnapshotKey = snapshotKey
+	CheckGitVersion = checkGitVersion
+	ListRefs        = listRefs
+	Folding         = folding
+	SnapshotKey     = snapshotKey
 )
 
 func (s *Store) MirrorDir(origin string) string {
