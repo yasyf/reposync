@@ -27,7 +27,8 @@ func TestLoad(t *testing.T) {
 			name: "tracked local-only and tombstoned repos are filtered and sorted",
 			seed: func(t *testing.T) Registry {
 				defaultLocation := filepath.Join(t.TempDir(), "repos")
-				seedState(t, defaultLocation,
+				seedState(
+					t, defaultLocation,
 					state.Repo{Relpath: "zeta", Origin: "https://example.com/zeta.git", Trunk: "main", NoEnvSync: true},
 					state.Repo{Relpath: "alpha", Trunk: "trunk", LocalOnly: true},
 					state.Repo{Relpath: "middle", Origin: "https://example.com/middle.git", Trunk: "master"},

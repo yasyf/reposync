@@ -132,7 +132,8 @@ func FilterOverrideEnv(ctx context.Context, dir string) ([]string, error) {
 	}
 	pairs := make([][2]string, 0, 3*len(drivers))
 	for _, d := range drivers {
-		pairs = append(pairs,
+		pairs = append(
+			pairs,
 			[2]string{"filter." + d + ".clean", ""},
 			[2]string{"filter." + d + ".process", ""},
 			[2]string{"filter." + d + ".required", "false"},

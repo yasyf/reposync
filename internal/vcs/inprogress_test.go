@@ -306,10 +306,6 @@ func create(t *testing.T, path string, dir bool) {
 	}
 }
 
-// TestOpInProgressLinkedWorktree proves a linked worktree (whose .git is a
-// pointer file) and a secondary jj workspace (whose .jj/repo is a pointer file)
-// probe without ENOTDIR: per-worktree markers come from the worktree's own
-// admin dir, shared markers from the common dir and the jj repo dir.
 func TestOpInProgressLinkedWorktree(t *testing.T) {
 	f := vcstest.New(t)
 	main := f.JJClone(filepath.Join(f.Root, "main"))
@@ -354,8 +350,6 @@ func TestOpInProgressLinkedWorktree(t *testing.T) {
 	}
 }
 
-// TestOpStateLockFlag proves OpState separates lock files a live command holds
-// (lock=true: retry) from multi-step operation state (lock=false: defer).
 func TestOpStateLockFlag(t *testing.T) {
 	f := vcstest.New(t)
 	main := f.JJClone(filepath.Join(f.Root, "main"))

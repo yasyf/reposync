@@ -245,7 +245,8 @@ func markerDirs(gitDir, commonDir, jjDir string) ([]markerDir, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(dirs,
+	return append(
+		dirs,
 		markerDir{dir: jjDir, markers: jjWorkspaceMarkers, probeFlock: true},
 		markerDir{dir: repoDir, markers: jjRepoMarkers, probeFlock: true},
 	), nil

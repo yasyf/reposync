@@ -136,10 +136,6 @@ func TestReadOnlyGitEnv(t *testing.T) {
 	}
 }
 
-// TestFilterOverrideEnv proves the override blanks every configured clean and
-// process driver (dotted driver names included) and marks it not required: a
-// status read over a filtered path never runs the sentinel-writing filter, yet
-// still reports the raw-byte difference.
 func TestFilterOverrideEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "none"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
