@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yasyf/reposync/internal/vcs/vcstest"
 	"github.com/yasyf/reposync/worktree"
@@ -179,21 +180,48 @@ func TestCachedBlobIsReclassified(t *testing.T) {
 }
 
 func TestCaptureStagedLFSAttributeRemovalKeepsRawBytes(t *testing.T) {
-	f := vcstest.New(t)
-	f.EnableLFS("*.bin")
-	f.AdvanceOriginPath("base.bin", lfsBase)
-	rt := newRoundTrip(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
-	f.WriteFile(rt.src, ".gitattributes", datAttrs)
-	f.RunGit(rt.src, "add", ".gitattributes")
-
-	snap, want := rt.tick()
-	if got, ok := fileEntry(snap, "base.bin"); !ok || got.Kind != worktree.FileRegular {
-		t.Fatalf("base.bin %+v (present %v), want its raw bytes captured", got, ok)
+	past := time.Now().Add(-time.Hour)
+	tests := []struct {
+		name  string
+		mtime time.Time
+	}{
+		{"stat clean", past},
+		{"stat changed", time.Now().Add(time.Hour)},
 	}
-	r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
-	rt.assertRestored(snap, r, want)
-	if got := f.ReadFile(r.Path, "base.bin"); got != lfsBase {
-		t.Fatalf("restored base.bin %q, want %q", got, lfsBase)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			f.EnableLFS("*.bin")
+			f.AdvanceOriginPath("base.bin", lfsBase)
+			rt := newRoundTrip(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+			asset := filepath.Join(rt.src, "base.bin")
+			if err := os.Chtimes(asset, past, past); err != nil {
+				t.Fatal(err)
+			}
+			f.RunGit(rt.src, "update-index", "--refresh")
+			f.WriteFile(rt.src, ".gitattributes", datAttrs)
+			f.RunGit(rt.src, "add", ".gitattributes")
+			if err := os.Chtimes(asset, tt.mtime, tt.mtime); err != nil {
+				t.Fatal(err)
+			}
+
+			snap, want := rt.tick()
+			if got, ok := fileEntry(snap, "base.bin"); !ok || got.Kind != worktree.FileRegular {
+				t.Fatalf("base.bin %+v (present %v), want its raw bytes captured", got, ok)
+			}
+			// git status trusts a stat-clean entry across an attribute change; a
+			// fresh mtime makes the source's status re-read base.bin like the receiver's.
+			touched := time.Now().Add(2 * time.Hour)
+			if err := os.Chtimes(asset, touched, touched); err != nil {
+				t.Fatal(err)
+			}
+			want.status = rt.status(rt.src)
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+			rt.assertRestored(snap, r, want)
+			if got := f.ReadFile(r.Path, "base.bin"); got != lfsBase {
+				t.Fatalf("restored base.bin %q, want %q", got, lfsBase)
+			}
+		})
 	}
 }
 

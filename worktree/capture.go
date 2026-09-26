@@ -255,10 +255,11 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lfsRefs, err := c.attributeLFS(ctx, status, files, snap.Head)
+	lfsRefs, stale, err := c.attributeLFS(ctx, status, files, snap.Head)
 	if err != nil {
 		return Snapshot{}, err
 	}
+	files = append(files, stale...)
 	if snap.Head.Ahead > 0 {
 		history, err := c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip)
 		if err != nil {
@@ -606,10 +607,10 @@ func (c *capture) unpublishedLFS(ctx context.Context, trunkBase string, refs []L
 	return unpublished, nil
 }
 
-func (c *capture) attributeLFS(ctx context.Context, status statusReport, files []fileCandidate, head Head) ([]LFSObjectRef, error) {
+func (c *capture) attributeLFS(ctx context.Context, status statusReport, files []fileCandidate, head Head) ([]LFSObjectRef, []fileCandidate, error) {
 	var committed bytes.Buffer
 	if err := c.src.run(ctx, nil, &committed, "diff-tree", "-r", "--name-only", "-z", "--no-renames", head.TrunkBase, head.Commit, "--", ":(glob)**/.gitattributes"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	changed := strings.Split(strings.TrimSuffix(committed.String(), "\x00"), "\x00")
 	for _, e := range status.changed {
@@ -626,45 +627,62 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		}
 	}
 	if len(dirs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var listed bytes.Buffer
 	if err := c.src.run(ctx, nil, &listed, append([]string{"--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"}, dirs...)...); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var paths []string
-	oids := map[string]string{}
+	staged := map[string]stagedBlob{}
 	for _, b := range stagedBlobs(listed.String()) {
 		paths = append(paths, b.path)
-		oids[b.path] = b.oid
+		staged[b.path] = b
 	}
 	before, err := c.src.filterAttr(ctx, paths, "--source="+head.TrunkBase)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	after, _, err := c.lfsAttrs(ctx, head.Commit, paths)
+	after, current, err := c.lfsAttrs(ctx, head.Commit, paths)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var transitioned, blobs []string
+	reported := map[string]bool{}
+	for _, e := range status.changed {
+		reported[e.path] = true
+	}
+	for _, f := range files {
+		reported[f.path] = true
+	}
+	var transitioned, reclassified, blobs []string
 	for _, p := range paths {
 		if after[p] == lfsFilter && before[p] != lfsFilter {
 			transitioned = append(transitioned, p)
-			blobs = append(blobs, oids[p])
+			blobs = append(blobs, staged[p].oid)
+		}
+		if after[p] == lfsFilter && current[p] != lfsFilter && !reported[p] && !staged[p].skipWorktree {
+			reclassified = append(reclassified, p)
+			blobs = append(blobs, staged[p].oid)
 		}
 	}
 	slices.Sort(blobs)
 	pointers, err := c.src.readPointers(ctx, slices.Compact(blobs))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var refs []LFSObjectRef
 	for _, p := range transitioned {
-		if ptr, ok := pointers[oids[p]]; ok {
+		if ptr, ok := pointers[staged[p].oid]; ok {
 			refs = append(refs, LFSObjectRef{Path: p, OID: ptr.OID, Size: ptr.Size})
 		}
 	}
-	return refs, nil
+	var stale []fileCandidate
+	for _, p := range reclassified {
+		if _, ok := pointers[staged[p].oid]; ok {
+			stale = append(stale, fileCandidate{path: p, hidden: true, indexMode: staged[p].mode, indexOID: staged[p].oid})
+		}
+	}
+	return refs, stale, nil
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {

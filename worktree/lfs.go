@@ -120,8 +120,8 @@ func (s source) readPointers(ctx context.Context, oids []string) (map[string]lfs
 }
 
 type stagedBlob struct {
-	path, oid    string
-	skipWorktree bool
+	path, mode, oid string
+	skipWorktree    bool
 }
 
 func stagedBlobs(listing string) []stagedBlob {
@@ -132,7 +132,7 @@ func stagedBlobs(listing string) []stagedBlob {
 		if !ok || len(f) != 4 || (f[1] != "100644" && f[1] != "100755") {
 			continue
 		}
-		blobs = append(blobs, stagedBlob{path: p, oid: f[2], skipWorktree: f[0] == "S"})
+		blobs = append(blobs, stagedBlob{path: p, mode: f[1], oid: f[2], skipWorktree: f[0] == "S"})
 	}
 	return blobs
 }
