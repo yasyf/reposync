@@ -103,7 +103,7 @@ func (c TestSource) Capture() Snapshot {
 			snap.Files = append(snap.Files, c.fileEntry(e.path, false))
 		}
 		if e.y == 'A' {
-			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+			snap.IntentToAdd = append(snap.IntentToAdd, IntentToAdd{Path: e.path, Mode: e.modeWorktree})
 		}
 	}
 	for _, p := range st.untracked {

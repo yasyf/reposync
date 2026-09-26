@@ -93,30 +93,46 @@ func (s source) filterAttr(ctx context.Context, paths []string, opts ...string) 
 	return attrs, nil
 }
 
-func (s source) intentToAdd(ctx context.Context) (map[string]bool, error) {
-	added := func(visibility string) (map[string]bool, error) {
+func (s source) intentToAdd(ctx context.Context) (map[string]string, error) {
+	cached := func(visibility string) (map[string]string, error) {
 		var out bytes.Buffer
-		if err := s.run(ctx, nil, &out, "diff-index", "--cached", "--name-only", "--diff-filter=A", "-z", visibility, "HEAD"); err != nil {
+		if err := s.run(ctx, nil, &out, "diff-index", "--cached", "--raw", "--no-abbrev", "--no-renames", "-z", visibility, "HEAD"); err != nil {
 			return nil, err
 		}
-		paths := map[string]bool{}
-		for p := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
-			if p != "" {
-				paths[p] = true
-			}
+		records := map[string]string{}
+		if out.Len() == 0 {
+			return records, nil
 		}
-		return paths, nil
+		tokens := strings.Split(strings.TrimSuffix(out.String(), "\x00"), "\x00")
+		if len(tokens)%2 != 0 {
+			return nil, fmt.Errorf("diff-index output has %d fields", len(tokens))
+		}
+		for i := 0; i < len(tokens); i += 2 {
+			if f := strings.Fields(tokens[i]); len(f) != 5 || !strings.HasPrefix(f[0], ":") {
+				return nil, fmt.Errorf("diff-index record %q", tokens[i])
+			}
+			records[tokens[i+1]] = tokens[i]
+		}
+		return records, nil
 	}
-	ita, err := added("--ita-visible-in-index")
+	visible, err := cached("--ita-visible-in-index")
 	if err != nil {
 		return nil, err
 	}
-	staged, err := added("--ita-invisible-in-index")
+	invisible, err := cached("--ita-invisible-in-index")
 	if err != nil {
 		return nil, err
 	}
-	for p := range staged {
-		delete(ita, p)
+	ita := map[string]string{}
+	for p, rec := range visible {
+		if invisible[p] != rec {
+			ita[p] = strings.Fields(rec)[1]
+		}
+	}
+	for p, rec := range invisible {
+		if _, ok := visible[p]; !ok {
+			ita[p] = strings.TrimPrefix(strings.Fields(rec)[0], ":")
+		}
 	}
 	return ita, nil
 }

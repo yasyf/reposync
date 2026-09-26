@@ -319,7 +319,7 @@ func TestRoundTripWIPMatrix(t *testing.T) {
 	if !second.Complete || second.Head.Ahead != 2 || len(second.History) != 2 || second.History[0].Tip != first.History[0].Tip || second.History[0].Artifact != first.History[0].Artifact {
 		t.Fatalf("second tick: complete=%v head %+v history %+v, want the first link reused", second.Complete, second.Head, second.History)
 	}
-	if !slices.Equal(second.IntentToAdd, []string{"ita.txt"}) {
+	if !slices.Equal(itaPaths(second), []string{"ita.txt"}) {
 		t.Fatalf("intent to add %v", second.IntentToAdd)
 	}
 	if e, ok := fileEntry(second, "big.dat"); !ok || !e.Untracked || e.Content.Size != int64(len(big)) {

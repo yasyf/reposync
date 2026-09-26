@@ -197,8 +197,10 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 		return Restored{}, err
 	}
 	ita := map[string]bool{}
-	for _, p := range snap.IntentToAdd {
-		ita[p] = true
+	var itaPaths []string
+	for _, e := range snap.IntentToAdd {
+		ita[e.Path] = true
+		itaPaths = append(itaPaths, e.Path)
 	}
 	var files, placeholders []FileEntry
 	for _, f := range snap.Files {
@@ -211,7 +213,7 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 	if err := applyFiles(ctx, dest, src, files); err != nil {
 		return Restored{}, err
 	}
-	if err := markIntentToAdd(ctx, dest, src, snap.IntentToAdd, placeholders); err != nil {
+	if err := markIntentToAdd(ctx, dest, src, itaPaths, placeholders); err != nil {
 		return Restored{}, err
 	}
 	if err := applyFlags(ctx, dest, snap.Files); err != nil {

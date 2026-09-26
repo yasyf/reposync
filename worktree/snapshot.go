@@ -61,8 +61,9 @@ type Snapshot struct {
 	// Index is the HEAD→index delta, sorted by path.
 	Index []IndexEntry `json:"index,omitempty"`
 	// Files is the index→worktree delta including untracked files, sorted by path.
-	Files       []FileEntry `json:"files,omitempty"`
-	IntentToAdd []string    `json:"intent_to_add,omitempty"`
+	Files []FileEntry `json:"files,omitempty"`
+	// IntentToAdd are the intent-to-add index entries, sorted by path.
+	IntentToAdd []IntentToAdd `json:"intent_to_add,omitempty"`
 	// LFSObjects are the shipped LFS objects, sorted by oid.
 	LFSObjects []LFSObject `json:"lfs_objects,omitempty"`
 	// LFS is set when the repository uses git-lfs.
@@ -101,6 +102,13 @@ type IndexEntry struct {
 	Mode string       `json:"mode"`
 	OID  string       `json:"oid,omitempty"`
 	Blob *ArtifactRef `json:"blob,omitempty"`
+}
+
+// IntentToAdd is one intent-to-add index entry. Mode is its index mode, never
+// the worktree's: a deleted, hidden, or sparse intent-to-add path keeps it.
+type IntentToAdd struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
 }
 
 // FileEntry is one worktree path whose state differs from the index.
@@ -336,12 +344,15 @@ func (s Snapshot) check() error {
 			return err
 		}
 	}
-	if err := sortedUnique("intent_to_add", s.IntentToAdd, func(p string) string { return p }); err != nil {
+	if err := sortedUnique("intent_to_add", s.IntentToAdd, func(e IntentToAdd) string { return e.Path }); err != nil {
 		return err
 	}
-	for _, p := range s.IntentToAdd {
-		if err := checkPath(p); err != nil {
-			return fmt.Errorf("intent_to_add: %w", err)
+	for i, e := range s.IntentToAdd {
+		if err := checkPath(e.Path); err != nil {
+			return fmt.Errorf("intent_to_add[%d]: %w", i, err)
+		}
+		if !blobModes[e.Mode] {
+			return fmt.Errorf("intent_to_add[%d] %q: mode %q", i, e.Path, e.Mode)
 		}
 	}
 	if s.Complete != (len(s.Omitted) == 0) {

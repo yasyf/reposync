@@ -152,7 +152,7 @@ type capture struct {
 	remaining []string
 	missing   []LFSObjectRef
 	omitted   []Omission
-	ita       map[string]bool
+	ita       map[string]string
 }
 
 type fileCandidate struct {
@@ -247,11 +247,11 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 		}
 		files = append(files, hidden...)
 	}
-	attrs, err := c.lfsAttrs(ctx, snap.Head.Commit, changedPaths(snap.Index, files))
+	attrs, current, err := c.lfsAttrs(ctx, snap.Head.Commit, changedPaths(snap.Index, files))
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lfsRefs, err := c.attributeLFS(ctx, status, snap.Head)
+	lfsRefs, err := c.attributeLFS(ctx, status, files, snap.Head)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -266,7 +266,10 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lfsRefs = append(lfsRefs, staged...)
+	lfsRefs, err = c.unpublishedLFS(ctx, snap.Head.TrunkBase, append(lfsRefs, staged...))
+	if err != nil {
+		return Snapshot{}, err
+	}
 	_, lfsClean := cfg["filter.lfs.clean"]
 	_, lfsProcess := cfg["filter.lfs.process"]
 	if lfsClean || lfsProcess || len(lfsRefs) > 0 || slices.Contains(slices.Collect(maps.Values(attrs)), lfsFilter) {
@@ -279,7 +282,7 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	entries, err := c.captureFiles(ctx, files, attrs, fileMode)
+	entries, err := c.captureFiles(ctx, files, current, fileMode)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -488,27 +491,35 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 			c.omitted = append(c.omitted, Omission{Path: e.path, Reason: OmitSubmodule})
 			continue
 		}
+		var ita *IntentToAdd
+		if c.wt.Kind != KindJJWorkspace && (e.x != '.' || e.y == 'D') {
+			var err error
+			if ita, err = c.intentToAdd(ctx, e.path, e.oidIndex); err != nil {
+				return nil, err
+			}
+		}
 		if e.x != '.' && c.wt.Kind != KindJJWorkspace {
 			entry := IndexEntry{Path: e.path, Mode: e.modeIndex, OID: e.oidIndex}
-			if e.modeIndex == "000000" {
+			if e.modeIndex == "000000" || ita != nil {
 				entry.Mode, entry.OID = "", ""
 			}
 			snap.Index = append(snap.Index, entry)
 		}
 		switch e.y {
 		case 'D':
-			if c.wt.Kind != KindJJWorkspace && e.x == '.' {
-				ita, err := c.intentToAdd(ctx, e.path, e.oidIndex)
-				if err != nil {
-					return nil, err
-				}
-				if ita {
-					snap.IntentToAdd = append(snap.IntentToAdd, e.path)
-				}
+			if ita != nil {
+				snap.IntentToAdd = append(snap.IntentToAdd, *ita)
 			}
 			snap.Files = append(snap.Files, FileEntry{Path: e.path, Kind: FileDeleted})
 		case 'A':
-			snap.IntentToAdd = append(snap.IntentToAdd, e.path)
+			ita, err := c.intentToAdd(ctx, e.path, c.blobOID(nil))
+			if err != nil {
+				return nil, err
+			}
+			if ita == nil {
+				return nil, fmt.Errorf("status reports %s intent-to-add but the index does not", e.path)
+			}
+			snap.IntentToAdd = append(snap.IntentToAdd, *ita)
 			files = append(files, fileCandidate{path: e.path, indexMode: e.modeIndex, indexOID: e.oidIndex})
 		case 'M', 'T':
 			files = append(files, fileCandidate{path: e.path, indexMode: e.modeIndex, indexOID: e.oidIndex})
@@ -538,23 +549,60 @@ func changedPaths(index []IndexEntry, files []fileCandidate) []string {
 	return slices.Compact(paths)
 }
 
-func (c *capture) lfsAttrs(ctx context.Context, head string, paths []string) (map[string]string, error) {
-	attrs := map[string]string{}
-	for _, opts := range [][]string{nil, {"--cached"}, {"--source=" + head}} {
+func (c *capture) lfsAttrs(ctx context.Context, head string, paths []string) (union, current map[string]string, err error) {
+	union, current = map[string]string{}, map[string]string{}
+	for i, opts := range [][]string{nil, {"--cached"}, {"--source=" + head}} {
 		got, err := c.src.filterAttr(ctx, paths, opts...)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for p, v := range got {
-			if v == lfsFilter {
-				attrs[p] = lfsFilter
+			if v != lfsFilter {
+				continue
+			}
+			union[p] = lfsFilter
+			if i == 0 {
+				current[p] = lfsFilter
 			}
 		}
 	}
-	return attrs, nil
+	return union, current, nil
 }
 
-func (c *capture) attributeLFS(ctx context.Context, status statusReport, head Head) ([]LFSObjectRef, error) {
+func (c *capture) unpublishedLFS(ctx context.Context, trunkBase string, refs []LFSObjectRef) ([]LFSObjectRef, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	var out bytes.Buffer
+	if err := c.src.run(ctx, nil, &out, "ls-tree", "-r", "-z", "--format=%(objectname) %(path)", trunkBase); err != nil {
+		return nil, err
+	}
+	trunkPaths := map[string][]string{}
+	for rec := range strings.SplitSeq(strings.TrimSuffix(out.String(), "\x00"), "\x00") {
+		oid, path, _ := strings.Cut(rec, " ")
+		trunkPaths[oid] = append(trunkPaths[oid], path)
+	}
+	pointerBlobs := make([]string, len(refs))
+	var candidates []string
+	for i, r := range refs {
+		pointerBlobs[i] = c.blobOID(fmt.Appendf(nil, "%s\noid sha256:%s\nsize %d\n", lfsSpecLine, r.OID, r.Size))
+		candidates = append(candidates, trunkPaths[pointerBlobs[i]]...)
+	}
+	slices.Sort(candidates)
+	attrs, err := c.src.filterAttr(ctx, slices.Compact(candidates), "--source="+trunkBase)
+	if err != nil {
+		return nil, err
+	}
+	var unpublished []LFSObjectRef
+	for i, r := range refs {
+		if !slices.ContainsFunc(trunkPaths[pointerBlobs[i]], func(p string) bool { return attrs[p] == lfsFilter }) {
+			unpublished = append(unpublished, r)
+		}
+	}
+	return unpublished, nil
+}
+
+func (c *capture) attributeLFS(ctx context.Context, status statusReport, files []fileCandidate, head Head) ([]LFSObjectRef, error) {
 	var committed bytes.Buffer
 	if err := c.src.run(ctx, nil, &committed, "diff-tree", "-r", "--name-only", "-z", "--no-renames", head.TrunkBase, head.Commit, "--", ":(glob)**/.gitattributes"); err != nil {
 		return nil, err
@@ -564,6 +612,9 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, head He
 		changed = append(changed, e.path)
 	}
 	changed = append(changed, status.untracked...)
+	for _, f := range files {
+		changed = append(changed, f.path)
+	}
 	var dirs []string
 	for _, p := range changed {
 		if filepath.Base(p) == ".gitattributes" {
@@ -587,7 +638,7 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, head He
 	if err != nil {
 		return nil, err
 	}
-	after, err := c.lfsAttrs(ctx, head.Commit, paths)
+	after, _, err := c.lfsAttrs(ctx, head.Commit, paths)
 	if err != nil {
 		return nil, err
 	}
@@ -1123,7 +1174,7 @@ func sparseExceptions(ctx context.Context, dir string, env []string, skipped map
 func sortSnapshot(snap *Snapshot, omitted []Omission) {
 	slices.SortFunc(snap.Index, func(a, b IndexEntry) int { return strings.Compare(a.Path, b.Path) })
 	slices.SortFunc(snap.Files, func(a, b FileEntry) int { return strings.Compare(a.Path, b.Path) })
-	slices.Sort(snap.IntentToAdd)
+	slices.SortFunc(snap.IntentToAdd, func(a, b IntentToAdd) int { return strings.Compare(a.Path, b.Path) })
 	slices.SortFunc(omitted, func(a, b Omission) int { return strings.Compare(a.Path, b.Path) })
 	snap.Omitted = slices.CompactFunc(omitted, func(a, b Omission) bool { return a.Path == b.Path })
 	snap.Complete = len(snap.Omitted) == 0
