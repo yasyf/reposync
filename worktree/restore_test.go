@@ -367,7 +367,7 @@ func TestRestoreLFSWithoutNetwork(t *testing.T) {
 			gated := 0
 			r, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest, Fresh: true, FetchLFS: func(ctx context.Context, fetch func(context.Context) error) error {
 				gated++
-				if got := h.f.ReadFile(dest, "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
+				if got := h.f.ReadFile(h.staged(dest), "other.bin"); !strings.HasPrefix(got, "version https://git-lfs.github.com/spec/v1") {
 					t.Errorf("other.bin at the fetch gate = %q, want the checked-out pointer", got)
 				}
 				return tt.gate(ctx, fetch)
