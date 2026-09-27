@@ -27,7 +27,8 @@ func TestLoad(t *testing.T) {
 			name: "tracked local-only and tombstoned repos are filtered and sorted",
 			seed: func(t *testing.T) Registry {
 				defaultLocation := filepath.Join(t.TempDir(), "repos")
-				seedState(t, defaultLocation,
+				seedState(
+					t, defaultLocation,
 					state.Repo{Relpath: "zeta", Origin: "https://example.com/zeta.git", Trunk: "main", NoEnvSync: true},
 					state.Repo{Relpath: "alpha", Trunk: "trunk", LocalOnly: true},
 					state.Repo{Relpath: "middle", Origin: "https://example.com/middle.git", Trunk: "master"},
@@ -147,5 +148,33 @@ func removeRepo(t *testing.T, relpath string) {
 	})
 	if err != nil {
 		t.Fatalf("remove repo: %v", err)
+	}
+}
+
+func TestByOrigin(t *testing.T) {
+	reg := Registry{Repos: []Repo{
+		{Relpath: "alpha", Origin: "https://example.com/shared.git", LocalOnly: true},
+		{Relpath: "beta", Origin: "https://example.com/shared.git"},
+		{Relpath: "gamma", Origin: "https://example.com/gamma.git"},
+		{Relpath: "scratch"},
+	}}
+	tests := []struct {
+		name   string
+		origin string
+		want   string
+		ok     bool
+	}{
+		{"propagating entry wins over a local-only one", "https://example.com/shared.git", "beta", true},
+		{"single propagating entry", "https://example.com/gamma.git", "gamma", true},
+		{"unknown origin", "https://example.com/missing.git", "", false},
+		{"empty origin never matches an originless entry", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := reg.ByOrigin(tc.origin)
+			if ok != tc.ok || got.Relpath != tc.want {
+				t.Fatalf("ByOrigin(%q) = (%q, %v), want (%q, %v)", tc.origin, got.Relpath, ok, tc.want, tc.ok)
+			}
+		})
 	}
 }

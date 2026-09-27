@@ -36,6 +36,7 @@ func TestOpInProgress(t *testing.T) {
 		{"git cherry-pick head", filepath.Join(".git", "CHERRY_PICK_HEAD"), false, "cherry-pick in progress"},
 		{"git revert head", filepath.Join(".git", "REVERT_HEAD"), false, "revert in progress"},
 		{"git bisect log", filepath.Join(".git", "BISECT_LOG"), false, "bisect in progress"},
+		{"git sequencer dir", filepath.Join(".git", "sequencer"), true, "sequencer in progress"},
 		{"jj working copy lock", filepath.Join(".jj", "working_copy", "working_copy.lock"), false, "jj operation in progress"},
 		{"jj git import lock", filepath.Join(".jj", "repo", "git_import_export.lock"), false, "jj importing git refs"},
 	}
@@ -302,5 +303,90 @@ func create(t *testing.T, path string, dir bool) {
 	}
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatalf("write marker: %v", err)
+	}
+}
+
+func TestOpInProgressLinkedWorktree(t *testing.T) {
+	f := vcstest.New(t)
+	main := f.JJClone(filepath.Join(f.Root, "main"))
+	linked := f.LinkedWorktree(main, filepath.Join(f.Root, "linked"), "feature")
+	ws := f.JJWorkspace(main, filepath.Join(f.Root, "ws"), "second")
+	linkedAdmin := filepath.Join(main, ".git", "worktrees", "linked")
+
+	tests := []struct {
+		name   string
+		marker string
+		dir    bool
+		probe  string
+		reason string
+	}{
+		{"linked idle", "", false, linked, ""},
+		{"main index lock is not the linked worktree's", filepath.Join(main, ".git", "index.lock"), false, linked, ""},
+		{"linked index lock", filepath.Join(linkedAdmin, "index.lock"), false, linked, "git index locked"},
+		{"linked sequencer", filepath.Join(linkedAdmin, "sequencer"), true, linked, "sequencer in progress"},
+		{"common packed-refs lock", filepath.Join(main, ".git", "packed-refs.lock"), false, linked, "git refs locked"},
+		{"jj workspace idle", "", false, ws, ""},
+		{"jj workspace working copy lock", filepath.Join(ws, ".jj", "working_copy", "working_copy.lock"), false, ws, "jj operation in progress"},
+		{"jj repo import lock seen from workspace", filepath.Join(main, ".jj", "repo", "git_import_export.lock"), false, ws, "jj importing git refs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.marker != "" {
+				create(t, tc.marker, tc.dir)
+				t.Cleanup(func() {
+					if err := os.RemoveAll(tc.marker); err != nil {
+						t.Fatalf("remove marker: %v", err)
+					}
+				})
+			}
+			reason, err := OpInProgress(tc.probe)
+			if err != nil {
+				t.Fatalf("OpInProgress: %v", err)
+			}
+			if reason != tc.reason {
+				t.Fatalf("OpInProgress = %q, want %q", reason, tc.reason)
+			}
+		})
+	}
+}
+
+func TestOpStateLockFlag(t *testing.T) {
+	f := vcstest.New(t)
+	main := f.JJClone(filepath.Join(f.Root, "main"))
+	gitDir := filepath.Join(main, ".git")
+	jjDir := filepath.Join(main, ".jj")
+
+	tests := []struct {
+		name   string
+		marker string
+		dir    bool
+		reason string
+		lock   bool
+	}{
+		{"index lock", filepath.Join(gitDir, "index.lock"), false, "git index locked", true},
+		{"packed-refs lock", filepath.Join(gitDir, "packed-refs.lock"), false, "git refs locked", true},
+		{"merge head", filepath.Join(gitDir, "MERGE_HEAD"), false, "merge in progress", false},
+		{"sequencer", filepath.Join(gitDir, "sequencer"), true, "sequencer in progress", false},
+		{"jj working copy lock", filepath.Join(jjDir, "working_copy", "working_copy.lock"), false, "jj operation in progress", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			create(t, tc.marker, tc.dir)
+			defer func() {
+				if err := os.RemoveAll(tc.marker); err != nil {
+					t.Fatalf("remove marker: %v", err)
+				}
+			}()
+			reason, lock, err := OpState(gitDir, gitDir, jjDir)
+			if err != nil {
+				t.Fatalf("OpState: %v", err)
+			}
+			if reason != tc.reason || lock != tc.lock {
+				t.Fatalf("OpState = (%q, %v), want (%q, %v)", reason, lock, tc.reason, tc.lock)
+			}
+		})
+	}
+	if reason, lock, err := OpState("", "", ""); err != nil || reason != "" || lock {
+		t.Fatalf("OpState with no dirs = (%q, %v, %v), want idle", reason, lock, err)
 	}
 }

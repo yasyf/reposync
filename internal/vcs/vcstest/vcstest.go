@@ -5,6 +5,9 @@ package vcstest
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -300,4 +303,150 @@ func (f *Fixture) FileExists(dir, name string) bool {
 	f.t.Helper()
 	_, err := os.Stat(filepath.Join(dir, name))
 	return err == nil
+}
+
+// TreeEntry is one path of a SnapshotTree: its full mode and, for a regular
+// file, the hex sha256 of its bytes or, for a symlink, its target.
+type TreeEntry struct {
+	Mode    fs.FileMode
+	Content string
+}
+
+// LinkedWorktree adds a linked git worktree of repo at dest on a new branch, or
+// detached at repo's HEAD when branch is "".
+func (f *Fixture) LinkedWorktree(repo, dest, branch string) string {
+	f.t.Helper()
+	args := []string{"-C", repo, "worktree", "add", "-q"}
+	if branch == "" {
+		args = append(args, "--detach", dest)
+	} else {
+		args = append(args, "-b", branch, dest)
+	}
+	f.RunGit(f.Root, args...)
+	return dest
+}
+
+// JJWorkspace adds a secondary workspace named name of the jj repo at repo,
+// rooted at dest.
+func (f *Fixture) JJWorkspace(repo, dest, name string) string {
+	f.t.Helper()
+	f.RunJJ(repo, "workspace", "add", "--name", name, dest)
+	return dest
+}
+
+// SnapshotTree walks dir without following symlinks and maps every entry's
+// slash-separated relative path to its mode and content, so two snapshots are
+// equal exactly when no byte, mode, symlink target, or entry changed.
+func (f *Fixture) SnapshotTree(dir string) map[string]TreeEntry {
+	f.t.Helper()
+	tree := map[string]TreeEntry{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		entry := TreeEntry{Mode: info.Mode()}
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			entry.Content, err = os.Readlink(path)
+		case info.Mode().IsRegular():
+			entry.Content, err = fileSHA256(path)
+		}
+		if err != nil {
+			return err
+		}
+		tree[filepath.ToSlash(rel)] = entry
+		return nil
+	})
+	if err != nil {
+		f.t.Fatalf("snapshot tree %s: %v", dir, err)
+	}
+	return tree
+}
+
+// RequireLFS skips the test when git-lfs is not installed.
+func RequireLFS(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("git", "lfs", "version").Run(); err != nil {
+		t.Skipf("git-lfs not installed: %v", err)
+	}
+}
+
+// EnableLFS makes git-lfs part of the fixture hermetically and offline. It
+// points the global and system git config away from the user's, so filter
+// drivers come only from a repo-local `git lfs install --local`; installs LFS
+// in the seed clone; and publishes a .lfsconfig naming the bare origin as a
+// file:// LFS remote (git-lfs's standalone file transfer stores objects under
+// <Origin>/lfs/objects) plus .gitattributes lines tracking each pattern with
+// filter=lfs. It returns the LFS remote URL.
+func (f *Fixture) EnableLFS(patterns ...string) string {
+	f.t.Helper()
+	RequireLFS(f.t)
+	global := filepath.Join(f.Root, "gitconfig-global")
+	if err := os.WriteFile(global, nil, 0o600); err != nil {
+		f.t.Fatalf("write global git config: %v", err)
+	}
+	f.t.Setenv("GIT_CONFIG_GLOBAL", global)
+	f.t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	f.InstallLFS(f.Seed)
+	url := "file://" + f.Origin
+	f.WriteFile(f.Seed, ".lfsconfig", "[lfs]\n\turl = "+url+"\n")
+	attrs := ""
+	if f.FileExists(f.Seed, ".gitattributes") {
+		attrs = f.ReadFile(f.Seed, ".gitattributes")
+	}
+	for _, p := range patterns {
+		attrs += p + " filter=lfs diff=lfs merge=lfs -text\n"
+	}
+	f.WriteFile(f.Seed, ".gitattributes", attrs)
+	f.RunGit(f.Seed, "add", ".lfsconfig", ".gitattributes")
+	f.RunGit(f.Seed, "commit", "-qm", "enable lfs")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	return url
+}
+
+// InstallLFS installs the git-lfs filter driver and hooks into dir's repo-local
+// config.
+func (f *Fixture) InstallLFS(dir string) {
+	f.t.Helper()
+	f.RunGit(dir, "lfs", "install", "--local")
+}
+
+// LFSClone makes a plain-git clone of the origin at dest with LFS installed
+// locally and every LFS object pulled from the file:// LFS remote, so LFS
+// paths hold real bytes and status is clean.
+func (f *Fixture) LFSClone(dest string) string {
+	f.t.Helper()
+	f.GitClone(dest)
+	f.InstallLFS(dest)
+	f.RunGit(dest, "lfs", "pull")
+	return dest
+}
+
+// LFSObjectPath is where git-lfs stores the object with the given sha256 oid
+// under a git common dir (or a bare repo).
+func LFSObjectPath(commonDir, oid string) string {
+	return filepath.Join(commonDir, "lfs", "objects", oid[0:2], oid[2:4], oid)
+}
+
+// SHA256 returns the hex sha256 of data, which is also its git-lfs oid.
+func SHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func fileSHA256(path string) (string, error) {
+	//nolint:gosec // G304: test helper hashing a file under a test-controlled temp dir.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return SHA256(data), nil
 }
