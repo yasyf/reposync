@@ -212,7 +212,7 @@ func updateRefs(ctx context.Context, gitArgs []string, lines []string) error {
 	if len(lines) == 0 {
 		return nil
 	}
-	_, err := recvGit(ctx, nil, strings.NewReader(strings.Join(lines, "\n")+"\n"), append(slices.Clone(gitArgs), "update-ref", "--stdin")...)
+	_, err := recvGit(ctx, nil, strings.NewReader(strings.Join(lines, "\n")+"\n"), append(slices.Clone(gitArgs), "update-ref", "--no-deref", "--stdin")...)
 	return err
 }
 

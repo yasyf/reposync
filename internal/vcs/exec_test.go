@@ -133,6 +133,43 @@ func TestRunCancelStopsTheWholeProcessGroup(t *testing.T) {
 	}
 }
 
+func TestRunCancelKillsAStoppedDescendant(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "pid")
+	ready := filepath.Join(dir, "ready")
+	script := "(trap '' TERM HUP; : > " + ready + "; exec sleep 60) & p=$!; while [ ! -e " + ready + " ]; do sleep 0.01; done; kill -STOP $p; echo $p > " + pidFile + "; wait"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := run(ctx, dir, "sh", "-c", script)
+		done <- err
+	}()
+	var pid int
+	for pid == 0 {
+		b, err := os.ReadFile(pidFile) //nolint:gosec // G304: test reads a file from a test-controlled temp dir.
+		if err == nil && strings.HasSuffix(string(b), "\n") {
+			if pid, err = strconv.Atoi(strings.TrimSpace(string(b))); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("run of a canceled command returned nil error")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if time.Now().After(deadline) {
+			t.Fatalf("stopped descendant %d outlived run", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func heartbeat(t *testing.T, path string) int64 {
 	t.Helper()
 	info, err := os.Stat(path)

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yasyf/daemonkit/durable"
@@ -27,6 +28,7 @@ import (
 
 const (
 	lfsCheckoutBatch = 256
+	stagingPrefix    = ".reposync-restore-"
 )
 
 var receiverEnv = []string{"GIT_CONFIG_PARAMETERS='core.hooksPath'='/dev/null' 'core.fsmonitor'='false'", "GIT_NO_LAZY_FETCH=1"}
@@ -112,13 +114,24 @@ type pathState struct {
 // staged index exactly, shipped and locally available LFS objects hydrated,
 // then every worktree file, symlink, deletion, and intent-to-add. Hooks never
 // run. Unless opts.Fresh, an existing recovery checkout of the same source
-// worktree is returned as Reused with no file touched. A Restore that fails or
-// whose ctx is cancelled before it returns removes the worktree, recovery
-// branch, and directories it created, so a retry can reuse opts.Dest; it never
-// removes anything another process created, even at opts.Dest or on the
-// recovery branch's name. It returns *GitVersionError when the host's git
-// predates 2.44.
-func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts RestoreOptions) (Restored, error) {
+// worktree is returned as Reused with no file touched. Restore claims opts.Dest
+// as an empty directory, builds a detached worktree in a private directory
+// beside it, and publishes it by renaming it over the claim, failing with
+// ErrDestinationExists when anything else has appeared there or the claim was
+// replaced. Only a published worktree gets its recovery branch, suffixed past
+// any name another process took in the meantime. A Restore that fails or whose
+// ctx is cancelled before it publishes removes the worktree and directories it
+// created, so a retry can reuse opts.Dest; it never removes anything another
+// process created, moved, or took over, even at opts.Dest, in the staging
+// directory, or on the recovery branch's name. A cancelled Restore's error
+// satisfies errors.Is(err, ctx.Err()). It returns *GitVersionError when the
+// host's git predates 2.44.
+func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts RestoreOptions) (r Restored, err error) {
+	defer func() {
+		if cerr := ctx.Err(); err != nil && cerr != nil && !errors.Is(err, cerr) {
+			err = errors.Join(err, cerr)
+		}
+	}()
 	if !filepath.IsAbs(opts.Dest) {
 		return Restored{}, fmt.Errorf("restore destination %q is not absolute", opts.Dest)
 	}
@@ -156,10 +169,23 @@ func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapsho
 	return m.restore(ctx, snap, src, opts, branch)
 }
 
+type ownedDir struct {
+	path string
+	info fs.FileInfo
+}
+
 type created struct {
-	dirs     []string
-	branch   string
+	nonce    string
+	dirs     []ownedDir
+	stage    string
+	temps    map[string]string
+	tree     ownedDir
+	admin    ownedDir
 	worktree string
+}
+
+func (c *created) reflog() string {
+	return "reposync: restore " + c.nonce
 }
 
 func (c *created) mkdirs(dest string) error {
@@ -173,29 +199,189 @@ func (c *created) mkdirs(dest string) error {
 		err := os.Mkdir(dir, 0o777)
 		switch {
 		case err == nil:
-			c.dirs = append(c.dirs, dir)
+			if err := c.own(dir); err != nil {
+				return err
+			}
 		case !errors.Is(err, fs.ErrExist):
 			return fmt.Errorf("create recovery destination: %w", err)
 		case dir == dest:
 			return fmt.Errorf("%w: %s", ErrDestinationExists, dest)
 		}
 	}
+	staging := filepath.Join(filepath.Dir(dest), stagingPrefix+c.nonce)
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		return fmt.Errorf("create restore staging directory: %w", err)
+	}
+	c.stage = filepath.Join(staging, filepath.Base(dest))
+	return c.own(staging)
+}
+
+func (c *created) own(dir string) error {
+	d, err := claim(dir)
+	if err != nil {
+		return err
+	}
+	c.dirs = append(c.dirs, d)
+	return nil
+}
+
+func claim(dir string) (ownedDir, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return ownedDir{}, fmt.Errorf("stat created directory: %w", err)
+	}
+	return ownedDir{path: dir, info: info}, nil
+}
+
+func (d ownedDir) intact() (bool, error) {
+	info, err := os.Lstat(d.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat created directory: %w", err)
+	}
+	return os.SameFile(info, d.info), nil
+}
+
+func (d ownedDir) remove() error {
+	ok, err := d.intact()
+	if err != nil || !ok {
+		return err
+	}
+	err = os.Remove(d.path)
+	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	return fmt.Errorf("remove created directory: %w", err)
+}
+
+func (c *created) staged() (bool, error) {
+	ok, err := c.tree.intact()
+	if err != nil || !ok {
+		return false, err
+	}
+	return c.admin.intact()
+}
+
+func (c *created) publish(dest string) error {
+	staging, claimed := c.dirs[len(c.dirs)-1], c.dirs[len(c.dirs)-2]
+	ok, err := c.staged()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("staged recovery worktree %s was moved or replaced", c.stage)
+	}
+	if ok, err = claimed.intact(); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w: %s: claim replaced", ErrDestinationExists, dest)
+	}
+	// os.Rename refuses every existing directory; rename(2) atomically replaces
+	// only the empty claim and fails once anything has appeared in it.
+	if err := syscall.Rename(c.stage, dest); err != nil {
+		if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTDIR) {
+			return fmt.Errorf("%w: %s: %w", ErrDestinationExists, dest, err)
+		}
+		return fmt.Errorf("publish recovery worktree at %s: %w", dest, err)
+	}
+	if err := relink(dest, c.admin.path); err != nil {
+		return errors.Join(err, os.Rename(dest, c.stage))
+	}
+	c.worktree = dest
+	return staging.remove()
+}
+
+func (c *created) attach(ctx context.Context, snap Snapshot, want, branch string) (string, error) {
+	for {
+		_, err := recvGit(ctx, nil, strings.NewReader("create refs/heads/"+branch+" "+snap.Head.Commit+"\n"), "-C", c.worktree, "update-ref", "--create-reflog", "-m", c.reflog(), "--stdin")
+		if err == nil {
+			break
+		}
+		next, perr := pickBranch(ctx, c.worktree, snap, want)
+		if perr != nil || next == branch {
+			return "", errors.Join(fmt.Errorf("create recovery branch: %w", err), perr)
+		}
+		branch = next
+	}
+	if _, err := recvGit(ctx, nil, nil, "-C", c.worktree, "symbolic-ref", "-m", c.reflog(), "HEAD", "refs/heads/"+branch); err != nil {
+		return "", fmt.Errorf("check out recovery branch: %w", err)
+	}
+	return branch, nil
+}
+
+func relink(dest, admin string) error {
+	root, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		return fmt.Errorf("resolve recovery worktree: %w", err)
+	}
+	dotGit := filepath.Join(root, ".git")
+	back, err := os.ReadFile(filepath.Join(admin, "gitdir")) //nolint:gosec // G304: the admin dir linkedAdminDir resolved under the checkout's common dir.
+	if err != nil {
+		return fmt.Errorf("read worktree backlink: %w", err)
+	}
+	link := dotGit
+	if !filepath.IsAbs(strings.TrimSpace(string(back))) {
+		if link, err = filepath.Rel(admin, dotGit); err != nil {
+			return fmt.Errorf("relativize worktree backlink: %w", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(admin, "gitdir"), []byte(link+"\n"), 0o600); err != nil {
+		return fmt.Errorf("relink worktree backlink: %w", err)
+	}
+	gitfile, err := os.ReadFile(dotGit) //nolint:gosec // G304: the .git file of the worktree this Restore created.
+	if err != nil {
+		return fmt.Errorf("read worktree gitfile: %w", err)
+	}
+	if filepath.IsAbs(strings.TrimSpace(strings.TrimPrefix(string(gitfile), "gitdir: "))) {
+		return nil
+	}
+	rel, err := filepath.Rel(root, admin)
+	if err != nil {
+		return fmt.Errorf("relativize worktree gitfile: %w", err)
+	}
+	if err := os.WriteFile(dotGit, []byte("gitdir: "+rel+"\n"), 0o600); err != nil {
+		return fmt.Errorf("relink worktree gitfile: %w", err)
+	}
 	return nil
 }
 
 func (m mirror) restore(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch string) (Restored, error) {
-	ns := recoveryPrefix + rand.Text() + "/"
-	var own created
-	r, err := m.materialize(ctx, snap, src, opts, branch, ns, &own)
-	cleanup := context.WithoutCancel(ctx)
-	err = errors.Join(err, updateRefs(cleanup, []string{"-C", m.checkout}, []string{"delete " + ns + "head", "delete " + ns + "index"}))
-	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
-		err = errors.Join(err, cerr)
+	own := created{nonce: rand.Text()}
+	ns := recoveryPrefix + own.nonce + "/"
+	r, err := m.materialize(ctx, snap, src, opts, ns, &own)
+	settled := context.WithoutCancel(ctx)
+	err = errors.Join(err, m.dropTemps(settled, ns, own.temps))
+	if err == nil {
+		err = ctx.Err()
 	}
+	if err == nil {
+		err = own.publish(opts.Dest)
+	}
+	if own.worktree != opts.Dest {
+		return Restored{}, errors.Join(err, m.discard(settled, own))
+	}
+	var berr error
+	r.Branch, berr = own.attach(settled, snap, opts.Branch, branch)
+	return r, errors.Join(err, berr)
+}
+
+func (m mirror) dropTemps(ctx context.Context, ns string, fetched map[string]string) error {
+	out, err := recvGit(ctx, nil, nil, "-C", m.checkout, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ns)
 	if err != nil {
-		return Restored{}, errors.Join(err, m.discard(cleanup, snap.Head.Commit, own))
+		return fmt.Errorf("read temporary refs: %w", err)
 	}
-	return r, nil
+	var del []string
+	for l := range strings.Lines(out) {
+		oid, rest, _ := strings.Cut(strings.TrimSuffix(l, "\n"), " ")
+		ref, symref, _ := strings.Cut(rest, " ")
+		if symref == "" && fetched[ref] == oid {
+			del = append(del, "delete "+ref+" "+oid)
+		}
+	}
+	return updateRefs(ctx, []string{"-C", m.checkout}, del)
 }
 
 func absentParents(dest string) ([]string, error) {
@@ -212,49 +398,59 @@ func absentParents(dest string) ([]string, error) {
 	}
 }
 
-func (m mirror) discard(ctx context.Context, head string, own created) error {
+func (m mirror) discard(ctx context.Context, own created) error {
 	var errs []error
 	if own.worktree != "" {
-		if _, err := recvGit(ctx, nil, nil, "-C", m.checkout, "worktree", "remove", "--force", "--force", own.worktree); err != nil {
-			errs = append(errs, fmt.Errorf("remove recovery worktree: %w", err))
+		ours, err := own.staged()
+		if err != nil {
+			errs = append(errs, err)
 		}
-	}
-	if own.branch != "" {
-		if err := updateRefs(ctx, []string{"-C", m.checkout}, []string{"delete refs/heads/" + own.branch + " " + head}); err != nil {
-			errs = append(errs, fmt.Errorf("delete recovery branch: %w", err))
+		if ours {
+			if _, err := recvGit(ctx, nil, nil, "-C", m.checkout, "worktree", "remove", "--force", "--force", own.worktree); err != nil {
+				errs = append(errs, fmt.Errorf("remove recovery worktree: %w", err))
+			}
 		}
 	}
 	for _, dir := range slices.Backward(own.dirs) {
-		if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("remove created directory: %w", err))
-			break
+		if err := dir.remove(); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch, ns string, own *created) (Restored, error) {
-	dest := opts.Dest
-	if err := own.mkdirs(dest); err != nil {
+func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, ns string, own *created) (Restored, error) {
+	if err := own.mkdirs(opts.Dest); err != nil {
 		return Restored{}, err
 	}
+	dest := own.stage
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
-	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
+	from := snapshotPrefix + snapshotKey(snap) + "/"
+	staged, err := listRefs(ctx, []string{"--git-dir=" + m.dir}, from)
+	if err != nil {
+		return Restored{}, err
+	}
+	own.temps = map[string]string{}
+	for ref, oid := range staged {
+		own.temps[ns+strings.TrimPrefix(ref, from)] = oid
+	}
+	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+from+"*:"+ns+"*"); err != nil {
 		return Restored{}, fmt.Errorf("fetch snapshot into checkout: %w", err)
 	}
-	// A signalled git can exit after creating the branch or worktree, so only
-	// an uncancelled run's exit status says whether this Restore owns them.
-	settled := context.WithoutCancel(ctx)
-	if err := updateRefs(settled, []string{"-C", m.checkout}, []string{"create refs/heads/" + branch + " " + snap.Head.Commit}); err != nil {
-		return Restored{}, fmt.Errorf("create recovery branch: %w", err)
-	}
-	own.branch = branch
-	if _, err := recvGit(settled, skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", dest, branch); err != nil {
+	// A signalled git can exit after creating the worktree, so only an
+	// uncancelled run's exit status says whether this Restore owns it.
+	if _, err := recvGit(context.WithoutCancel(ctx), skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", "--detach", dest, snap.Head.Commit); err != nil {
 		return Restored{}, fmt.Errorf("add recovery worktree: %w", err)
 	}
 	own.worktree = dest
+	if own.tree, err = claim(dest); err != nil {
+		return Restored{}, err
+	}
 	admin, err := linkedAdminDir(dest, m.common)
 	if err != nil {
+		return Restored{}, err
+	}
+	if own.admin, err = claim(admin); err != nil {
 		return Restored{}, err
 	}
 	if err := disableInheritedSparse(ctx, dest, admin); err != nil {
@@ -299,8 +495,7 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 		return Restored{}, err
 	}
 	return Restored{
-		Path:        dest,
-		Branch:      branch,
+		Path:        opts.Dest,
 		Head:        snap.Head.Commit,
 		Applied:     snap.Digest,
 		LFSPending:  pending,
@@ -316,7 +511,7 @@ func (m mirror) sibling(ctx context.Context, snap Snapshot) (Restored, bool, err
 		return Restored{}, false, err
 	}
 	for i, l := range listed {
-		if i == 0 || l.bare || l.prunable {
+		if i == 0 || l.bare || l.prunable || strings.HasPrefix(filepath.Base(filepath.Dir(l.path)), stagingPrefix) {
 			continue
 		}
 		admin, err := linkedAdminDir(l.path, m.common)
