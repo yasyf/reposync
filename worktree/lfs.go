@@ -201,7 +201,7 @@ func (s source) historyLFS(ctx context.Context, head, trunkTip string) ([]LFSObj
 
 func (s source) attributeTransitions(ctx context.Context, commit string, parents, dirs []string) ([]LFSObjectRef, error) {
 	var listed bytes.Buffer
-	if err := s.run(ctx, nil, &listed, append([]string{"ls-tree", "-r", "-z", commit, "--"}, dirs...)...); err != nil {
+	if err := s.run(ctx, nil, &listed, append([]string{"--literal-pathspecs", "ls-tree", "-r", "-z", commit, "--"}, dirs...)...); err != nil {
 		return nil, err
 	}
 	oids := map[string]string{}
