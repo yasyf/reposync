@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -85,6 +87,62 @@ func TestRunCancelSendsSIGTERM(t *testing.T) {
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("sentinel missing: TERM handler never ran (SIGKILL?): %v", err)
 	}
+}
+
+func TestRunCancelStopsTheWholeProcessGroup(t *testing.T) {
+	tests := []struct {
+		name   string
+		leader string
+	}{
+		{name: "leader exits on TERM before its descendant", leader: ""},
+		{name: "leader ignores TERM", leader: "trap '' TERM; "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			beat := filepath.Join(dir, "beat")
+			script := tt.leader + "(trap '' TERM; while :; do printf x >> " + beat + "; sleep 0.02; done) >/dev/null 2>&1 & echo $! > " + filepath.Join(dir, "pid") + "; wait"
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := run(ctx, dir, "sh", "-c", script)
+				done <- err
+			}()
+			t.Cleanup(func() {
+				if b, err := os.ReadFile(filepath.Join(dir, "pid")); err == nil { //nolint:gosec // G304: test reads a file from a test-controlled temp dir.
+					if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+						_ = syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			})
+			for heartbeat(t, beat) == 0 {
+				time.Sleep(10 * time.Millisecond)
+			}
+			cancel()
+			if err := <-done; err == nil {
+				t.Fatal("run of a canceled command returned nil error")
+			}
+			before := heartbeat(t, beat)
+			time.Sleep(200 * time.Millisecond)
+			if after := heartbeat(t, beat); after != before {
+				t.Fatalf("a TERM-ignoring descendant kept running after run returned: heartbeat %d -> %d", before, after)
+			}
+		})
+	}
+}
+
+func heartbeat(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
 }
 
 // TestRunSuppressesAutoMaintenance proves the gitConfigEnv plumbing reaches git end
