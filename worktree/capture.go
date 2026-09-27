@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -63,12 +64,17 @@ var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 // deletion, so Restore reproduces it exactly. With core.filemode=false the
 // index mode is authoritative: the repository ignores the exec bit, so a chmod
 // alone is not work in progress. A KindJJWorkspace captures every file its @
-// tracks, even one .gitignore now matches.
+// tracks, even one .gitignore now matches. A tracked path whose conversion
+// attributes (filter, text, eol, crlf, ident, working-tree-encoding) differ
+// between the trunk base, HEAD, the index, and the worktree is captured when
+// its raw bytes differ from what checking out its index entry writes, even
+// while git status trusts its stat data and reports it clean.
 //
 // Known limit: a file hidden by assume-unchanged or skip-worktree inside a
 // submodule leaves that submodule looking clean, exactly as git status reports
 // it; a submodule git reports dirty, or one with a staged gitlink change, is
-// always an omission.
+// always an omission, and so is one whose unpublished history moves its gitlink
+// to a commit no remote-tracking ref of the populated submodule contains.
 //
 // Like git status, reading a split index freshens the mtime of its shared
 // index file; no byte under the git directory changes.
@@ -235,6 +241,9 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	snap.History, snap.Requires = hist.links, hist.requires
 	files, err := c.classify(ctx, status, &snap)
 	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := c.historySubmodules(ctx, snap.Head); err != nil {
 		return Snapshot{}, err
 	}
 	fileMode := flags["core.filemode"] != "false"
@@ -538,6 +547,51 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 		files = append(files, fileCandidate{path: p, untracked: true})
 	}
 	return files, nil
+}
+
+func (c *capture) historySubmodules(ctx context.Context, head Head) error {
+	var out bytes.Buffer
+	if err := c.src.run(ctx, nil, &out, "diff-tree", "-r", "-z", "--raw", "--no-abbrev", "--no-renames", head.TrunkBase, head.Commit); err != nil {
+		return err
+	}
+	tokens := strings.Split(strings.TrimSuffix(out.String(), "\x00"), "\x00")
+	for i := 0; i+1 < len(tokens); i += 2 {
+		f := strings.Fields(tokens[i])
+		if len(f) != 5 || f[1] != "160000" {
+			continue
+		}
+		published, err := publishedCommit(ctx, filepath.Join(c.wt.Root, filepath.FromSlash(tokens[i+1])), f[3])
+		if err != nil {
+			return err
+		}
+		if !published {
+			c.omitted = append(c.omitted, Omission{Path: tokens[i+1], Reason: OmitSubmodule})
+		}
+	}
+	return nil
+}
+
+func publishedCommit(ctx context.Context, dir, oid string) (bool, error) {
+	populated, err := isPopulated(dir)
+	if err != nil || !populated {
+		return false, err
+	}
+	git := func(stdout io.Writer, args ...string) error {
+		return vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: append([]string{"-C", dir}, args...), Env: vcs.ReadOnlyGitEnv(), Stdout: stdout})
+	}
+	var exitErr *exec.ExitError
+	err = git(io.Discard, "rev-parse", "-q", "--verify", oid+"^{commit}")
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve submodule commit %s in %s: %w", oid, dir, err)
+	}
+	var out bytes.Buffer
+	if err := git(&out, "rev-list", "-n1", oid, "--not", "--remotes"); err != nil {
+		return false, fmt.Errorf("check submodule commit %s in %s is published: %w", oid, dir, err)
+	}
+	return out.Len() == 0, nil
 }
 
 func changedPaths(index []IndexEntry, files []fileCandidate) []string {

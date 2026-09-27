@@ -924,24 +924,43 @@ func TestCaptureSparseDeletedIntentToAdd(t *testing.T) {
 	}
 }
 
-func TestCaptureStagedGitlinkIsOmitted(t *testing.T) {
-	f := vcstest.New(t)
-	f.RunGit(f.Seed, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
-	f.RunGit(f.Seed, "commit", "-qm", "add sub")
-	f.RunGit(f.Seed, "push", "-q", "origin", "main")
-	src := f.GitClone(filepath.Join(f.Root, "src"))
-	f.RunGit(src, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
-	sub := filepath.Join(src, "sub")
-	f.ConfigGit(sub)
-	f.WriteFile(sub, "UNPUBLISHED", "only copy of work\n")
-	f.RunGit(sub, "add", "UNPUBLISHED")
-	f.RunGit(sub, "commit", "-qm", "private submodule work")
-	f.RunGit(src, "add", "sub")
+func TestCaptureGitlinkChangeIsOmitted(t *testing.T) {
+	omitted := []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}
+	tests := []struct {
+		name            string
+		publish, commit bool
+		want            []worktree.Omission
+	}{
+		{"staged", false, false, omitted},
+		{"committed", false, true, omitted},
+		{"committed published", true, true, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := vcstest.New(t)
+			f.RunGit(f.Seed, "-c", "protocol.file.allow=always", "submodule", "add", "-q", f.Origin, "sub")
+			f.RunGit(f.Seed, "commit", "-qm", "add sub")
+			f.RunGit(f.Seed, "push", "-q", "origin", "main")
+			src := f.GitClone(filepath.Join(f.Root, "src"))
+			f.RunGit(src, "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init")
+			sub := filepath.Join(src, "sub")
+			f.ConfigGit(sub)
+			f.WriteFile(sub, "UNPUBLISHED", "only copy of work\n")
+			f.RunGit(sub, "add", "UNPUBLISHED")
+			f.RunGit(sub, "commit", "-qm", "private submodule work")
+			if tt.publish {
+				f.RunGit(sub, "push", "-q", "origin", "HEAD:refs/heads/sub-work")
+			}
+			f.RunGit(src, "add", "sub")
+			if tt.commit {
+				f.RunGit(src, "commit", "-qm", "bump sub")
+			}
 
-	snap := mustCapture(t, openStore(t), discoverAt(t, src, src), worktreetest.New())
-	want := []worktree.Omission{{Path: "sub", Reason: worktree.OmitSubmodule}}
-	if snap.Complete || !slices.Equal(snap.Omitted, want) {
-		t.Fatalf("complete=%v omitted %+v, want %+v", snap.Complete, snap.Omitted, want)
+			snap := mustCapture(t, openStore(t), discoverAt(t, src, src), worktreetest.New())
+			if snap.Complete != (tt.want == nil) || !slices.Equal(snap.Omitted, tt.want) {
+				t.Fatalf("complete=%v omitted %+v, want %+v", snap.Complete, snap.Omitted, tt.want)
+			}
+		})
 	}
 }
 
