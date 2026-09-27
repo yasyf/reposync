@@ -280,6 +280,30 @@ func TestCaptureStatCleanConversionAttributeChange(t *testing.T) {
 	}
 }
 
+func TestCaptureHiddenConversionAttributeChange(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			f := vcstest.New(t)
+			f.AdvanceOriginPath("notes.txt", "one\ntwo\n")
+			rt := newRoundTrip(t, f, f.GitClone(filepath.Join(f.Root, "src")), f.GitClone(filepath.Join(f.Root, "recv")))
+			f.RunGit(rt.src, "update-index", flag, "notes.txt")
+			f.WriteFile(rt.src, ".gitattributes", "*.txt text eol=crlf\n")
+			f.RunGit(rt.src, "add", ".gitattributes")
+
+			snap, want := rt.tick()
+			got, ok := fileEntry(snap, "notes.txt")
+			if !ok || got.AssumeUnchanged != (flag == "--assume-unchanged") || got.SkipWorktree != (flag == "--skip-worktree") {
+				t.Fatalf("notes.txt %+v (present %v), want its LF bytes captured with %s", got, ok, flag)
+			}
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+			rt.assertRestored(snap, r, want)
+			if got := f.ReadFile(r.Path, "notes.txt"); got != "one\ntwo\n" {
+				t.Fatalf("restored notes.txt %q, want the source's LF bytes", got)
+			}
+		})
+	}
+}
+
 func TestCaptureAttributeRemovalBesideDuplicatePointer(t *testing.T) {
 	f := vcstest.New(t)
 	f.EnableLFS("*.bin")

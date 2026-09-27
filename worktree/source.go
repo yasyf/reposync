@@ -194,7 +194,7 @@ func (s source) checkoutDigests(ctx context.Context, attrSource string, blobs []
 	for _, b := range blobs {
 		paths.WriteString(b.path + "\x00")
 	}
-	args := []string{"checkout-index", "-z", "--stdin", "--prefix=" + scratch + string(filepath.Separator)}
+	args := []string{"checkout-index", "-z", "--stdin", "--ignore-skip-worktree-bits", "--prefix=" + scratch + string(filepath.Separator)}
 	if attrSource != "" {
 		args = append([]string{"--attr-source=" + attrSource}, args...)
 	}

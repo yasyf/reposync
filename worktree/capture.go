@@ -268,11 +268,10 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lfsRefs, stale, err := c.attributeLFS(ctx, status, files, snap.Head)
+	lfsRefs, files, err := c.attributeLFS(ctx, status, files, snap.Head)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	files = append(files, stale...)
 	if snap.Head.Ahead > 0 {
 		history, err := c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip)
 		if err != nil {
@@ -718,7 +717,7 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		}
 	}
 	if len(dirs) == 0 {
-		return nil, nil, nil
+		return nil, files, nil
 	}
 	var listed bytes.Buffer
 	if err := c.src.run(ctx, nil, &listed, append([]string{"--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"}, dirs...)...); err != nil {
@@ -744,8 +743,22 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 			shown[e.path] = true
 		}
 	}
+	hidden := map[string]fileCandidate{}
 	for _, f := range files {
-		shown[f.path] = true
+		if f.hidden {
+			hidden[f.path] = f
+		} else {
+			shown[f.path] = true
+		}
+	}
+	replaced := map[string]bool{}
+	candidate := func(b stagedBlob) fileCandidate {
+		f, ok := hidden[b.path]
+		if !ok {
+			return fileCandidate{path: b.path, indexMode: b.mode, indexOID: b.oid}
+		}
+		replaced[b.path], f.hidden = true, false
+		return f
 	}
 	var transitioned, blobs []string
 	var stale []fileCandidate
@@ -757,18 +770,19 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 			blobs = append(blobs, b.oid)
 		}
 		settled := !slices.ContainsFunc(states[1:], func(s map[string]map[string]string) bool { return !maps.Equal(s[p], work[p]) })
-		if settled || shown[p] || b.skipWorktree || work[p]["filter"] == lfsFilter {
+		_, flagged := hidden[p]
+		if settled || shown[p] || b.skipWorktree && !flagged || work[p]["filter"] == lfsFilter {
 			continue
 		}
 		switch filter := index[p]["filter"]; {
 		case filter != "unspecified" && filter != "unset":
-			stale = append(stale, fileCandidate{path: p, indexMode: b.mode, indexOID: b.oid})
+			stale = append(stale, candidate(b))
 		case maps.Equal(index[p], work[p]):
 			direct = append(direct, b)
 		case maps.Equal(index[p], atHead[p]):
 			fromHead = append(fromHead, b)
 		default:
-			stale = append(stale, fileCandidate{path: p, indexMode: b.mode, indexOID: b.oid})
+			stale = append(stale, candidate(b))
 		}
 	}
 	for source, group := range map[string][]stagedBlob{"": direct, head.Commit: fromHead} {
@@ -778,7 +792,9 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		}
 		for _, b := range group {
 			ref := checkouts[b.path]
-			stale = append(stale, fileCandidate{path: b.path, indexMode: b.mode, indexOID: b.oid, checkout: &ref})
+			f := candidate(b)
+			f.checkout = &ref
+			stale = append(stale, f)
 		}
 	}
 	slices.Sort(blobs)
@@ -793,7 +809,7 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		}
 	}
 	slices.SortFunc(stale, func(a, b fileCandidate) int { return strings.Compare(a.path, b.path) })
-	return refs, stale, nil
+	return refs, append(slices.DeleteFunc(files, func(f fileCandidate) bool { return replaced[f.path] }), stale...), nil
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {
