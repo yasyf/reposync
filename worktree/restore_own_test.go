@@ -136,23 +136,23 @@ func TestRestoreKeepsForeignFilesAtDest(t *testing.T) {
 	}
 }
 
+const tempCleanup = `*" update-ref"*" --stdin "*`
+
 func TestRestoreRollbackSparesTakenOverBranch(t *testing.T) {
 	const branch = "recovery/raced"
 	tests := []struct {
 		name  string
-		race  func(h *harness, snap worktree.Snapshot, stage string)
+		race  func(h *harness, head string)
 		other string
 	}{
-		{"symbolic ref swap", func(h *harness, _ worktree.Snapshot, _ string) {
+		{"symbolic ref", func(h *harness, _ string) {
 			h.f.RunGit(h.recv, "symbolic-ref", "refs/heads/"+branch, "refs/heads/main")
 		}, ""},
-		{"deleted and recreated", func(h *harness, snap worktree.Snapshot, _ string) {
-			h.f.RunGit(h.recv, "update-ref", "-d", "refs/heads/"+branch)
-			h.f.RunGit(h.recv, "branch", branch, snap.Head.Commit)
+		{"created at the snapshot head", func(h *harness, head string) {
+			h.f.RunGit(h.recv, "branch", branch, head)
 		}, ""},
-		{"checked out elsewhere", func(h *harness, _ worktree.Snapshot, stage string) {
-			h.f.RunGit(stage, "checkout", "-q", "--detach")
-			h.f.RunGit(h.recv, "worktree", "add", "-q", filepath.Join(h.f.Root, "elsewhere"), branch)
+		{"checked out elsewhere", func(h *harness, head string) {
+			h.f.RunGit(h.recv, "worktree", "add", "-q", "-b", branch, filepath.Join(h.f.Root, "elsewhere"), head)
 		}, "elsewhere"},
 	}
 	for _, tt := range tests {
@@ -166,16 +166,23 @@ func TestRestoreRollbackSparesTakenOverBranch(t *testing.T) {
 			}
 			before := h.receiverState()
 			dest := filepath.Join(h.f.Root, "recovered")
-			p := h.pauseGit(`*" update-ref --stdin "*`, "delete "+worktree.RecoveryPrefix)
+			p := h.pauseGit(`*" worktree remove "*`, "")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			done := h.restoreAsync(ctx, h.store, snap, worktree.RestoreOptions{Dest: dest, Branch: branch})
+			src := interruptedSource{ArtifactSource: h.art, dest: dest, interrupt: func() error { cancel(); return nil }}
+			done := make(chan restoreResult, 1)
+			go func() {
+				r, err := h.store.Restore(ctx, h.recvReg(), snap, src, worktree.RestoreOptions{Dest: dest, Branch: branch})
+				done <- restoreResult{r, err}
+			}()
 			p.wait(done)
-			tt.race(h, snap, h.worktreeOn(branch))
-			cancel()
+			if got := h.refs([]string{"-C", h.recv}, "refs/heads/"); !maps.Equal(got, before.heads) {
+				t.Fatalf("branches while rolling back = %v, want the untouched %v", got, before.heads)
+			}
+			tt.race(h, snap.Head.Commit)
 			p.release()
 			if res := <-done; !errors.Is(res.err, context.Canceled) {
-				t.Fatalf("restore cancelled during its final cleanup = %+v, %v; want context.Canceled", res.r, res.err)
+				t.Fatalf("restore cancelled mid-materialize = %+v, %v; want context.Canceled", res.r, res.err)
 			}
 			want := maps.Clone(before.heads)
 			want["refs/heads/"+branch] = snap.Head.Commit
@@ -191,6 +198,151 @@ func TestRestoreRollbackSparesTakenOverBranch(t *testing.T) {
 			h.assertNoStaging(h.f.Root)
 		})
 	}
+}
+
+func TestRestoreSuffixesBranchTakenWhileStaged(t *testing.T) {
+	const branch = "recovery/raced"
+	h := newGitHarness(t)
+	h.f.WriteFile(h.src, "wip.txt", "wip\n")
+	snap := h.seal(h.capture())
+	dest := filepath.Join(h.f.Root, "recovered")
+	p := h.pauseGit(`*" fetch "*":refs/reposync/recovery/"*`, "")
+	done := h.restoreAsync(t.Context(), h.store, snap, worktree.RestoreOptions{Dest: dest, Branch: branch})
+	p.wait(done)
+	h.f.RunGit(h.recv, "branch", branch, snap.Head.Commit)
+	p.release()
+	res := <-done
+	if res.err != nil || res.r.Path != dest || res.r.Branch != branch+"-2" {
+		t.Fatalf("restore racing a branch = %+v, %v; want %s-2 published at %s", res.r, res.err, branch, dest)
+	}
+	h.assertFaithful(res.r)
+	if got := h.worktreeOn(branch + "-2"); got != dest {
+		t.Fatalf("%s-2 is checked out at %s, want %s", branch, got, dest)
+	}
+	if got := h.refs([]string{"-C", h.recv}, "refs/heads/")["refs/heads/"+branch]; got != snap.Head.Commit {
+		t.Fatalf("user's %s = %q, want it untouched at %s", branch, got, snap.Head.Commit)
+	}
+}
+
+func TestRestoreRollbackKeepsReplacedWorktree(t *testing.T) {
+	for _, cancelled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cancelled %v", cancelled), func(t *testing.T) {
+			h := newGitHarness(t)
+			h.f.WriteFile(h.src, "wip.txt", "wip\n")
+			snap := h.seal(h.capture())
+			dest := filepath.Join(h.f.Root, "recovered")
+			p := h.pauseGit(tempCleanup, "delete "+worktree.RecoveryPrefix)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := h.restoreAsync(ctx, h.store, snap, worktree.RestoreOptions{Dest: dest})
+			p.wait(done)
+			stage := h.staged(dest)
+			moved := filepath.Join(h.f.Root, "moved")
+			h.f.RunGit(h.recv, "worktree", "move", stage, moved)
+			h.f.RunGit(h.recv, "worktree", "add", "-q", "-b", "replacement", stage, snap.Head.Commit)
+			h.f.WriteFile(stage, "mine.txt", "user work\n")
+			if cancelled {
+				cancel()
+			}
+			p.release()
+			if res := <-done; res.err == nil || cancelled != errors.Is(res.err, context.Canceled) {
+				t.Fatalf("restore whose staged checkout was replaced = %+v, %v; want a failure, cancelled %v", res.r, res.err, cancelled)
+			}
+			if got := h.worktreeOn("replacement"); got != stage || h.f.ReadFile(stage, "mine.txt") != "user work\n" {
+				t.Fatalf("replacement worktree at %s after rollback, want it and mine.txt kept at %s", got, stage)
+			}
+			if _, err := os.Lstat(filepath.Join(moved, ".git")); err != nil {
+				t.Fatalf("rollback removed the moved checkout: %v", err)
+			}
+			if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rollback left %s: %v", dest, err)
+			}
+		})
+	}
+}
+
+func TestRestoreCleanupNeverFollowsTemporarySymref(t *testing.T) {
+	h := newGitHarness(t)
+	h.f.WriteFile(h.src, "wip.txt", "wip\n")
+	snap := h.seal(h.capture())
+	if main := h.git(h.recv, "rev-parse", "refs/heads/main"); main != snap.Head.Commit {
+		t.Fatalf("receiver main %s, want the snapshot head %s", main, snap.Head.Commit)
+	}
+	before := h.receiverState()
+	dest := filepath.Join(h.f.Root, "recovered")
+	p := h.pauseGit(tempCleanup, "delete "+worktree.RecoveryPrefix)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := h.restoreAsync(ctx, h.store, snap, worktree.RestoreOptions{Dest: dest})
+	p.wait(done)
+	var head string
+	for ref := range h.refs([]string{"-C", h.recv}, worktree.RecoveryPrefix) {
+		if strings.HasSuffix(ref, "/head") {
+			head = ref
+		}
+	}
+	h.f.RunGit(h.recv, "symbolic-ref", head, "refs/heads/main")
+	cancel()
+	p.release()
+	if res := <-done; !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("restore cancelled during its final cleanup = %+v, %v; want context.Canceled", res.r, res.err)
+	}
+	h.assertRolledBack(before, dest)
+}
+
+func TestRestorePublishSparesReplacedClaim(t *testing.T) {
+	h, snap, lfs := lfsFetchHarness(t)
+	before := h.receiverState()
+	dest := filepath.Join(h.f.Root, "recovered")
+	swapped := make(chan os.FileInfo, 1)
+	gate := func(ctx context.Context, fetch func(context.Context) error) error {
+		fetchCtx, stop := context.WithCancel(ctx)
+		defer stop()
+		go func() {
+			select {
+			case <-lfs.started:
+				if err := os.Rename(dest, dest+"-claimed"); err != nil {
+					t.Errorf("move claim aside: %v", err)
+				}
+				if err := os.Mkdir(dest, 0o700); err != nil {
+					t.Errorf("replace claim: %v", err)
+				}
+				info, err := os.Lstat(dest)
+				if err != nil {
+					t.Errorf("stat replacement: %v", err)
+				}
+				swapped <- info
+				stop()
+			case <-fetchCtx.Done():
+			}
+		}()
+		return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, fetch(fetchCtx))
+	}
+	r, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest, FetchLFS: gate})
+	if !errors.Is(err, worktree.ErrDestinationExists) {
+		t.Fatalf("restore whose claim was replaced = %+v, %v; want ErrDestinationExists", r, err)
+	}
+	var replacement os.FileInfo
+	select {
+	case replacement = <-swapped:
+	default:
+		t.Fatal("the claim was never replaced")
+	}
+	info, err := os.Lstat(dest)
+	if err != nil || !os.SameFile(info, replacement) {
+		t.Fatalf("dest after publish = %v, %v; want the replacement directory", info, err)
+	}
+	if entries, err := os.ReadDir(dest); err != nil || len(entries) != 0 {
+		t.Fatalf("replacement holds %v, %v; want it empty", entries, err)
+	}
+	after := h.receiverState()
+	if !maps.Equal(before.heads, after.heads) || before.worktrees != after.worktrees || !slices.Equal(before.status, after.status) {
+		t.Fatalf("receiver changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+	if refs := h.refs([]string{"-C", h.recv}, worktree.RecoveryPrefix); len(refs) != 0 {
+		t.Fatalf("recovery refs left in checkout: %v", refs)
+	}
+	h.assertNoStaging(h.f.Root)
 }
 
 func TestRestoreReportsCancellation(t *testing.T) {
@@ -243,7 +395,7 @@ func TestRestoreNeverReusesAStagedWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := h.pauseGit(`*" update-ref --stdin "*`, "delete "+worktree.RecoveryPrefix)
+	p := h.pauseGit(tempCleanup, "delete "+worktree.RecoveryPrefix)
 	a := filepath.Join(h.f.Root, "a")
 	done := h.restoreAsync(t.Context(), h.store, snap, worktree.RestoreOptions{Dest: a})
 	p.wait(done)

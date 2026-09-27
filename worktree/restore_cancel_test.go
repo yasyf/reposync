@@ -398,19 +398,13 @@ func TestRestoreRollbackSparesConcurrentResources(t *testing.T) {
 		h.f.WriteFile(dest, "mine.txt", "user work\n")
 		return "refs/heads/recovered", h.git(h.recv, "rev-parse", "HEAD")
 	}
-	userBranch := func(h *harness, snap worktree.Snapshot, _ string) (string, string) {
-		h.f.RunGit(h.recv, "branch", "recovery/raced", snap.Head.Commit)
-		return "refs/heads/recovery/raced", snap.Head.Commit
-	}
 	tests := []struct {
-		name     string
-		match    string
-		race     func(h *harness, snap worktree.Snapshot, dest string) (ref, oid string)
-		worktree bool
+		name  string
+		match string
+		race  func(h *harness, snap worktree.Snapshot, dest string) (ref, oid string)
 	}{
-		{"worktree before snapshot fetch", beforeFetch, userWorktree, true},
-		{"worktree before worktree add", beforeAdd, userWorktree, true},
-		{"branch before snapshot fetch", beforeFetch, userBranch, false},
+		{"worktree before snapshot fetch", beforeFetch, userWorktree},
+		{"worktree before worktree add", beforeAdd, userWorktree},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -434,12 +428,8 @@ func TestRestoreRollbackSparesConcurrentResources(t *testing.T) {
 			if !maps.Equal(after.heads, want) {
 				t.Fatalf("branches after rollback = %v, want %v", after.heads, want)
 			}
-			if tt.worktree {
-				if !strings.Contains(after.worktrees, "worktree "+dest+"\n") || h.f.ReadFile(dest, "mine.txt") != "user work\n" {
-					t.Fatalf("rollback removed the user's worktree:\nraced %s\nafter %s", raced.worktrees, after.worktrees)
-				}
-			} else {
-				h.assertRolledBack(raced, dest)
+			if !strings.Contains(after.worktrees, "worktree "+dest+"\n") || h.f.ReadFile(dest, "mine.txt") != "user work\n" {
+				t.Fatalf("rollback removed the user's worktree:\nraced %s\nafter %s", raced.worktrees, after.worktrees)
 			}
 			if refs := h.refs([]string{"-C", h.recv}, worktree.RecoveryPrefix); len(refs) != 0 {
 				t.Fatalf("recovery refs left in checkout: %v", refs)
@@ -455,7 +445,7 @@ func TestRestoreCancelledDuringFinalCleanup(t *testing.T) {
 	before := h.receiverState()
 	dest := filepath.Join(h.f.Root, "recovered")
 	opts := worktree.RestoreOptions{Dest: dest}
-	p := h.pauseGit(`*" update-ref --stdin "*`, "delete "+worktree.RecoveryPrefix)
+	p := h.pauseGit(tempCleanup, "delete "+worktree.RecoveryPrefix)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := h.restoreAsync(ctx, h.store, snap, opts)
