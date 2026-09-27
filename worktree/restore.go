@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -112,10 +113,11 @@ type pathState struct {
 // then every worktree file, symlink, deletion, and intent-to-add. Hooks never
 // run. Unless opts.Fresh, an existing recovery checkout of the same source
 // worktree is returned as Reused with no file touched. A Restore that fails or
-// whose ctx is cancelled removes the worktree, recovery branch, and parent
-// directories it created, so a retry can reuse opts.Dest; it never removes
-// anything that existed before it began. It returns *GitVersionError when the
-// host's git predates 2.44.
+// whose ctx is cancelled before it returns removes the worktree, recovery
+// branch, and directories it created, so a retry can reuse opts.Dest; it never
+// removes anything another process created, even at opts.Dest or on the
+// recovery branch's name. It returns *GitVersionError when the host's git
+// predates 2.44.
 func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts RestoreOptions) (Restored, error) {
 	if !filepath.IsAbs(opts.Dest) {
 		return Restored{}, fmt.Errorf("restore destination %q is not absolute", opts.Dest)
@@ -144,11 +146,6 @@ func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapsho
 			return r, err
 		}
 	}
-	if _, err := os.Lstat(opts.Dest); err == nil {
-		return Restored{}, fmt.Errorf("%w: %s", ErrDestinationExists, opts.Dest)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return Restored{}, fmt.Errorf("stat %s: %w", opts.Dest, err)
-	}
 	branch, err := pickBranch(ctx, m.checkout, snap, opts.Branch)
 	if err != nil {
 		return Restored{}, err
@@ -159,16 +156,44 @@ func (s *Store) Restore(ctx context.Context, reg registry.Registry, snap Snapsho
 	return m.restore(ctx, snap, src, opts, branch)
 }
 
-func (m mirror) restore(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch string) (Restored, error) {
-	parents, err := absentParents(opts.Dest)
+type created struct {
+	dirs     []string
+	branch   string
+	worktree string
+}
+
+func (c *created) mkdirs(dest string) error {
+	absent, err := absentParents(dest)
 	if err != nil {
-		return Restored{}, err
+		return err
 	}
-	ns := recoveryPrefix + strings.TrimPrefix(snap.Digest, digestPrefix)[:12] + "/"
-	r, err := m.materialize(ctx, snap, src, opts, branch, ns)
+	slices.Reverse(absent)
+	for _, dir := range append(absent, dest) {
+		//nolint:gosec // G301: the mode git itself gives the worktree directories it creates, before the umask.
+		err := os.Mkdir(dir, 0o777)
+		switch {
+		case err == nil:
+			c.dirs = append(c.dirs, dir)
+		case !errors.Is(err, fs.ErrExist):
+			return fmt.Errorf("create recovery destination: %w", err)
+		case dir == dest:
+			return fmt.Errorf("%w: %s", ErrDestinationExists, dest)
+		}
+	}
+	return nil
+}
+
+func (m mirror) restore(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch string) (Restored, error) {
+	ns := recoveryPrefix + rand.Text() + "/"
+	var own created
+	r, err := m.materialize(ctx, snap, src, opts, branch, ns, &own)
 	cleanup := context.WithoutCancel(ctx)
-	if err := errors.Join(err, updateRefs(cleanup, []string{"-C", m.checkout}, []string{"delete " + ns + "head", "delete " + ns + "index"})); err != nil {
-		return Restored{}, errors.Join(err, m.discard(cleanup, opts.Dest, branch, snap.Head.Commit, parents))
+	err = errors.Join(err, updateRefs(cleanup, []string{"-C", m.checkout}, []string{"delete " + ns + "head", "delete " + ns + "index"}))
+	if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+		err = errors.Join(err, cerr)
+	}
+	if err != nil {
+		return Restored{}, errors.Join(err, m.discard(cleanup, snap.Head.Commit, own))
 	}
 	return r, nil
 }
@@ -187,41 +212,47 @@ func absentParents(dest string) ([]string, error) {
 	}
 }
 
-func (m mirror) discard(ctx context.Context, dest, branch, head string, parents []string) error {
+func (m mirror) discard(ctx context.Context, head string, own created) error {
 	var errs []error
-	if _, err := linkedAdminDir(dest, m.common); err == nil {
-		if _, err := recvGit(ctx, nil, nil, "-C", m.checkout, "worktree", "remove", "--force", "--force", dest); err != nil {
+	if own.worktree != "" {
+		if _, err := recvGit(ctx, nil, nil, "-C", m.checkout, "worktree", "remove", "--force", "--force", own.worktree); err != nil {
 			errs = append(errs, fmt.Errorf("remove recovery worktree: %w", err))
 		}
 	}
-	ref := "refs/heads/" + branch
-	heads, err := listRefs(ctx, []string{"-C", m.checkout}, ref)
-	switch {
-	case err != nil:
-		errs = append(errs, err)
-	case heads[ref] != "":
-		if err := updateRefs(ctx, []string{"-C", m.checkout}, []string{"delete " + ref + " " + head}); err != nil {
+	if own.branch != "" {
+		if err := updateRefs(ctx, []string{"-C", m.checkout}, []string{"delete refs/heads/" + own.branch + " " + head}); err != nil {
 			errs = append(errs, fmt.Errorf("delete recovery branch: %w", err))
 		}
 	}
-	for _, dir := range parents {
+	for _, dir := range slices.Backward(own.dirs) {
 		if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("remove created parent: %w", err))
+			errs = append(errs, fmt.Errorf("remove created directory: %w", err))
 			break
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch, ns string) (Restored, error) {
+func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSource, opts RestoreOptions, branch, ns string, own *created) (Restored, error) {
 	dest := opts.Dest
+	if err := own.mkdirs(dest); err != nil {
+		return Restored{}, err
+	}
 	skip := []string{"GIT_LFS_SKIP_SMUDGE=1"}
 	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", m.dir, "+"+snapshotPrefix+snapshotKey(snap)+"/*:"+ns+"*"); err != nil {
 		return Restored{}, fmt.Errorf("fetch snapshot into checkout: %w", err)
 	}
-	if _, err := recvGit(ctx, skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", "-b", branch, dest, ns+"head"); err != nil {
+	// A signalled git can exit after creating the branch or worktree, so only
+	// an uncancelled run's exit status says whether this Restore owns them.
+	settled := context.WithoutCancel(ctx)
+	if err := updateRefs(settled, []string{"-C", m.checkout}, []string{"create refs/heads/" + branch + " " + snap.Head.Commit}); err != nil {
+		return Restored{}, fmt.Errorf("create recovery branch: %w", err)
+	}
+	own.branch = branch
+	if _, err := recvGit(settled, skip, nil, "-C", m.checkout, "worktree", "add", "-q", "--no-checkout", dest, branch); err != nil {
 		return Restored{}, fmt.Errorf("add recovery worktree: %w", err)
 	}
+	own.worktree = dest
 	admin, err := linkedAdminDir(dest, m.common)
 	if err != nil {
 		return Restored{}, err
@@ -629,11 +660,11 @@ func (m mirror) hydrateLFS(ctx context.Context, snap Snapshot, dest string, gate
 		}
 	}
 	for _, p := range local {
-		unhydrated, err := pointerOnDisk(filepath.Join(dest, p), pointers[p])
+		ok, err := hydrated(filepath.Join(dest, p), pointers[p])
 		if err != nil {
 			return nil, err
 		}
-		if unhydrated {
+		if !ok {
 			pending = append(pending, p)
 		}
 	}
@@ -652,21 +683,32 @@ func lfsPattern(path string) string {
 	return b.String()
 }
 
-func pointerOnDisk(path string, ptr lfsPointer) (bool, error) {
+func hydrated(path string, ptr lfsPointer) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false, fmt.Errorf("stat hydrated %s: %w", path, err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > lfsPointerMax {
-		return false, nil
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("hydrated %s is not a regular file: %s", path, info.Mode())
 	}
-	//nolint:gosec // G304: a tracked path inside the recovery worktree this restore created.
-	b, err := os.ReadFile(path)
+	if info.Size() <= lfsPointerMax {
+		//nolint:gosec // G304: a tracked path inside the recovery worktree this restore created.
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return false, fmt.Errorf("read hydrated %s: %w", path, err)
+		}
+		if got, ok := parseLFSPointer(b); ok && got.OID == ptr.OID {
+			return false, nil
+		}
+	}
+	ok, err := holds(path, ptr.OID, ptr.Size)
 	if err != nil {
-		return false, fmt.Errorf("read hydrated %s: %w", path, err)
+		return false, err
 	}
-	got, ok := parseLFSPointer(b)
-	return ok && got.OID == ptr.OID, nil
+	if !ok {
+		return false, fmt.Errorf("lfs checkout left %s holding neither its pointer nor lfs object %s", path, ptr.OID)
+	}
+	return true, nil
 }
 
 func (m mirror) checkoutLFSPath(oid string) string {
