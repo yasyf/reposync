@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -48,7 +49,10 @@ type CaptureOptions struct {
 	Limits Limits
 }
 
-var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
+var (
+	blobModes       = map[string]bool{"100644": true, "100755": true, "120000": true}
+	conversionAttrs = []string{"filter", "text", "eol", "crlf", "ident", "working-tree-encoding"}
+)
 
 // Capture snapshots wt's uncommitted and unpublished work into sink without
 // writing the source repository: no index refresh, no fsmonitor, no filter in
@@ -63,12 +67,17 @@ var blobModes = map[string]bool{"100644": true, "100755": true, "120000": true}
 // deletion, so Restore reproduces it exactly. With core.filemode=false the
 // index mode is authoritative: the repository ignores the exec bit, so a chmod
 // alone is not work in progress. A KindJJWorkspace captures every file its @
-// tracks, even one .gitignore now matches.
+// tracks, even one .gitignore now matches. A tracked path whose conversion
+// attributes (filter, text, eol, crlf, ident, working-tree-encoding) differ
+// between the trunk base, HEAD, the index, and the worktree is captured when
+// its raw bytes differ from what checking out its index entry writes, even
+// while git status trusts its stat data and reports it clean.
 //
 // Known limit: a file hidden by assume-unchanged or skip-worktree inside a
 // submodule leaves that submodule looking clean, exactly as git status reports
 // it; a submodule git reports dirty, or one with a staged gitlink change, is
-// always an omission.
+// always an omission, and so is one whose unpublished history moves its gitlink
+// to a commit no remote-tracking ref of the populated submodule contains.
 //
 // Like git status, reading a split index freshens the mtime of its shared
 // index file; no byte under the git directory changes.
@@ -167,6 +176,7 @@ type fileCandidate struct {
 	indexOID        string
 	assumeUnchanged bool
 	skipWorktree    bool
+	checkout        *ArtifactRef
 }
 
 type guard struct {
@@ -237,6 +247,9 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := c.historySubmodules(ctx, snap.Head); err != nil {
+		return Snapshot{}, err
+	}
 	fileMode := flags["core.filemode"] != "false"
 	if c.wt.Kind == KindJJWorkspace {
 		tracked, err := c.jjTracked(ctx, status)
@@ -255,11 +268,10 @@ func (c *capture) run(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	lfsRefs, stale, err := c.attributeLFS(ctx, status, files, snap.Head)
+	lfsRefs, files, err := c.attributeLFS(ctx, status, files, snap.Head)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	files = append(files, stale...)
 	if snap.Head.Ahead > 0 {
 		history, err := c.src.historyLFS(ctx, snap.Head.Commit, snap.Head.TrunkTip)
 		if err != nil {
@@ -540,6 +552,84 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 	return files, nil
 }
 
+func (c *capture) historySubmodules(ctx context.Context, head Head) error {
+	if head.Ahead == 0 {
+		return nil
+	}
+	var commits, out bytes.Buffer
+	if err := c.src.run(ctx, nil, &commits, "rev-list", head.Commit, "^"+head.TrunkTip); err != nil {
+		return err
+	}
+	if err := c.src.run(ctx, &commits, &out, "diff-tree", "--stdin", "-r", "-c", "--root", "--raw", "--no-abbrev", "-z", "--no-renames"); err != nil {
+		return err
+	}
+	links, err := parseGitlinks(out.String())
+	if err != nil {
+		return err
+	}
+	for _, l := range links {
+		published, err := publishedCommit(ctx, filepath.Join(c.wt.Root, filepath.FromSlash(l.path)), l.oid)
+		if err != nil {
+			return err
+		}
+		if !published {
+			c.omitted = append(c.omitted, Omission{Path: l.path, Reason: OmitSubmodule})
+		}
+	}
+	return nil
+}
+
+type gitlink struct {
+	path, oid string
+}
+
+func parseGitlinks(out string) ([]gitlink, error) {
+	var links []gitlink
+	seen := map[gitlink]bool{}
+	tokens := strings.Split(out, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := strings.Trim(tokens[i], "\n")
+		if tok == "" || isHex(tok, 40) || isHex(tok, 64) {
+			continue
+		}
+		parents := len(tok) - len(strings.TrimLeft(tok, ":"))
+		f := strings.Fields(tok)
+		if parents == 0 || len(f) != 2*parents+3 || i+1 >= len(tokens) {
+			return nil, fmt.Errorf("raw diff record %q", tok)
+		}
+		i++
+		l := gitlink{path: tokens[i], oid: f[2*parents+1]}
+		if f[parents] == "160000" && !seen[l] {
+			seen[l] = true
+			links = append(links, l)
+		}
+	}
+	return links, nil
+}
+
+func publishedCommit(ctx context.Context, dir, oid string) (bool, error) {
+	populated, err := isPopulated(dir)
+	if err != nil || !populated {
+		return false, err
+	}
+	git := func(stdout io.Writer, args ...string) error {
+		return vcs.Exec(ctx, vcs.Cmd{Dir: dir, Name: "git", Args: append([]string{"-C", dir}, args...), Env: vcs.ReadOnlyGitEnv(), Stdout: stdout})
+	}
+	var exitErr *exec.ExitError
+	err = git(io.Discard, "rev-parse", "-q", "--verify", oid+"^{commit}")
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve submodule commit %s in %s: %w", oid, dir, err)
+	}
+	var out bytes.Buffer
+	if err := git(&out, "rev-list", "-n1", oid, "--not", "--remotes"); err != nil {
+		return false, fmt.Errorf("check submodule commit %s in %s is published: %w", oid, dir, err)
+	}
+	return out.Len() == 0, nil
+}
+
 func changedPaths(index []IndexEntry, files []fileCandidate) []string {
 	var paths []string
 	for _, e := range index {
@@ -627,7 +717,7 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		}
 	}
 	if len(dirs) == 0 {
-		return nil, nil, nil
+		return nil, files, nil
 	}
 	var listed bytes.Buffer
 	if err := c.src.run(ctx, nil, &listed, append([]string{"--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"}, dirs...)...); err != nil {
@@ -639,30 +729,72 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 		paths = append(paths, b.path)
 		staged[b.path] = b
 	}
-	before, err := c.src.filterAttr(ctx, paths, "--source="+head.TrunkBase)
-	if err != nil {
-		return nil, nil, err
-	}
-	after, current, err := c.lfsAttrs(ctx, head.Commit, paths)
-	if err != nil {
-		return nil, nil, err
-	}
-	reported := map[string]bool{}
-	for _, e := range status.changed {
-		reported[e.path] = true
-	}
-	for _, f := range files {
-		reported[f.path] = true
-	}
-	var transitioned, reclassified, blobs []string
-	for _, p := range paths {
-		if after[p] == lfsFilter && before[p] != lfsFilter {
-			transitioned = append(transitioned, p)
-			blobs = append(blobs, staged[p].oid)
+	states := make([]map[string]map[string]string, 4)
+	for i, opts := range [][]string{nil, {"--cached"}, {"--source=" + head.Commit}, {"--source=" + head.TrunkBase}} {
+		var err error
+		if states[i], err = c.src.checkAttr(ctx, paths, conversionAttrs, opts...); err != nil {
+			return nil, nil, err
 		}
-		if after[p] == lfsFilter && current[p] != lfsFilter && !reported[p] && !staged[p].skipWorktree {
-			reclassified = append(reclassified, p)
-			blobs = append(blobs, staged[p].oid)
+	}
+	work, index, atHead, base := states[0], states[1], states[2], states[3]
+	shown := map[string]bool{}
+	for _, e := range status.changed {
+		if e.y != '.' {
+			shown[e.path] = true
+		}
+	}
+	hidden := map[string]fileCandidate{}
+	for _, f := range files {
+		if f.hidden {
+			hidden[f.path] = f
+		} else {
+			shown[f.path] = true
+		}
+	}
+	replaced := map[string]bool{}
+	candidate := func(b stagedBlob) fileCandidate {
+		f, ok := hidden[b.path]
+		if !ok {
+			return fileCandidate{path: b.path, indexMode: b.mode, indexOID: b.oid}
+		}
+		replaced[b.path], f.hidden = true, false
+		return f
+	}
+	var transitioned, blobs []string
+	var stale []fileCandidate
+	var direct, fromHead []stagedBlob
+	for _, p := range paths {
+		b := staged[p]
+		if slices.ContainsFunc(states[:3], func(s map[string]map[string]string) bool { return s[p]["filter"] == lfsFilter }) && base[p]["filter"] != lfsFilter {
+			transitioned = append(transitioned, p)
+			blobs = append(blobs, b.oid)
+		}
+		settled := !slices.ContainsFunc(states[1:], func(s map[string]map[string]string) bool { return !maps.Equal(s[p], work[p]) })
+		_, flagged := hidden[p]
+		if settled || shown[p] || b.skipWorktree && !flagged || work[p]["filter"] == lfsFilter {
+			continue
+		}
+		switch filter := index[p]["filter"]; {
+		case filter != "unspecified" && filter != "unset":
+			stale = append(stale, candidate(b))
+		case maps.Equal(index[p], work[p]):
+			direct = append(direct, b)
+		case maps.Equal(index[p], atHead[p]):
+			fromHead = append(fromHead, b)
+		default:
+			stale = append(stale, candidate(b))
+		}
+	}
+	for source, group := range map[string][]stagedBlob{"": direct, head.Commit: fromHead} {
+		checkouts, err := c.src.checkoutDigests(ctx, source, group)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, b := range group {
+			ref := checkouts[b.path]
+			f := candidate(b)
+			f.checkout = &ref
+			stale = append(stale, f)
 		}
 	}
 	slices.Sort(blobs)
@@ -676,13 +808,8 @@ func (c *capture) attributeLFS(ctx context.Context, status statusReport, files [
 			refs = append(refs, LFSObjectRef{Path: p, OID: ptr.OID, Size: ptr.Size})
 		}
 	}
-	var stale []fileCandidate
-	for _, p := range reclassified {
-		if _, ok := pointers[staged[p].oid]; ok {
-			stale = append(stale, fileCandidate{path: p, hidden: true, indexMode: staged[p].mode, indexOID: staged[p].oid})
-		}
-	}
-	return refs, stale, nil
+	slices.SortFunc(stale, func(a, b fileCandidate) int { return strings.Compare(a.path, b.path) })
+	return refs, append(slices.DeleteFunc(files, func(f fileCandidate) bool { return replaced[f.path] }), stale...), nil
 }
 
 func (c *capture) captureIndex(ctx context.Context, index []IndexEntry, attrs map[string]string) ([]LFSObjectRef, error) {
@@ -938,14 +1065,26 @@ func (c *capture) captureFiles(ctx context.Context, files []fileCandidate, attrs
 }
 
 func (c *capture) indexPointers(ctx context.Context, files []fileCandidate, attrs map[string]string) (map[string]lfsPointer, error) {
+	var lfs []fileCandidate
 	var oids []string
 	for _, f := range files {
 		if !f.untracked && attrs[f.path] == lfsFilter && blobModes[f.indexMode] {
+			lfs = append(lfs, f)
 			oids = append(oids, f.indexOID)
 		}
 	}
 	slices.Sort(oids)
-	return c.src.readPointers(ctx, slices.Compact(oids))
+	byOID, err := c.src.readPointers(ctx, slices.Compact(oids))
+	if err != nil {
+		return nil, err
+	}
+	pointers := map[string]lfsPointer{}
+	for _, f := range lfs {
+		if p, ok := byOID[f.indexOID]; ok {
+			pointers[f.path] = p
+		}
+	}
+	return pointers, nil
 }
 
 func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[string]lfsPointer, fileMode bool) (pendingFile, bool, error) {
@@ -990,9 +1129,9 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 		ref := cached.Content
 		p.entry.Content, p.known = &ref, true
 	}
-	ptr, isLFS := pointers[f.indexOID]
-	isLFS = isLFS && ptr.Canonical && !f.untracked
-	if !isLFS && !f.hidden {
+	ptr, isLFS := pointers[f.path]
+	isLFS = isLFS && ptr.Canonical
+	if !isLFS && !f.hidden && f.checkout == nil {
 		if p.known {
 			c.next.Files[f.path] = cachedFile{Stat: p.stat, Content: *p.entry.Content}
 		}
@@ -1011,7 +1150,10 @@ func (c *capture) prepareFile(root *os.Root, f fileCandidate, pointers map[strin
 	}
 	c.next.Files[f.path] = cachedFile{Stat: p.stat, Content: *p.entry.Content, BlobOID: blobOID}
 	same := blobOID == f.indexOID
-	if isLFS {
+	switch {
+	case f.checkout != nil:
+		same = p.entry.Content.Digest == f.checkout.Digest && p.entry.Content.Size == f.checkout.Size
+	case isLFS:
 		same = ptr.OID == strings.TrimPrefix(p.entry.Content.Digest, digestPrefix) && ptr.Size == p.entry.Content.Size
 	}
 	if same && f.indexMode == regularMode(p.entry.Executable) {

@@ -147,3 +147,34 @@ func TestCapturePublishedLFSRenameShipsNothing(t *testing.T) {
 		})
 	}
 }
+
+func TestCaptureLiteralAttributeDirectoryRequiresLFSObject(t *testing.T) {
+	for _, dir := range []string{":(top)nested", ":(literal)nested", "nested*"} {
+		t.Run(dir, func(t *testing.T) {
+			f := vcstest.New(t)
+			f.EnableLFS("*.dat")
+			asset := "literal directory dependency\x00\x04"
+			oid := vcstest.SHA256([]byte(asset))
+			f.RunGit(f.Seed, "config", "lfs.allowincompletepush", "true")
+			if err := os.MkdirAll(filepath.Join(f.Seed, dir), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			f.WriteFile(filepath.Join(f.Seed, dir), "asset.bin", crlfPointer(oid, len(asset)))
+			f.RunGit(f.Seed, "add", "-A")
+			f.RunGit(f.Seed, "commit", "-qm", "publish pointer text")
+			f.RunGit(f.Seed, "push", "-q", "origin", "main")
+			repo := f.LFSClone(filepath.Join(f.Root, "repo"))
+			f.WriteFile(filepath.Join(repo, dir), ".gitattributes", binAttrs)
+			f.RunGit(repo, "add", "-A")
+			f.RunGit(repo, "commit", "-qm", "enable nested binary LFS")
+			f.RunGit(repo, "--literal-pathspecs", "rm", "-q", dir+"/.gitattributes")
+			f.RunGit(repo, "commit", "-qm", "disable nested binary LFS")
+
+			_, err := capture(t, openStore(t), discoverAt(t, repo, repo), worktreetest.New(), worktree.Limits{})
+			var missing *worktree.MissingLFSError
+			if !errors.As(err, &missing) || len(missing.Objects) != 1 || missing.Objects[0].OID != oid {
+				t.Fatalf("err %v, want MissingLFSError for %s", err, oid)
+			}
+		})
+	}
+}

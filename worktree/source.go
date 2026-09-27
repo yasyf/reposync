@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -73,13 +77,25 @@ func (s source) config(ctx context.Context, pattern string, opts ...string) (map
 }
 
 func (s source) filterAttr(ctx context.Context, paths []string, opts ...string) (map[string]string, error) {
+	got, err := s.checkAttr(ctx, paths, []string{"filter"}, opts...)
+	if err != nil {
+		return nil, err
+	}
 	attrs := map[string]string{}
+	for p, v := range got {
+		attrs[p] = v["filter"]
+	}
+	return attrs, nil
+}
+
+func (s source) checkAttr(ctx context.Context, paths, names []string, opts ...string) (map[string]map[string]string, error) {
+	attrs := map[string]map[string]string{}
 	if len(paths) == 0 {
 		return attrs, nil
 	}
 	var out bytes.Buffer
 	stdin := strings.NewReader(strings.Join(paths, "\x00") + "\x00")
-	args := append(append([]string{"check-attr"}, opts...), "-z", "--stdin", "filter")
+	args := append(append(append([]string{"check-attr"}, opts...), "-z", "--stdin"), names...)
 	if err := s.run(ctx, stdin, &out, args...); err != nil {
 		return nil, err
 	}
@@ -88,7 +104,10 @@ func (s source) filterAttr(ctx context.Context, paths []string, opts ...string) 
 		return nil, fmt.Errorf("check-attr output has %d fields", len(fields))
 	}
 	for i := 0; i < len(fields); i += 3 {
-		attrs[fields[i]] = fields[i+2]
+		if attrs[fields[i]] == nil {
+			attrs[fields[i]] = map[string]string{}
+		}
+		attrs[fields[i]][fields[i+1]] = fields[i+2]
 	}
 	return attrs, nil
 }
@@ -159,6 +178,46 @@ func (s source) blobSizes(ctx context.Context, oids []string) (map[string]int64,
 		sizes[f[0]] = size
 	}
 	return sizes, nil
+}
+
+func (s source) checkoutDigests(ctx context.Context, attrSource string, blobs []stagedBlob) (map[string]ArtifactRef, error) {
+	refs := map[string]ArtifactRef{}
+	if len(blobs) == 0 {
+		return refs, nil
+	}
+	scratch, err := os.MkdirTemp("", "reposync-checkout-")
+	if err != nil {
+		return nil, fmt.Errorf("scratch dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+	var paths strings.Builder
+	for _, b := range blobs {
+		paths.WriteString(b.path + "\x00")
+	}
+	args := []string{"checkout-index", "-z", "--stdin", "--ignore-skip-worktree-bits", "--prefix=" + scratch + string(filepath.Separator)}
+	if attrSource != "" {
+		args = append([]string{"--attr-source=" + attrSource}, args...)
+	}
+	if err := s.run(ctx, strings.NewReader(paths.String()), nil, args...); err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(scratch)
+	if err != nil {
+		return nil, fmt.Errorf("open scratch dir: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	for _, b := range blobs {
+		ref, err := readOnce(root, filepath.FromSlash(b.path), func(r io.Reader) (ArtifactRef, error) {
+			h := sha256.New()
+			n, err := io.Copy(h, r)
+			return ArtifactRef{Digest: digestPrefix + hex.EncodeToString(h.Sum(nil)), Size: n, Media: MediaFile}, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("checked-out %s: %w", b.path, err)
+		}
+		refs[b.path] = ref
+	}
+	return refs, nil
 }
 
 func (s source) readBlobs(ctx context.Context, oids []string, each func(oid string, size int64, r io.Reader) error) error {

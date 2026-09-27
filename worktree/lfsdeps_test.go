@@ -242,3 +242,133 @@ func TestCaptureHiddenAttributeEditRequiresLFSObject(t *testing.T) {
 		t.Fatalf("err %v, want MissingLFSError for %s", err, oid)
 	}
 }
+
+func TestCaptureStatCleanConversionAttributeChange(t *testing.T) {
+	for _, staged := range []bool{true, false} {
+		t.Run(fmt.Sprintf("staged=%t", staged), func(t *testing.T) {
+			f := vcstest.New(t)
+			f.AdvanceOriginPath("notes.txt", "one\ntwo\n")
+			rt := newRoundTrip(t, f, f.GitClone(filepath.Join(f.Root, "src")), f.GitClone(filepath.Join(f.Root, "recv")))
+			past := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(filepath.Join(rt.src, "notes.txt"), past, past); err != nil {
+				t.Fatal(err)
+			}
+			f.RunGit(rt.src, "update-index", "--refresh")
+			f.WriteFile(rt.src, ".gitattributes", "*.txt text eol=crlf\n")
+			if staged {
+				f.RunGit(rt.src, "add", ".gitattributes")
+			}
+
+			snap, want := rt.tick()
+			if _, ok := fileEntry(snap, "notes.txt"); ok != staged {
+				t.Fatalf("notes.txt captured %v, want %v", ok, staged)
+			}
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+			if staged {
+				// The checkout records the CRLF file's size in the index, so git
+				// status flags the rewritten LF file without rehashing it.
+				want.status = rt.status(r.Path)
+				if src, got := rt.git(rt.src, "ls-files", "-s"), rt.git(r.Path, "ls-files", "-s"); src != got {
+					t.Fatalf("index differs:\nsource   %s\nrestored %s", src, got)
+				}
+			}
+			rt.assertRestored(snap, r, want)
+			if got := f.ReadFile(r.Path, "notes.txt"); got != "one\ntwo\n" {
+				t.Fatalf("restored notes.txt %q, want the source's LF bytes", got)
+			}
+		})
+	}
+}
+
+func TestCaptureHiddenConversionAttributeChange(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			f := vcstest.New(t)
+			f.AdvanceOriginPath("notes.txt", "one\ntwo\n")
+			rt := newRoundTrip(t, f, f.GitClone(filepath.Join(f.Root, "src")), f.GitClone(filepath.Join(f.Root, "recv")))
+			f.RunGit(rt.src, "update-index", flag, "notes.txt")
+			f.WriteFile(rt.src, ".gitattributes", "*.txt text eol=crlf\n")
+			f.RunGit(rt.src, "add", ".gitattributes")
+
+			snap, want := rt.tick()
+			got, ok := fileEntry(snap, "notes.txt")
+			if !ok || got.AssumeUnchanged != (flag == "--assume-unchanged") || got.SkipWorktree != (flag == "--skip-worktree") {
+				t.Fatalf("notes.txt %+v (present %v), want its LF bytes captured with %s", got, ok, flag)
+			}
+			r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+			rt.assertRestored(snap, r, want)
+			if got := f.ReadFile(r.Path, "notes.txt"); got != "one\ntwo\n" {
+				t.Fatalf("restored notes.txt %q, want the source's LF bytes", got)
+			}
+		})
+	}
+}
+
+func TestCaptureAttributeRemovalBesideDuplicatePointer(t *testing.T) {
+	f := vcstest.New(t)
+	f.EnableLFS("*.bin")
+	f.AdvanceOriginPath("base.bin", lfsBase)
+	f.AdvanceOriginPath("twin.bin", lfsBase)
+	rt := newRoundTrip(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+	asset := filepath.Join(rt.src, "base.bin")
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(asset, past, past); err != nil {
+		t.Fatal(err)
+	}
+	f.RunGit(rt.src, "update-index", "--refresh")
+	f.WriteFile(rt.src, ".gitattributes", binAttrs+"base.bin !filter !diff !merge !text\n")
+	f.RunGit(rt.src, "add", ".gitattributes")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(rt.src, "twin.bin"), future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, want := rt.tick()
+	if got, ok := fileEntry(snap, "base.bin"); !ok || got.Kind != worktree.FileRegular {
+		t.Fatalf("base.bin %+v (present %v), want its raw bytes captured", got, ok)
+	}
+	touched := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(asset, touched, touched); err != nil {
+		t.Fatal(err)
+	}
+	want.status = rt.status(rt.src)
+	r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+	rt.assertRestored(snap, r, want)
+	if got := f.ReadFile(r.Path, "base.bin"); got != lfsBase {
+		t.Fatalf("restored base.bin %q, want %q", got, lfsBase)
+	}
+}
+
+func TestCaptureCommittedNestedAttributeRemovalKeepsRawBytes(t *testing.T) {
+	f := vcstest.New(t)
+	f.EnableLFS()
+	if err := os.MkdirAll(filepath.Join(f.Seed, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	f.AdvanceOriginPath("nested/.gitattributes", binAttrs)
+	f.AdvanceOriginPath("nested/base.bin", lfsBase)
+	rt := newRoundTrip(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+	asset := filepath.Join(rt.src, "nested", "base.bin")
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(asset, past, past); err != nil {
+		t.Fatal(err)
+	}
+	f.RunGit(rt.src, "update-index", "--refresh")
+	f.WriteFile(filepath.Join(rt.src, "nested"), ".gitattributes", "*.txt text\n")
+	f.RunGit(rt.src, "commit", "-qam", "drop nested LFS")
+
+	snap, want := rt.tick()
+	if got, ok := fileEntry(snap, "nested/base.bin"); !ok || got.Kind != worktree.FileRegular {
+		t.Fatalf("nested/base.bin %+v (present %v), want its raw bytes captured", got, ok)
+	}
+	touched := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(asset, touched, touched); err != nil {
+		t.Fatal(err)
+	}
+	want.status = rt.status(rt.src)
+	r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+	rt.assertRestored(snap, r, want)
+	if got := f.ReadFile(r.Path, "nested/base.bin"); got != lfsBase {
+		t.Fatalf("restored nested/base.bin %q, want %q", got, lfsBase)
+	}
+}
