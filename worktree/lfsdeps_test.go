@@ -225,6 +225,27 @@ func TestCaptureStagedLFSAttributeRemovalKeepsRawBytes(t *testing.T) {
 	}
 }
 
+func TestRestoreHydratesUnderWorkingLFSAttributes(t *testing.T) {
+	f := vcstest.New(t)
+	f.EnableLFS("*.bin")
+	f.AdvanceOriginPath("base.bin", lfsBase)
+	rt := newRoundTrip(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+	attrs := f.ReadFile(rt.src, ".gitattributes")
+	f.WriteFile(rt.src, ".gitattributes", datAttrs)
+	f.RunGit(rt.src, "add", ".gitattributes")
+	f.WriteFile(rt.src, ".gitattributes", attrs)
+
+	snap, want := rt.tick()
+	if got, ok := fileEntry(snap, "base.bin"); ok {
+		t.Fatalf("base.bin captured as %+v, want the unchanged hydrated asset left to the checkout", got)
+	}
+	r := rt.pickup(rt.store, rt.recv, rt.art, snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+	rt.assertRestored(snap, r, want)
+	if got := f.ReadFile(r.Path, "base.bin"); got != lfsBase {
+		t.Fatalf("restored base.bin %q, want %q", got, lfsBase)
+	}
+}
+
 func TestCaptureHiddenAttributeEditRequiresLFSObject(t *testing.T) {
 	f := vcstest.New(t)
 	f.EnableLFS("*.dat")

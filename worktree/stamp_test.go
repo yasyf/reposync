@@ -392,6 +392,84 @@ func TestStampSubmodule(t *testing.T) {
 	}
 }
 
+func TestStampJJWorkspaceSubmodule(t *testing.T) {
+	f := vcstest.New(t)
+	seedStampOrigin(f)
+	sub := filepath.Join(f.Root, "subrepo")
+	f.RunGit(f.Root, "init", "-q", "-b", "main", sub)
+	f.ConfigGit(sub)
+	f.WriteFile(sub, ".gitignore", "*.log\n")
+	f.WriteFile(sub, ".gitattributes", "*.dat filter=subspy\n")
+	f.WriteFile(sub, "s.txt", "sub\n")
+	f.WriteFile(sub, "x.dat", "data\n")
+	f.RunGit(sub, "add", "-A")
+	f.RunGit(sub, "commit", "-q", "-m", "sub")
+	f.RunGit(f.Seed, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	f.RunGit(f.Seed, "commit", "-q", "-m", "add sub")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+
+	tests := []struct {
+		name    string
+		dirty   bool
+		mutate  func(t *testing.T, inner string)
+		changes bool
+	}{
+		{
+			name:    "edit inside a clean submodule",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited\n") },
+			changes: true,
+		},
+		{
+			name:    "untracked file inside a clean submodule",
+			mutate:  func(t *testing.T, inner string) { writeStampFile(t, inner, "new.txt", "new\n") },
+			changes: true,
+		},
+		{
+			name: "commit inside a submodule",
+			mutate: func(_ *testing.T, inner string) {
+				f.RunGit(inner, "commit", "-q", "--allow-empty", "-m", "moved")
+			},
+			changes: true,
+		},
+		{
+			name:   "ignored file inside a dirty submodule",
+			dirty:  true,
+			mutate: func(t *testing.T, inner string) { writeStampFile(t, inner, "noise.log", "noise\n") },
+		},
+		{
+			name:   "further edit inside a dirty submodule",
+			dirty:  true,
+			mutate: func(t *testing.T, inner string) { writeStampFile(t, inner, "s.txt", "edited again, longer\n") },
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			main := f.JJClone(filepath.Join(f.Root, fmt.Sprintf("jj%d", i)))
+			root := f.JJWorkspace(main, filepath.Join(f.Root, fmt.Sprintf("jj%d-ws", i)), "second")
+			inner := filepath.Join(root, "sub")
+			f.RunGit(f.Root, "clone", "-q", sub, inner)
+			f.ConfigGit(inner)
+			filterRan := filepath.Join(f.Root, fmt.Sprintf("jj-sub-filter-ran-%d", i))
+			f.RunGit(inner, "config", "filter.subspy.clean", "touch '"+filterRan+"'; cat")
+			f.RunGit(inner, "config", "filter.subspy.required", "true")
+			setStampMtime(t, filepath.Join(inner, "x.dat"), time.Now().Add(time.Hour))
+			wt := stampWorktree(t, main, root, KindJJWorkspace)
+			if tc.dirty {
+				writeStampFile(t, inner, "s.txt", "dirty\n")
+			}
+			before := mustStamp(t, wt)
+			if f.FileExists(f.Root, filepath.Base(filterRan)) {
+				t.Fatalf("Stamp ran the submodule's clean filter")
+			}
+			tc.mutate(t, inner)
+			after := mustStamp(t, wt)
+			if changed := before != after; changed != tc.changes {
+				t.Fatalf("stamp changed = %v, want %v", changed, tc.changes)
+			}
+		})
+	}
+}
+
 func TestStampNoLazyFetch(t *testing.T) {
 	f := vcstest.New(t)
 	writeStampFile(t, f.Seed, "in/x.txt", "in\n")

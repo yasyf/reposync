@@ -35,8 +35,9 @@ import (
 // operation without a snapshot. A KindJJWorkspace has no
 // index of its own, so its stamp covers the workspace's @ and @- commit ids and
 // the lstat of every file either commit tracks plus every non-ignored file
-// instead of status records. It returns *GitVersionError when the host's git
-// predates 2.44.
+// instead of status records, and each gitlink @- records contributes the same
+// submodule state a flagged gitlink does. It returns *GitVersionError when the
+// host's git predates 2.44.
 func Stamp(ctx context.Context, wt Worktree) (string, error) {
 	if err := requireGit(ctx); err != nil {
 		return "", err
@@ -68,7 +69,7 @@ func stampRecords(ctx context.Context, wt Worktree) ([]string, error) {
 	}
 	var tree, paths []string
 	if wt.Kind == KindJJWorkspace {
-		paths, err = jjWorkspaceFiles(ctx, wt)
+		tree, paths, err = jjWorkspaceRecords(ctx, wt)
 	} else {
 		tree, paths, err = gitStatusRecords(ctx, wt)
 	}
@@ -159,14 +160,19 @@ func gitlinkRoots(ctx context.Context, dir string, env []string, list ...string)
 	if err != nil {
 		return nil, fmt.Errorf("list gitlinks in %s: %w", dir, err)
 	}
-	var roots []string
-	last := ""
+	var paths []string
 	for rec := range strings.SplitSeq(out.String(), "\x00") {
 		meta, path, _ := strings.Cut(rec, "\t")
-		if !strings.HasPrefix(meta, "160000 ") || path == last {
-			continue
+		if strings.HasPrefix(meta, "160000 ") && (len(paths) == 0 || paths[len(paths)-1] != path) {
+			paths = append(paths, path)
 		}
-		last = path
+	}
+	return populatedRoots(ctx, dir, paths)
+}
+
+func populatedRoots(ctx context.Context, dir string, paths []string) ([]string, error) {
+	var roots []string
+	for _, path := range paths {
 		sub := filepath.Join(dir, filepath.FromSlash(path))
 		populated, err := isPopulated(sub)
 		if err != nil {
@@ -227,6 +233,59 @@ func submoduleState(ctx context.Context, root string, env []string, e flaggedEnt
 		state[3] = 'U'
 	}
 	return string(state), nil
+}
+
+func jjWorkspaceRecords(ctx context.Context, wt Worktree) ([]string, []string, error) {
+	paths, err := jjWorkspaceFiles(ctx, wt)
+	if err != nil {
+		return nil, nil, err
+	}
+	parents, err := jjRead(ctx, wt.Root, "log", "--no-graph", "-r", "@- ~ root()", "-T", `commit_id ++ "\n"`)
+	if err != nil {
+		return nil, nil, err
+	}
+	var links []flaggedEntry
+	for parent := range strings.FieldsSeq(parents) {
+		var out bytes.Buffer
+		err := vcs.Exec(ctx, vcs.Cmd{
+			Dir:    wt.Root,
+			Name:   "git",
+			Args:   []string{"-C", wt.Root, "ls-tree", "-r", "-z", parent},
+			Env:    append(vcs.ReadOnlyGitEnv(), "GIT_DIR="+wt.CommonDir),
+			Stdout: &out,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("list gitlinks of %s: %w", parent, err)
+		}
+		for rec := range strings.SplitSeq(out.String(), "\x00") {
+			meta, path, _ := strings.Cut(rec, "\t")
+			if f := strings.Fields(meta); len(f) == 3 && f[0] == "160000" {
+				links = append(links, flaggedEntry{path: path, mode: f[0], oid: f[2]})
+			}
+		}
+	}
+	subs := make([]string, 0, len(links))
+	for _, e := range links {
+		subs = append(subs, e.path)
+	}
+	roots, err := populatedRoots(ctx, wt.Root, subs)
+	if err != nil {
+		return nil, nil, err
+	}
+	env, err := vcs.FilterOverrideEnv(ctx, roots...)
+	if err != nil {
+		return nil, nil, err
+	}
+	records := make([]string, 0, len(links))
+	for _, e := range links {
+		state, err := submoduleState(ctx, wt.Root, env, e)
+		if err != nil {
+			return nil, nil, err
+		}
+		records = append(records, fmt.Sprintf("sub %s %q %q", e.oid, state, e.path))
+	}
+	slices.Sort(records)
+	return records, paths, nil
 }
 
 func jjWorkspaceFiles(ctx context.Context, wt Worktree) ([]string, error) {

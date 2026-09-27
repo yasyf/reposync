@@ -45,7 +45,8 @@ type RestoreOptions struct {
 	// and creates another; nothing is ever overwritten either way.
 	Fresh bool
 	// FetchLFS, when set, admits fetching the LFS base assets missing locally,
-	// or failing hash verification there, from the LFS remote; a fetch it runs
+	// or failing hash verification there, from the LFS remote the receiver's
+	// configuration names, never Snapshot.LFS.Remote; a fetch it runs
 	// first discards each corrupt local object. nil never fetches. When it
 	// defers the fetch, Restore leaves the paths still missing in LFSPending;
 	// any other error fails the restore.
@@ -111,8 +112,9 @@ type pathState struct {
 
 // Restore verifies snap and materializes it as a new linked worktree of the
 // registered checkout at opts.Dest on a recovery branch: history and the
-// staged index exactly, shipped and locally available LFS objects hydrated,
-// then every worktree file, symlink, deletion, and intent-to-add. Hooks never
+// staged index exactly, the worktree's .gitattributes files, shipped and
+// locally available LFS objects hydrated under those attributes, then every
+// worktree file, symlink, deletion, and intent-to-add. Hooks never
 // run. Unless opts.Fresh, an existing recovery checkout of the same source
 // worktree is returned as Reused with no file touched. Restore claims opts.Dest
 // as an empty directory, builds a detached worktree in a private directory
@@ -474,8 +476,15 @@ func (m mirror) materialize(ctx context.Context, snap Snapshot, src ArtifactSour
 		}
 	}
 	overwritten := map[string]bool{}
+	var attributes []FileEntry
 	for _, f := range snap.Files {
 		overwritten[f.Path] = true
+		if path.Base(f.Path) == ".gitattributes" {
+			attributes = append(attributes, f)
+		}
+	}
+	if err := applyFiles(ctx, dest, src, attributes); err != nil {
+		return Restored{}, err
 	}
 	pending, err := m.hydrateLFS(ctx, snap, dest, opts.FetchLFS, overwritten)
 	if err != nil {

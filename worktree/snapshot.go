@@ -138,9 +138,11 @@ type LFSObjectRef struct {
 	Size int64  `json:"size"`
 }
 
-// LFSInfo records a git-lfs repository's shipped object references and the
-// LFS remote base assets are fetched from on the receiver. Every Objects oid is
-// shipped in Snapshot.LFSObjects.
+// LFSInfo records a git-lfs repository's shipped object references and, as
+// source metadata, the LFS remote the source's own configuration or
+// .lfsconfig names. Every Objects oid is shipped in Snapshot.LFSObjects.
+// Restore never reads Remote: a RestoreOptions.FetchLFS fetch selects its
+// endpoint from the receiver's configuration.
 type LFSInfo struct {
 	Objects []LFSObjectRef `json:"objects,omitempty"`
 	Remote  string         `json:"remote,omitempty"`
