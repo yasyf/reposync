@@ -301,3 +301,234 @@ func TestRestoreCancelledDuringLFSFetch(t *testing.T) {
 		t.Fatalf("retry restored %+v, want a fresh checkout with other.bin pending", r)
 	}
 }
+
+type restoreResult struct {
+	r   worktree.Restored
+	err error
+}
+
+func (h *harness) restoreAsync(ctx context.Context, store *worktree.Store, snap worktree.Snapshot, opts worktree.RestoreOptions) <-chan restoreResult {
+	done := make(chan restoreResult, 1)
+	go func() {
+		r, err := store.Restore(ctx, h.recvReg(), snap, h.art, opts)
+		done <- restoreResult{r, err}
+	}()
+	return done
+}
+
+type gitPause struct {
+	t        *testing.T
+	paused   string
+	released string
+}
+
+func (h *harness) pauseGit(match, input string) *gitPause {
+	h.t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	dir := h.t.TempDir()
+	p := &gitPause{t: h.t, paused: filepath.Join(dir, "paused"), released: filepath.Join(dir, "released")}
+	cond := "mkdir '" + filepath.Join(dir, "claimed") + "' 2>/dev/null"
+	if input != "" {
+		cond = "grep -qF -e '" + input + "' \"$in\" && " + cond
+	}
+	script := strings.Join([]string{
+		"#!/bin/sh",
+		`case " $* " in`,
+		match + ")",
+		"\tin='" + filepath.Join(dir, "stdin") + "'.$$",
+		"\tcat > \"$in\"",
+		"\tif " + cond + "; then",
+		"\t\ttouch '" + p.paused + "'",
+		"\t\twhile [ ! -e '" + p.released + "' ]; do sleep 0.05; done",
+		"\tfi",
+		"\texec '" + git + "' \"$@\" < \"$in\"",
+		"\t;;",
+		"esac",
+		"exec '" + git + "' \"$@\"",
+	}, "\n") + "\n"
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	//nolint:gosec // G306: the git shim must be executable to shadow the real one on PATH.
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	h.t.Cleanup(p.release)
+	return p
+}
+
+func (p *gitPause) wait(done <-chan restoreResult) {
+	p.t.Helper()
+	deadline := time.After(time.Minute)
+	for {
+		if _, err := os.Stat(p.paused); err == nil {
+			return
+		}
+		select {
+		case res := <-done:
+			p.t.Fatalf("restore finished before git paused: %+v, %v", res.r, res.err)
+		case <-deadline:
+			p.t.Fatal("git never paused")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func (p *gitPause) release() {
+	p.t.Helper()
+	if err := os.WriteFile(p.released, nil, 0o600); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
+func TestRestoreRollbackSparesConcurrentResources(t *testing.T) {
+	const (
+		beforeFetch = `*" fetch "*":refs/reposync/recovery/"*`
+		beforeAdd   = `*" worktree add "*`
+	)
+	userWorktree := func(h *harness, _ worktree.Snapshot, dest string) (string, string) {
+		h.f.RunGit(h.recv, "worktree", "add", "-q", dest)
+		h.f.WriteFile(dest, "mine.txt", "user work\n")
+		return "refs/heads/recovered", h.git(h.recv, "rev-parse", "HEAD")
+	}
+	userBranch := func(h *harness, snap worktree.Snapshot, _ string) (string, string) {
+		h.f.RunGit(h.recv, "branch", "recovery/raced", snap.Head.Commit)
+		return "refs/heads/recovery/raced", snap.Head.Commit
+	}
+	tests := []struct {
+		name     string
+		match    string
+		race     func(h *harness, snap worktree.Snapshot, dest string) (ref, oid string)
+		worktree bool
+	}{
+		{"worktree before snapshot fetch", beforeFetch, userWorktree, true},
+		{"worktree before worktree add", beforeAdd, userWorktree, true},
+		{"branch before snapshot fetch", beforeFetch, userBranch, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newGitHarness(t)
+			h.f.WriteFile(h.src, "wip.txt", "wip\n")
+			snap := h.seal(h.capture())
+			before := h.receiverState()
+			dest := filepath.Join(h.f.Root, "recovered")
+			p := h.pauseGit(tt.match, "")
+			done := h.restoreAsync(t.Context(), h.store, snap, worktree.RestoreOptions{Dest: dest, Branch: "recovery/raced"})
+			p.wait(done)
+			ref, oid := tt.race(h, snap, dest)
+			raced := h.receiverState()
+			p.release()
+			if res := <-done; res.err == nil {
+				t.Fatalf("restore racing another actor succeeded: %+v", res.r)
+			}
+			after := h.receiverState()
+			want := maps.Clone(before.heads)
+			want[ref] = oid
+			if !maps.Equal(after.heads, want) {
+				t.Fatalf("branches after rollback = %v, want %v", after.heads, want)
+			}
+			if tt.worktree {
+				if !strings.Contains(after.worktrees, "worktree "+dest+"\n") || h.f.ReadFile(dest, "mine.txt") != "user work\n" {
+					t.Fatalf("rollback removed the user's worktree:\nraced %s\nafter %s", raced.worktrees, after.worktrees)
+				}
+			} else {
+				h.assertRolledBack(raced, dest)
+			}
+			if refs := h.refs([]string{"-C", h.recv}, worktree.RecoveryPrefix); len(refs) != 0 {
+				t.Fatalf("recovery refs left in checkout: %v", refs)
+			}
+		})
+	}
+}
+
+func TestRestoreCancelledDuringFinalCleanup(t *testing.T) {
+	h := newGitHarness(t)
+	h.f.WriteFile(h.src, "wip.txt", "wip\n")
+	snap := h.seal(h.capture())
+	before := h.receiverState()
+	dest := filepath.Join(h.f.Root, "recovered")
+	opts := worktree.RestoreOptions{Dest: dest}
+	p := h.pauseGit(`*" update-ref --stdin "*`, "delete "+worktree.RecoveryPrefix)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := h.restoreAsync(ctx, h.store, snap, opts)
+	p.wait(done)
+	cancel()
+	p.release()
+	if res := <-done; !errors.Is(res.err, context.Canceled) {
+		t.Fatalf("restore cancelled during its final cleanup = %+v, %v; want context.Canceled", res.r, res.err)
+	}
+	h.assertRolledBack(before, dest)
+	if r := h.restore(snap, opts); r.Reused || r.Path != dest {
+		t.Fatalf("retry restored %+v, want a fresh checkout at %s", r, dest)
+	}
+}
+
+func TestRestoreStoresKeepTemporaryRefsApart(t *testing.T) {
+	h := newGitHarness(t)
+	h.f.WriteFile(h.src, "wip.txt", "wip\n")
+	snap := h.seal(h.capture())
+	other, err := worktree.OpenStore(filepath.Join(h.f.Root, "store-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := h.pauseGit(`*" read-tree -u --reset "*`, "")
+	done := h.restoreAsync(t.Context(), h.store, snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "a")})
+	p.wait(done)
+	b, err := other.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "b")})
+	if err != nil {
+		t.Fatalf("restore through the second store: %v", err)
+	}
+	h.assertFaithful(b)
+	p.release()
+	a := <-done
+	if a.err != nil {
+		t.Fatalf("restore through the first store: %v", a.err)
+	}
+	h.assertFaithful(a.r)
+	if refs := h.refs([]string{"-C", h.recv}, worktree.RecoveryPrefix); len(refs) != 0 {
+		t.Fatalf("recovery refs left in checkout: %v", refs)
+	}
+}
+
+func (h *harness) limitLFSCheckout(limit int) {
+	h.t.Helper()
+	gitLFS, err := exec.LookPath("git-lfs")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	bin := h.t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = checkout ]; then ulimit -f " + strconv.Itoa(limit/512) + "; fi\nexec '" + gitLFS + "' \"$@\"\n"
+	//nolint:gosec // G306: the git-lfs shim must be executable to shadow the real one on PATH.
+	if err := os.WriteFile(filepath.Join(bin, "git-lfs"), []byte(script), 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRestoreRejectsIncompleteLFSCheckout(t *testing.T) {
+	f := vcstest.New(t)
+	remote := f.EnableLFS("*.bin")
+	f.WriteFile(f.Seed, "base.bin", strings.Repeat("published base asset\n", 9000))
+	f.RunGit(f.Seed, "add", "base.bin")
+	f.RunGit(f.Seed, "commit", "-qm", "base asset")
+	f.RunGit(f.Seed, "push", "-q", "origin", "main")
+	h := newHarness(t, f, f.LFSClone(filepath.Join(f.Root, "src")), f.LFSClone(filepath.Join(f.Root, "recv")))
+	h.f.WriteFile(h.src, "wip.txt", "wip\n")
+	snap := h.capture()
+	snap.LFS = &worktree.LFSInfo{Remote: remote}
+	snap = h.seal(snap)
+	h.assertFaithful(h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "unlimited")}))
+	before := h.receiverState()
+	h.limitLFSCheckout(64 << 10)
+	dest := filepath.Join(h.f.Root, "recovered")
+	if r, err := h.store.Restore(t.Context(), h.recvReg(), snap, h.art, worktree.RestoreOptions{Dest: dest, Fresh: true}); err == nil {
+		t.Fatalf("restore over an incomplete lfs checkout succeeded: %+v", r)
+	}
+	h.assertRolledBack(before, dest)
+}
