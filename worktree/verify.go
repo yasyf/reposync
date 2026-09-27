@@ -28,8 +28,8 @@ type FetchGate func(ctx context.Context, fetch func(context.Context) error) erro
 type VerifyOptions struct {
 	// FetchOrigin, when set, admits fetching origin/<trunk> into the checkout
 	// when required commits are missing; nil never fetches. When it defers the
-	// fetch, Verify reports the commits still missing; any other error fails
-	// the verification.
+	// fetch, the verification reports the deferral and is not Ready; any other
+	// error fails the verification.
 	FetchOrigin FetchGate
 }
 
@@ -38,10 +38,14 @@ type VerifyOptions struct {
 // head commit and the trees and blobs of its tree and the staged tree, never
 // their history), artifact digests the source lacks, and
 // "omitted:<reason>:<path>" for WIP the capture could not carry, so an
-// incomplete snapshot is never Ready.
+// incomplete snapshot is never Ready. Deferred, when set, wraps the
+// ErrFetchDeferred FetchOrigin returned: Missing then names every required
+// commit the deferred fetch was for, even one that arrived before an
+// interruption, and a later Verify certifies what did arrive.
 type Verification struct {
 	Ready    bool
 	Missing  []string
+	Deferred error
 	Checkout string
 }
 
@@ -57,12 +61,14 @@ type Verification struct {
 // and the staged tree, not their history — so a checkout lacking any of them,
 // partial or damaged, is not Ready, while one lacking only history can be; and
 // every file artifact is present in src. A bundle the mirror already imported,
-// whose tip it still holds, is validated and pinned from the prerequisites
-// recorded for that bundle, without re-reading its artifact; the receiver
-// commits a held tip's mirrored objects build on stay pinned while any
-// snapshot names the tip. A staged blob the mirror reads back corrupt is
-// re-imported from its artifact, and one still read back corrupt, from a copy
-// Verify cannot replace, fails with ErrCorruptObject.
+// whose tip it still holds and whose recorded heads include that tip, is
+// validated and pinned from the prerequisites recorded for that bundle, without
+// re-reading its artifact; the receiver commits a held tip's mirrored objects
+// build on, directly or through the earlier links that carried its
+// prerequisites, stay pinned while any snapshot names the tip. A staged blob
+// the mirror reads back corrupt is re-imported from its artifact, and one still
+// read back corrupt, from a copy Verify cannot replace, fails with
+// ErrCorruptObject.
 // It is idempotent, and it rebuilds mirror state whose objects went missing.
 // It returns *GitVersionError when the host's git predates 2.44.
 func (s *Store) Verify(ctx context.Context, reg registry.Registry, snap Snapshot, src ArtifactSource, opts VerifyOptions) (Verification, error) {
@@ -128,11 +134,12 @@ func (s *Store) verifyLocked(ctx context.Context, reg registry.Registry, snap Sn
 	for _, o := range snap.Omitted {
 		v.Missing = append(v.Missing, "omitted:"+string(o.Reason)+":"+o.Path)
 	}
-	commits, err := requiredCommits(ctx, checkout, repo.Trunk, snap.Requires, opts.FetchOrigin)
+	commits, deferred, err := requiredCommits(ctx, checkout, repo.Trunk, snap.Requires, opts.FetchOrigin)
 	if err != nil {
 		return v, mirror{}, err
 	}
 	v.Missing = append(v.Missing, commits...)
+	v.Deferred = deferred
 	artifacts, err := absentArtifacts(ctx, src, snap)
 	if err != nil {
 		return v, mirror{}, err
@@ -189,21 +196,25 @@ func receiverCheckout(path string) (root, common string, err error) {
 	return root, common, nil
 }
 
-func requiredCommits(ctx context.Context, checkout, trunk string, requires []string, gate FetchGate) ([]string, error) {
+func requiredCommits(ctx context.Context, checkout, trunk string, requires []string, gate FetchGate) (absent []string, deferred, err error) {
 	checkoutArgs := []string{"-C", checkout}
-	absent, err := missing(ctx, checkoutArgs, requires)
+	absent, err = missing(ctx, checkoutArgs, requires)
 	if err != nil || len(absent) == 0 || gate == nil {
-		return absent, err
+		return absent, nil, err
 	}
 	refspec := "+refs/heads/" + trunk + ":refs/remotes/origin/" + trunk
 	err = gate(ctx, func(ctx context.Context) error {
-		_, err := recvGit(ctx, nil, nil, "-C", checkout, "fetch", "-q", "--no-tags", "--no-write-fetch-head", "origin", refspec)
+		_, err := recvGit(ctx, nil, nil, "-C", checkout, "fetch", "-q", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", "origin", refspec)
 		return err
 	})
-	if err != nil && !errors.Is(err, ErrFetchDeferred) {
-		return nil, fmt.Errorf("fetch origin %s: %w", trunk, err)
+	if errors.Is(err, ErrFetchDeferred) {
+		return absent, err, nil
 	}
-	return missing(ctx, checkoutArgs, requires)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch origin %s: %w", trunk, err)
+	}
+	absent, err = missing(ctx, checkoutArgs, requires)
+	return absent, nil, err
 }
 
 func absentArtifacts(ctx context.Context, src ArtifactSource, snap Snapshot) ([]string, error) {
@@ -247,7 +258,7 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 	if err != nil {
 		return entry, nil, err
 	}
-	delivered := map[string]bool{}
+	delivered := map[string]string{}
 	for i, b := range snap.History {
 		entry.Tips = append(entry.Tips, b.Tip)
 		entry.Bundles = append(entry.Bundles, b.Artifact.Digest)
@@ -264,20 +275,20 @@ func (m mirror) importSnapshot(ctx context.Context, snap Snapshot, src ArtifactS
 			return nil
 		}
 		mirrored := have[tipPrefix+b.Tip] == b.Tip
-		prereqs, recorded := l.Bundles[b.Artifact.Digest]
-		if recorded && mirrored {
-			err = admit(prereqs)
-		} else if prereqs, err = m.importLink(ctx, src, b, admit); err == nil {
-			l.Bundles[b.Artifact.Digest] = prereqs
+		rec, recorded := l.Bundles[b.Artifact.Digest]
+		if recorded && mirrored && slices.Contains(rec.Heads, b.Tip) {
+			err = admit(rec.Prerequisites)
+		} else if rec, err = m.importLink(ctx, src, b, admit); err == nil {
+			l.Bundles[b.Artifact.Digest] = rec
 			if _, known := l.Tips[b.Tip]; !known || !mirrored {
-				l.Tips[b.Tip] = external
+				l.Tips[b.Tip] = receiverDependencies(external, rec.Prerequisites, delivered, l.Tips)
 			}
 		}
 		if err != nil {
 			return entry, nil, err
 		}
 		if i < len(snap.History)-1 {
-			if err := m.carried(ctx, b.Tip, prereqs, delivered); err != nil {
+			if err := m.carried(ctx, b.Tip, rec.Prerequisites, delivered); err != nil {
 				return entry, nil, err
 			}
 		}
@@ -342,10 +353,10 @@ func (m mirror) pin(ctx context.Context, commits []string) error {
 	return nil
 }
 
-func externalPrerequisites(b Bundle, prereqs, requires []string, delivered map[string]bool) ([]string, error) {
+func externalPrerequisites(b Bundle, prereqs, requires []string, delivered map[string]string) ([]string, error) {
 	var external []string
 	for _, p := range prereqs {
-		if delivered[p] {
+		if _, ok := delivered[p]; ok {
 			continue
 		}
 		if !slices.Contains(requires, p) {
@@ -356,57 +367,75 @@ func externalPrerequisites(b Bundle, prereqs, requires []string, delivered map[s
 	return external, nil
 }
 
-func (m mirror) carried(ctx context.Context, tip string, prereqs []string, into map[string]bool) error {
+func receiverDependencies(external, prereqs []string, delivered map[string]string, tips map[string][]string) []string {
+	deps := slices.Clone(external)
+	for _, p := range prereqs {
+		if tip, ok := delivered[p]; ok {
+			deps = append(deps, tips[tip]...)
+		}
+	}
+	slices.Sort(deps)
+	return slices.Compact(deps)
+}
+
+func (m mirror) carried(ctx context.Context, tip string, prereqs []string, into map[string]string) error {
 	out, err := m.git(ctx, nil, nil, append([]string{"rev-list", tip, "--not"}, prereqs...)...)
 	if err != nil {
 		return fmt.Errorf("list commits bundle tip %s carries: %w", tip, err)
 	}
 	for l := range strings.Lines(out) {
-		into[strings.TrimSuffix(l, "\n")] = true
+		into[strings.TrimSuffix(l, "\n")] = tip
 	}
 	return nil
 }
 
-func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle, admit func(prereqs []string) error) ([]string, error) {
+func (m mirror) importLink(ctx context.Context, src ArtifactSource, b Bundle, admit func(prereqs []string) error) (bundleRecord, error) {
+	var rec bundleRecord
 	spool, err := os.CreateTemp(m.scratch, ".bundle-*")
 	if err != nil {
-		return nil, fmt.Errorf("spool bundle: %w", err)
+		return rec, fmt.Errorf("spool bundle: %w", err)
 	}
 	defer func() { _ = os.Remove(spool.Name()) }()
 	if err := copyVerified(ctx, src, b.Artifact, spool); err != nil {
 		_ = spool.Close()
-		return nil, err
+		return rec, err
 	}
 	if err := spool.Close(); err != nil {
-		return nil, fmt.Errorf("spool bundle: %w", err)
+		return rec, fmt.Errorf("spool bundle: %w", err)
 	}
-	prereqs, err := bundlePrerequisites(spool.Name())
-	if err != nil {
-		return nil, fmt.Errorf("bundle %s: %w", b.Artifact.Digest, err)
+	if rec.Prerequisites, err = bundlePrerequisites(spool.Name()); err != nil {
+		return rec, fmt.Errorf("bundle %s: %w", b.Artifact.Digest, err)
 	}
-	if err := admit(prereqs); err != nil {
-		return nil, err
+	if err := admit(rec.Prerequisites); err != nil {
+		return rec, err
 	}
 	if _, err := m.git(ctx, nil, nil, "bundle", "verify", "-q", spool.Name()); err != nil {
-		return nil, fmt.Errorf("verify bundle %s: %w", b.Artifact.Digest, err)
+		return rec, fmt.Errorf("verify bundle %s: %w", b.Artifact.Digest, err)
 	}
 	heads, err := m.git(ctx, nil, nil, "bundle", "list-heads", spool.Name())
 	if err != nil {
-		return nil, fmt.Errorf("list bundle heads: %w", err)
+		return rec, fmt.Errorf("list bundle heads: %w", err)
 	}
 	var head string
 	for l := range strings.Lines(heads) {
-		if oid, ref, ok := strings.Cut(strings.TrimSuffix(l, "\n"), " "); ok && oid == b.Tip {
+		oid, ref, ok := strings.Cut(strings.TrimSuffix(l, "\n"), " ")
+		if !ok {
+			continue
+		}
+		rec.Heads = append(rec.Heads, oid)
+		if oid == b.Tip {
 			head = ref
 		}
 	}
 	if head == "" {
-		return nil, fmt.Errorf("%w: bundle %s does not carry tip %s", ErrArtifactMismatch, b.Artifact.Digest, b.Tip)
+		return rec, fmt.Errorf("%w: bundle %s does not carry tip %s", ErrArtifactMismatch, b.Artifact.Digest, b.Tip)
 	}
 	if _, err := m.git(ctx, nil, nil, "fetch", "-q", "--no-tags", "--no-write-fetch-head", spool.Name(), "+"+head+":"+tipPrefix+b.Tip); err != nil {
-		return nil, fmt.Errorf("import bundle %s: %w", b.Artifact.Digest, err)
+		return rec, fmt.Errorf("import bundle %s: %w", b.Artifact.Digest, err)
 	}
-	return prereqs, nil
+	slices.Sort(rec.Heads)
+	rec.Heads = slices.Compact(rec.Heads)
+	return rec, nil
 }
 
 func (m mirror) buildIndex(ctx context.Context, snap Snapshot, src ArtifactSource) (string, error) {

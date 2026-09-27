@@ -31,7 +31,8 @@ var (
 	ErrInvalidSnapshot = errors.New("invalid snapshot")
 	// ErrFetchDeferred means a FetchGate refused or interrupted its fetch: a
 	// restore completes with the LFS objects it could not fetch pending, and a
-	// verification reports the commits it could not fetch missing.
+	// verification is not Ready, reporting the deferral and the commits the
+	// fetch was for.
 	ErrFetchDeferred = errors.New("fetch deferred")
 )
 

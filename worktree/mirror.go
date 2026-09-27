@@ -58,10 +58,15 @@ func (m mirror) lfsPath(oid string) string {
 }
 
 type mirrorLedger struct {
-	Schema    string                 `json:"schema"`
-	Snapshots map[string]mirrorEntry `json:"snapshots"`
-	Tips      map[string][]string    `json:"tips"`
-	Bundles   map[string][]string    `json:"bundles"`
+	Schema    string                  `json:"schema"`
+	Snapshots map[string]mirrorEntry  `json:"snapshots"`
+	Tips      map[string][]string     `json:"tips"`
+	Bundles   map[string]bundleRecord `json:"bundles"`
+}
+
+type bundleRecord struct {
+	Heads         []string `json:"heads"`
+	Prerequisites []string `json:"prerequisites"`
 }
 
 type mirrorEntry struct {
@@ -89,11 +94,14 @@ func (l mirrorLedger) Validate() error {
 			return fmt.Errorf("tip %q: %w", tip, err)
 		}
 	}
-	for digest, prereqs := range l.Bundles {
+	for digest, rec := range l.Bundles {
 		if sum, ok := strings.CutPrefix(digest, digestPrefix); !ok || !isHex(sum, 64) {
 			return fmt.Errorf("bundle digest %q", digest)
 		}
-		if err := validateOIDs(prereqs); err != nil {
+		if len(rec.Heads) == 0 {
+			return fmt.Errorf("bundle %q records no heads", digest)
+		}
+		if err := validateOIDs(append(slices.Clone(rec.Heads), rec.Prerequisites...)); err != nil {
 			return fmt.Errorf("bundle %q: %w", digest, err)
 		}
 	}
@@ -132,13 +140,13 @@ func (l mirrorLedger) keep() (pins, tips, bundles, lfs map[string]bool) {
 }
 
 func (m mirror) load() (mirrorLedger, error) {
-	return readDurable(m.ledger, mirrorLedger{Schema: mirrorSchema, Snapshots: map[string]mirrorEntry{}, Tips: map[string][]string{}, Bundles: map[string][]string{}})
+	return readDurable(m.ledger, mirrorLedger{Schema: mirrorSchema, Snapshots: map[string]mirrorEntry{}, Tips: map[string][]string{}, Bundles: map[string]bundleRecord{}})
 }
 
 func (m mirror) save(l mirrorLedger) error {
 	_, tips, bundles, _ := l.keep()
 	maps.DeleteFunc(l.Tips, func(tip string, _ []string) bool { return !tips[tip] })
-	maps.DeleteFunc(l.Bundles, func(digest string, _ []string) bool { return !bundles[digest] })
+	maps.DeleteFunc(l.Bundles, func(digest string, _ bundleRecord) bool { return !bundles[digest] })
 	return writeDurable(m.ledger, l)
 }
 

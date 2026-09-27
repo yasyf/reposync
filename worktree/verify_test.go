@@ -146,15 +146,17 @@ func TestVerifyRequiresTrunk(t *testing.T) {
 
 	boom := errors.New("origin refused")
 	tests := []struct {
-		name        string
-		gate        worktree.FetchGate
-		wantMissing []string
-		wantErr     error
+		name         string
+		gate         worktree.FetchGate
+		wantMissing  []string
+		wantDeferred bool
+		wantErr      error
 	}{
 		{
-			name:        "refused",
-			gate:        func(context.Context, func(context.Context) error) error { return worktree.ErrFetchDeferred },
-			wantMissing: []string{trunk},
+			name:         "refused",
+			gate:         func(context.Context, func(context.Context) error) error { return worktree.ErrFetchDeferred },
+			wantMissing:  []string{trunk},
+			wantDeferred: true,
 		},
 		{
 			name: "interrupted",
@@ -163,7 +165,8 @@ func TestVerifyRequiresTrunk(t *testing.T) {
 				cancel()
 				return fmt.Errorf("%w: %w", worktree.ErrFetchDeferred, fetch(fetchCtx))
 			},
-			wantMissing: []string{trunk},
+			wantMissing:  []string{trunk},
+			wantDeferred: true,
 		},
 		{
 			name:    "failed",
@@ -182,8 +185,8 @@ func TestVerifyRequiresTrunk(t *testing.T) {
 				gated++
 				return tt.gate(ctx, fetch)
 			}})
-			if gated != 1 || !errors.Is(err, tt.wantErr) || v.Ready != (tt.wantErr == nil && tt.wantMissing == nil) || !slices.Equal(v.Missing, tt.wantMissing) {
-				t.Fatalf("gate called %d times, verify = %+v, %v; want once, missing %v, error %v", gated, v, err, tt.wantMissing, tt.wantErr)
+			if gated != 1 || !errors.Is(err, tt.wantErr) || v.Ready != (tt.wantErr == nil && tt.wantMissing == nil) || !slices.Equal(v.Missing, tt.wantMissing) || errors.Is(v.Deferred, worktree.ErrFetchDeferred) != tt.wantDeferred {
+				t.Fatalf("gate called %d times, verify = %+v, %v; want once, missing %v, deferred %t, error %v", gated, v, err, tt.wantMissing, tt.wantDeferred, tt.wantErr)
 			}
 		})
 	}
@@ -201,6 +204,44 @@ func TestVerifyRequiresTrunk(t *testing.T) {
 	key := worktree.SnapshotKey(snap)
 	if refs[worktree.TipPrefix+snap.Head.Commit] != snap.Head.Commit || refs[worktree.SnapshotPrefix+key+"/head"] != snap.Head.Commit || refs[worktree.SnapshotPrefix+key+"/index"] == "" {
 		t.Fatalf("mirror refs = %v", refs)
+	}
+}
+
+func TestVerifyNeverReadiesADeferredFetch(t *testing.T) {
+	h := newGitHarness(t)
+	trunk := h.f.AdvanceOrigin("trunk moves")
+	h.f.RunGit(h.src, "pull", "-q")
+	h.commit(h.src, "feature.txt", "feature\n")
+	snap := h.seal(h.capture())
+	v := h.verify(snap, worktree.VerifyOptions{FetchOrigin: func(ctx context.Context, fetch func(context.Context) error) error {
+		if err := fetch(ctx); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: network policy changed as the fetch finished", worktree.ErrFetchDeferred)
+	}})
+	h.git(h.recv, "cat-file", "-e", trunk+"^{commit}")
+	if v.Ready || !slices.Equal(v.Missing, []string{trunk}) || !errors.Is(v.Deferred, worktree.ErrFetchDeferred) {
+		t.Fatalf("verify after a deferred fetch = %+v; want not ready, missing [%s], deferred", v, trunk)
+	}
+	if refs, pins := h.mirrorRefs(), h.pins(); len(refs) != 0 || len(pins) != 0 {
+		t.Fatalf("deferred verify left mirror refs %v and pins %v", refs, pins)
+	}
+	if v := h.verify(snap, worktree.VerifyOptions{}); !v.Ready || v.Deferred != nil {
+		t.Fatalf("verify of the commits the deferred fetch delivered = %+v, want ready", v)
+	}
+}
+
+func TestVerifyFetchesNoSubmoduleRemote(t *testing.T) {
+	h, requests := newUnreachableSubmoduleHarness(t)
+	h.f.AdvanceOrigin("trunk moves")
+	h.f.RunGit(h.src, "pull", "-q")
+	h.commit(h.src, "feature.txt", "feature\n")
+	snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
+	v, err := h.store.Verify(t.Context(), h.recvReg(), snap, h.art, worktree.VerifyOptions{FetchOrigin: func(ctx context.Context, fetch func(context.Context) error) error {
+		return fetch(ctx)
+	}})
+	if n := requests.Load(); err != nil || n != 0 || !v.Ready {
+		t.Fatalf("verify made %d submodule requests: %+v, %v; want ready", n, v, err)
 	}
 }
 
@@ -592,6 +633,41 @@ func TestVerifyAdmitsRecutBundleForMirroredTip(t *testing.T) {
 		t.Fatalf("pins = %v, want %v: the mirrored tip still builds on %s", pins, want, base)
 	}
 	h.assertFaithful(h.restore(second, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
+}
+
+func TestVerifyKeepsEarlierLinkPinsForRecutTip(t *testing.T) {
+	h := newGitHarness(t)
+	base := h.git(h.src, "rev-parse", "origin/main")
+	published := h.commit(h.src, "published.txt", "published later\n")
+	st, wt := openStore(t), discoverAt(t, h.src, h.src)
+	mustCapture(t, st, wt, h.art)
+	tip := h.commit(h.src, "private.txt", "still private\n")
+	chained := mustCapture(t, st, wt, h.art)
+	if len(chained.History) != 2 || chained.History[0].Tip != published || chained.History[1].Tip != tip || !slices.Equal(chained.Requires, []string{base}) {
+		t.Fatalf("chained history %+v requires %v, want links to %s then %s on [%s]", chained.History, chained.Requires, published, tip, base)
+	}
+	if v := h.verify(chained, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("chained verify = %+v, want ready", v)
+	}
+
+	h.f.RunGit(h.src, "push", "-q", "origin", published+":refs/heads/main")
+	h.f.RunGit(h.recv, "pull", "-q")
+	h.f.RunGit(h.src, "fetch", "-q", "origin")
+	h.art.Remove(chained.History[0].Artifact)
+	recut := mustCapture(t, st, wt, h.art)
+	if len(recut.History) != 1 || recut.History[0].Tip != tip || !slices.Equal(recut.Requires, []string{published}) {
+		t.Fatalf("recut history %+v requires %v, want tip %s on [%s]", recut.History, recut.Requires, tip, published)
+	}
+	if v := h.verify(recut, worktree.VerifyOptions{}); !v.Ready {
+		t.Fatalf("recut verify = %+v, want ready", v)
+	}
+	if err := h.store.Release(t.Context(), h.recvReg(), chained); err != nil {
+		t.Fatal(err)
+	}
+	if pins, want := h.pins(), slices.Sorted(slices.Values([]string{base, published})); !slices.Equal(pins, want) {
+		t.Fatalf("pins = %v, want %v: the mirrored tip builds on %s through the released link to %s", pins, want, base, published)
+	}
+	h.assertFaithful(h.restore(recut, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "dest")}))
 }
 
 func TestVerifyRejectsUndeclaredBundlePrerequisite(t *testing.T) {

@@ -62,7 +62,8 @@ func TestRestoreApplySparseSkipsReceiverFSMonitor(t *testing.T) {
 	}
 }
 
-func TestRestoreFetchesNoSubmoduleRemote(t *testing.T) {
+func newUnreachableSubmoduleHarness(t *testing.T) (*harness, *atomic.Int32) {
+	t.Helper()
 	f := vcstest.New(t)
 	sub := filepath.Join(f.Root, "sub-origin")
 	f.RunGit(f.Root, "init", "-q", "-b", "main", sub)
@@ -83,9 +84,14 @@ func TestRestoreFetchesNoSubmoduleRemote(t *testing.T) {
 	t.Cleanup(server.Close)
 	f.RunGit(filepath.Join(h.recv, "sub"), "remote", "set-url", "origin", server.URL+"/sub.git")
 	f.RunGit(h.recv, "config", "fetch.recurseSubmodules", "true")
-	f.WriteFile(h.src, "README.md", "work in progress\n")
+	return h, &requests
+}
+
+func TestRestoreFetchesNoSubmoduleRemote(t *testing.T) {
+	h, requests := newUnreachableSubmoduleHarness(t)
+	h.f.WriteFile(h.src, "README.md", "work in progress\n")
 	snap := mustCapture(t, openStore(t), discoverAt(t, h.src, h.src), h.art)
-	r := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(f.Root, "recovered")})
+	r := h.restore(snap, worktree.RestoreOptions{Dest: filepath.Join(h.f.Root, "recovered")})
 	if n := requests.Load(); n != 0 || !r.Exact {
 		t.Fatalf("restore made %d network requests, restored %+v", n, r)
 	}
