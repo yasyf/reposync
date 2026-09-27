@@ -554,25 +554,58 @@ func (c *capture) classify(ctx context.Context, status statusReport, snap *Snaps
 }
 
 func (c *capture) historySubmodules(ctx context.Context, head Head) error {
-	var out bytes.Buffer
-	if err := c.src.run(ctx, nil, &out, "diff-tree", "-r", "-z", "--raw", "--no-abbrev", "--no-renames", head.TrunkBase, head.Commit); err != nil {
+	if head.Ahead == 0 {
+		return nil
+	}
+	var commits, out bytes.Buffer
+	if err := c.src.run(ctx, nil, &commits, "rev-list", head.Commit, "^"+head.TrunkTip); err != nil {
 		return err
 	}
-	tokens := strings.Split(strings.TrimSuffix(out.String(), "\x00"), "\x00")
-	for i := 0; i+1 < len(tokens); i += 2 {
-		f := strings.Fields(tokens[i])
-		if len(f) != 5 || f[1] != "160000" {
-			continue
-		}
-		published, err := publishedCommit(ctx, filepath.Join(c.wt.Root, filepath.FromSlash(tokens[i+1])), f[3])
+	if err := c.src.run(ctx, &commits, &out, "diff-tree", "--stdin", "-r", "-c", "--root", "--raw", "--no-abbrev", "-z", "--no-renames"); err != nil {
+		return err
+	}
+	links, err := parseGitlinks(out.String())
+	if err != nil {
+		return err
+	}
+	for _, l := range links {
+		published, err := publishedCommit(ctx, filepath.Join(c.wt.Root, filepath.FromSlash(l.path)), l.oid)
 		if err != nil {
 			return err
 		}
 		if !published {
-			c.omitted = append(c.omitted, Omission{Path: tokens[i+1], Reason: OmitSubmodule})
+			c.omitted = append(c.omitted, Omission{Path: l.path, Reason: OmitSubmodule})
 		}
 	}
 	return nil
+}
+
+type gitlink struct {
+	path, oid string
+}
+
+func parseGitlinks(out string) ([]gitlink, error) {
+	var links []gitlink
+	seen := map[gitlink]bool{}
+	tokens := strings.Split(out, "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := strings.Trim(tokens[i], "\n")
+		if tok == "" || isHex(tok, 40) || isHex(tok, 64) {
+			continue
+		}
+		parents := len(tok) - len(strings.TrimLeft(tok, ":"))
+		f := strings.Fields(tok)
+		if parents == 0 || len(f) != 2*parents+3 || i+1 >= len(tokens) {
+			return nil, fmt.Errorf("raw diff record %q", tok)
+		}
+		i++
+		l := gitlink{path: tokens[i], oid: f[2*parents+1]}
+		if f[parents] == "160000" && !seen[l] {
+			seen[l] = true
+			links = append(links, l)
+		}
+	}
+	return links, nil
 }
 
 func publishedCommit(ctx context.Context, dir, oid string) (bool, error) {
