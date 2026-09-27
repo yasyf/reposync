@@ -20,10 +20,12 @@ import (
 const opTimeout = 5 * time.Minute
 
 // termGrace is how long a canceled git/jj process group gets to unwind after
-// SIGTERM — abort its ref transaction and unlink its lock files — before Go's
-// SIGKILL backstop, and how long Wait waits for an orphaned grandchild to release
-// the output pipes before force-closing them.
+// SIGTERM — abort its ref transaction and unlink its lock files — before the
+// whole group is SIGKILLed, and how long Wait waits for an orphaned grandchild
+// to release the output pipes before force-closing them.
 const termGrace = 10 * time.Second
+
+const groupPoll = 10 * time.Millisecond
 
 // gitSSHCommand makes git/jj fail fast on a dead SSH connection: BatchMode
 // prevents credential prompts, ConnectTimeout caps the handshake, and the
@@ -79,15 +81,22 @@ type Cmd struct {
 }
 
 // Exec runs c in its own process group under the per-invocation timeout: a
-// canceled context sends SIGTERM to the whole group before Go's SIGKILL
-// backstop. A failure carries the exit code and trimmed stderr.
+// canceled context sends SIGTERM to the whole group, and Exec returns only once
+// every process in the group has exited, SIGKILLing the group termGrace after
+// the SIGTERM — even when the direct process exited first and left a
+// descendant, such as an LFS transfer helper, behind. A failure carries the
+// exit code and trimmed stderr.
 func Exec(ctx context.Context, c Cmd) error {
 	ctx, cancel := context.WithTimeout(ctx, opTimeout)
 	defer cancel()
 	//nolint:gosec // G204: reposync drives git/jj by design; name and args come from trusted repo config and internal call sites, not untrusted input.
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	var termed time.Time
+	cmd.Cancel = func() error {
+		termed = time.Now()
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	}
 	cmd.WaitDelay = termGrace
 	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), "GIT_SSH_COMMAND="+gitSSHCommand)
@@ -97,7 +106,11 @@ func Exec(ctx context.Context, c Cmd) error {
 	cmd.Stdout = c.Stdout
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if !termed.IsZero() {
+		err = errors.Join(err, stopGroup(cmd.Process.Pid, termed.Add(termGrace)))
+	}
+	if err != nil {
 		code := -1
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -106,6 +119,31 @@ func Exec(ctx context.Context, c Cmd) error {
 		return &cmdError{name: c.Name, args: c.Args, code: code, stderr: strings.TrimSpace(stderr.String()), err: err}
 	}
 	return nil
+}
+
+func stopGroup(pgid int, killAt time.Time) error {
+	if groupExited(pgid, killAt) {
+		return nil
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("kill process group %d: %w", pgid, err)
+	}
+	if !groupExited(pgid, time.Now().Add(termGrace)) {
+		return fmt.Errorf("process group %d outlived SIGKILL", pgid)
+	}
+	return nil
+}
+
+func groupExited(pgid int, deadline time.Time) bool {
+	for {
+		if errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(groupPoll)
+	}
 }
 
 // ReadOnlyGitEnv is the environment for git reads against a repository
