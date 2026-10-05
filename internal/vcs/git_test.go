@@ -102,11 +102,8 @@ func TestGitAdvance(t *testing.T) {
 		if got != OutcomeUpToDate {
 			t.Fatalf("outcome = %q, want up-to-date", got)
 		}
-		commands, err := os.ReadFile(trace)
-		if err != nil {
-			t.Fatalf("read git trace: %v", err)
-		}
-		if strings.Contains(string(commands), " status ") {
+		commands := f.ReadFile(f.Root, "git-trace.log")
+		if strings.Contains(commands, " status ") {
 			t.Fatalf("up-to-date advance ran git status:\n%s", commands)
 		}
 	})
@@ -264,14 +261,11 @@ func TestGitInUseUntrackedNotBusy(t *testing.T) {
 	if busy {
 		t.Fatalf("InUse = busy (%q), want not busy on an untracked file", reason)
 	}
-	commands, err := os.ReadFile(trace)
-	if err != nil {
-		t.Fatalf("read git trace: %v", err)
-	}
-	if !strings.Contains(string(commands), " status --porcelain -uno -z") {
+	commands := f.ReadFile(f.Root, "git-trace.log")
+	if !strings.Contains(commands, " status --porcelain -uno -z") {
 		t.Fatalf("InUse did not use tracked-only status:\n%s", commands)
 	}
-	if strings.Contains(string(commands), " status --porcelain -uall -z") {
+	if strings.Contains(commands, " status --porcelain -uall -z") {
 		t.Fatalf("InUse enumerated untracked files:\n%s", commands)
 	}
 
