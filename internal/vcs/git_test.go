@@ -93,12 +93,21 @@ func TestGitAdvance(t *testing.T) {
 	t.Run("clean up-to-date returns up-to-date", func(t *testing.T) {
 		f := vcstest.New(t)
 		r := openGit(t, f.GitClone(filepath.Join(f.Root, "clone")))
+		trace := filepath.Join(f.Root, "git-trace.log")
+		t.Setenv("GIT_TRACE", trace)
 		got, err := r.Advance(context.Background())
 		if err != nil {
 			t.Fatalf("advance: %v", err)
 		}
 		if got != OutcomeUpToDate {
 			t.Fatalf("outcome = %q, want up-to-date", got)
+		}
+		commands, err := os.ReadFile(trace)
+		if err != nil {
+			t.Fatalf("read git trace: %v", err)
+		}
+		if strings.Contains(string(commands), " status ") {
+			t.Fatalf("up-to-date advance ran git status:\n%s", commands)
 		}
 	})
 
@@ -245,6 +254,8 @@ func TestGitInUseUntrackedNotBusy(t *testing.T) {
 	r := openGit(t, dest)
 	f.WriteFile(dest, "scratch.txt", "untracked\n")
 	want := f.AdvanceOrigin("v2")
+	trace := filepath.Join(f.Root, "git-trace.log")
+	t.Setenv("GIT_TRACE", trace)
 
 	busy, reason, err := r.InUse(context.Background(), time.Nanosecond)
 	if err != nil {
@@ -252,6 +263,16 @@ func TestGitInUseUntrackedNotBusy(t *testing.T) {
 	}
 	if busy {
 		t.Fatalf("InUse = busy (%q), want not busy on an untracked file", reason)
+	}
+	commands, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("read git trace: %v", err)
+	}
+	if !strings.Contains(string(commands), " status --porcelain -uno -z") {
+		t.Fatalf("InUse did not use tracked-only status:\n%s", commands)
+	}
+	if strings.Contains(string(commands), " status --porcelain -uall -z") {
+		t.Fatalf("InUse enumerated untracked files:\n%s", commands)
 	}
 
 	got, err := r.Advance(context.Background())

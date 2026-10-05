@@ -46,7 +46,7 @@ func (r *gitRepo) InUse(ctx context.Context, idle time.Duration) (bool, string, 
 	if recent {
 		return true, "recent activity", nil
 	}
-	d, err := dirtState(ctx, r.path)
+	d, err := trackedDirtState(ctx, r.path)
 	if err != nil {
 		return false, "", err
 	}
@@ -99,15 +99,15 @@ func (r *gitRepo) Advance(ctx context.Context) (Outcome, error) {
 		return "", err
 	}
 	if onTrunk {
+		if behind == 0 {
+			return OutcomeUpToDate, nil
+		}
 		d, err := dirtState(ctx, r.path)
 		if err != nil {
 			return "", err
 		}
 		if len(d.generated) > 0 && len(d.blocking) == 0 {
 			return r.advanceGenerated(ctx, g, ahead, behind, d)
-		}
-		if behind == 0 {
-			return OutcomeUpToDate, nil
 		}
 		if ahead > 0 {
 			return OutcomeDiverged, nil

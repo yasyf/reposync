@@ -25,7 +25,15 @@ type dirt struct {
 }
 
 func dirtState(ctx context.Context, path string) (dirt, error) {
-	status, err := run(ctx, path, "git", "-C", path, "status", "--porcelain", "-uall", "-z")
+	return readDirtState(ctx, path, "-uall")
+}
+
+func trackedDirtState(ctx context.Context, path string) (dirt, error) {
+	return readDirtState(ctx, path, "-uno")
+}
+
+func readDirtState(ctx context.Context, path, untrackedMode string) (dirt, error) {
+	status, err := run(ctx, path, "git", "-C", path, "status", "--porcelain", untrackedMode, "-z")
 	if err != nil {
 		return dirt{}, err
 	}
