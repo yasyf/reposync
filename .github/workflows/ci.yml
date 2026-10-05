@@ -21,7 +21,7 @@ jobs:
     # compiles off darwin, so every job that builds this module needs a darwin
     # host.
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
