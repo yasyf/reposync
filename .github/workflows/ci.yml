@@ -24,7 +24,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      # v6.4.0: since 2026-10-15 codeload 404s the v6.5.0 archive by SHA, and macOS runners fetch by SHA.
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version-file: go.mod
           cache: true
