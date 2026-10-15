@@ -165,18 +165,21 @@ func Clone(ctx context.Context, origin, dest string) error {
 	return err
 }
 
-// WatchPaths returns the VCS metadata leaf directories to watch for a repo. Each
-// is a small directory holding origin trunk refs (and the jj op log), cheap for
-// synckit's fsnotify backend to watch recursively (kqueue/inotify, zero FSEvents
-// streams) — unlike .git, whose object store would cost a descriptor per entry
-// (kqueue charges files too).
-// A loose-ref fetch always touches one of these; the rare packed-refs case is
-// caught by the reconcile tick.
-func WatchPaths(root string) []string {
+// WatchPaths returns what synckit watches for a repo: origin/<trunk>'s ref and
+// reflog as single files, plus the jj op heads directory in a colocated repo.
+// trunk defaults to "main" when empty, as in Open.
+//
+// A missing trunk file waits for synckit's rewatch sweep; a packed-refs rewrite,
+// for the reconcile tick.
+func WatchPaths(root, trunk string) []string {
+	if trunk == "" {
+		trunk = defaultTrunk
+	}
 	git := filepath.Join(root, ".git")
+	ref := filepath.FromSlash(trunk)
 	paths := []string{
-		filepath.Join(git, "refs", "remotes", "origin"),
-		filepath.Join(git, "logs", "refs", "remotes", "origin"),
+		filepath.Join(git, "refs", "remotes", "origin", ref),
+		filepath.Join(git, "logs", "refs", "remotes", "origin", ref),
 	}
 	if isDir(filepath.Join(root, ".jj")) {
 		paths = append(paths, filepath.Join(root, ".jj", "repo", "op_heads", "heads"))

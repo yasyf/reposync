@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Each repo's synckit watch now declares only its trunk's remote-tracking
+  ref and reflog, `.git/refs/remotes/origin/<trunk>` and
+  `.git/logs/refs/remotes/origin/<trunk>`, instead of both origin
+  directories. A fetch that moves other branches no longer wakes the repo,
+  and on macOS synckit holds two descriptors per repo instead of one per
+  remote branch and reflog, which came to 8,429 for one monorepo checkout.
+  A plain-git clone keeps its trunk in `packed-refs` with no reflog until
+  trunk first moves, so synckit sees that first move at its next 30-second
+  rewatch sweep instead of at once. jj clones write both files at clone
+  time.
+
 ## [0.30.1] - 2026-09-22
 
 ### Fixed
