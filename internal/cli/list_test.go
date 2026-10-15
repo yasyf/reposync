@@ -71,7 +71,7 @@ func TestWatchItemAddsUntrackedEnvPaths(t *testing.T) {
 		Origin:  fx.Origin,
 		Trunk:   "main",
 	}, dl)
-	want := append(vcs.WatchPaths(alpha),
+	want := append(vcs.WatchPaths(alpha, "main"),
 		filepath.Join(alpha, ".env"),
 		filepath.Join(alpha, ".env.dev"),
 		filepath.Join(alpha, ".env.local"),
@@ -110,7 +110,7 @@ func TestWatchItemIneligibleReposOmitEnv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var errw bytes.Buffer
 			item := watchItem(t.Context(), &errw, tc.name, tc.repo, dl)
-			if want := vcs.WatchPaths(alpha); !slices.Equal(item.WatchDirs, want) {
+			if want := vcs.WatchPaths(alpha, "main"); !slices.Equal(item.WatchDirs, want) {
 				t.Fatalf("watch dirs = %v, want %v", item.WatchDirs, want)
 			}
 			if want := fx.OriginMain() + "\n"; item.Fingerprint != want {
@@ -120,6 +120,30 @@ func TestWatchItemIneligibleReposOmitEnv(t *testing.T) {
 				t.Fatalf("watch item logged unexpectedly: %s", errw.String())
 			}
 		})
+	}
+}
+
+func TestWatchItemWatchesTheRepoTrunk(t *testing.T) {
+	fx := vcstest.New(t)
+	dl := filepath.Join(fx.Root, "data")
+	alpha := fx.GitClone(filepath.Join(dl, "alpha"))
+	fx.RunGit(fx.Seed, "push", "-q", "origin", "HEAD:refs/heads/release/2026")
+	fx.RunGit(alpha, "fetch", "-q", "origin")
+
+	var errw bytes.Buffer
+	item := watchItem(t.Context(), &errw, "alpha", state.Repo{Relpath: "alpha", Trunk: "release/2026", LocalOnly: true}, dl)
+	want := []string{
+		filepath.Join(alpha, ".git", "refs", "remotes", "origin", "release", "2026"),
+		filepath.Join(alpha, ".git", "logs", "refs", "remotes", "origin", "release", "2026"),
+	}
+	if !slices.Equal(item.WatchDirs, want) {
+		t.Fatalf("watch dirs = %v, want %v", item.WatchDirs, want)
+	}
+	if want := fx.OriginMain() + "\n"; item.Fingerprint != want {
+		t.Fatalf("fingerprint = %q, want %q", item.Fingerprint, want)
+	}
+	if errw.Len() != 0 {
+		t.Fatalf("watch item logged unexpectedly: %s", errw.String())
 	}
 }
 
@@ -166,7 +190,7 @@ func TestWatchItemTrackedEnvContributesNoState(t *testing.T) {
 	fx.RunGit(alpha, "add", ".env")
 	tracked := watchItem(t.Context(), &errw, fx.Origin, repo, dl)
 
-	wantPaths := append(vcs.WatchPaths(alpha),
+	wantPaths := append(vcs.WatchPaths(alpha, "main"),
 		filepath.Join(alpha, ".env"),
 		filepath.Join(alpha, ".env.local"),
 	)

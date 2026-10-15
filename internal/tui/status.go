@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -82,12 +83,13 @@ func (s sortMode) String() string {
 
 func (s sortMode) next() sortMode { return (s + 1) % 3 }
 
-// repoMTime returns the newest modification time among a repo's VCS metadata
-// leaf directories — the same set the watch daemon watches — falling back to the
-// checkout root. Any stat error is skipped so a fresh clone, a packed-refs repo,
-// or a synthetic test candidate never breaks the scan.
 func repoMTime(absPath string) time.Time {
-	leaves := append(vcs.WatchPaths(absPath), absPath)
+	leaves := []string{
+		filepath.Join(absPath, ".git", "refs", "remotes", "origin"),
+		filepath.Join(absPath, ".git", "logs", "refs", "remotes", "origin"),
+		filepath.Join(absPath, ".jj", "repo", "op_heads", "heads"),
+		absPath,
+	}
 
 	var newest time.Time
 	for _, p := range leaves {

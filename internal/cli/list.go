@@ -35,7 +35,7 @@ func watchItems(ctx context.Context, errw io.Writer, st *state.State, dl string)
 func watchItem(ctx context.Context, errw io.Writer, id string, repo state.Repo, dl string) syncservice.WatchItem {
 	abs := repo.AbsPath(dl)
 	reason := busyReason(errw, abs)
-	watchDirs := vcs.WatchPaths(abs)
+	watchDirs := vcs.WatchPaths(abs, repo.Trunk)
 	envDigest := ""
 	if envEligible(repo) {
 		envPaths, err := envWatchPaths(ctx, abs)
