@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+	dkversion "github.com/yasyf/daemonkit/version"
 
 	"github.com/yasyf/reposync/internal/tui"
 )
@@ -19,7 +20,7 @@ func Execute(version string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	root := newRoot(version)
+	root := newRoot(dkversion.Running(version))
 	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return
@@ -49,7 +50,7 @@ func newRoot(version string) *cobra.Command {
 		newSelfCmd(),
 		newSyncCmd(),
 		newRPCServeCmd(version),
-		newInstallCmd(),
+		newInstallCmd(version),
 		newUninstallCmd(),
 		newTUICmd(version),
 	)

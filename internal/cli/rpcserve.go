@@ -18,9 +18,11 @@ import (
 	"github.com/yasyf/reposync/internal/transfer"
 )
 
+const rpcServeCommand = "rpc-serve-v1"
+
 func newRPCServeCmd(build string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "rpc-serve-v1",
+		Use:   rpcServeCommand,
 		Short: "Run the resident revisioned sync service for synckitd.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
