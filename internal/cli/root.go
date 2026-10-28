@@ -48,7 +48,7 @@ func newRoot(version string) *cobra.Command {
 		newHostCmd(),
 		newSelfCmd(),
 		newSyncCmd(),
-		newRPCServeCmd(),
+		newRPCServeCmd(version),
 		newInstallCmd(),
 		newUninstallCmd(),
 		newTUICmd(version),

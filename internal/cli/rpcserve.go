@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/yasyf/daemonkit"
+	dkversion "github.com/yasyf/daemonkit/version"
 
 	"github.com/yasyf/synckit/helperruntime"
 	"github.com/yasyf/synckit/rpc"
@@ -17,13 +18,13 @@ import (
 	"github.com/yasyf/reposync/internal/transfer"
 )
 
-func newRPCServeCmd() *cobra.Command {
+func newRPCServeCmd(build string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rpc-serve-v1",
 		Short: "Run the resident revisioned sync service for synckitd.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runResidentService(cmd.Context())
+			return runResidentService(cmd.Context(), build)
 		},
 	}
 	return cmd
@@ -34,11 +35,11 @@ type residentProduct struct{}
 func (residentProduct) Drain(context.Context) error { return nil }
 func (residentProduct) Close(context.Context) error { return nil }
 
-func runResidentService(ctx context.Context) error {
+func runResidentService(ctx context.Context, build string) error {
 	if err := state.Initialize(ctx); err != nil {
 		return err
 	}
-	program, err := daemonkit.Stable()
+	program, err := daemonkit.Stable(dkversion.Running(build))
 	if err != nil {
 		return err
 	}
