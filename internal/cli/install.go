@@ -1,16 +1,20 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/yasyf/daemonkit"
 
 	"github.com/yasyf/synckit/codec"
+	"github.com/yasyf/synckit/helperruntime"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/manifest"
 
@@ -28,6 +32,8 @@ const manifestsDirName = "manifests"
 // it instead of mid-flight.
 const watchDebounce = 15 * time.Second
 
+const ensureBudget = 30 * time.Second
+
 // reposyncManifest is the declarative registration synckitd reads to drive reposync:
 // the watch debounce and resident revisioned service it uses to reach reposync's
 // typed sync contract.
@@ -43,7 +49,7 @@ func reposyncManifest() manifest.Manifest {
 			Kind:              "resident",
 			SchemaFingerprint: transfer.Fingerprint,
 		},
-		Helper: &manifest.HelperSpec{Command: "rpc-serve-v1", SessionType: manifest.SessionTypeBackground},
+		Helper: &manifest.HelperSpec{Command: rpcServeCommand, SessionType: manifest.SessionTypeBackground},
 	}
 }
 
@@ -57,10 +63,10 @@ func manifestPath() (string, error) {
 	return filepath.Join(dir, manifestsDirName, state.ToolName+".json"), nil
 }
 
-func newInstallCmd() *cobra.Command {
+func newInstallCmd(build string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Register reposync's synckitd manifest so the daemon drives its sync.",
+		Short: "Register reposync's synckitd manifest and ensure its resident helper.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := state.Initialize(cmd.Context()); err != nil {
@@ -85,6 +91,11 @@ func newInstallCmd() *cobra.Command {
 				return fmt.Errorf("write manifest %s: %w", path, err)
 			}
 			cmd.Printf("registered reposync manifest %s\n", path)
+			ensured, err := ensureHelper(cmd.Context(), build)
+			if err != nil {
+				return fmt.Errorf("ensure the resident helper: %w", err)
+			}
+			cmd.Printf("resident helper serving (%s)\n", ensured.Did)
 			return nil
 		},
 	}
@@ -109,4 +120,32 @@ func newUninstallCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func ensureHelper(ctx context.Context, build string) (daemonkit.Ensured, error) {
+	alias, err := exec.LookPath(state.ToolName)
+	if err != nil {
+		return daemonkit.Ensured{}, fmt.Errorf("resolve %s on PATH: %w", state.ToolName, err)
+	}
+	alias, err = filepath.Abs(alias)
+	if err != nil {
+		return daemonkit.Ensured{}, fmt.Errorf("resolve %s on PATH: %w", state.ToolName, err)
+	}
+	program, err := daemonkit.Installed(alias, build)
+	if err != nil {
+		return daemonkit.Ensured{}, err
+	}
+	spec, err := helperruntime.Spec(state.ToolName, program, 0)
+	if err != nil {
+		return daemonkit.Ensured{}, err
+	}
+	spec.Args = []string{rpcServeCommand}
+	client, err := daemonkit.Open(spec)
+	if err != nil {
+		return daemonkit.Ensured{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, ensureBudget)
+	defer cancel()
+	defer func() { _ = client.Close(ctx) }()
+	return client.Ensure(ctx)
 }

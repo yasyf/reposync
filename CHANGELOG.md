@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`reposync install` ensures the resident sync service through daemonkit.**
+  After registering the manifest, install runs `Ensure` with
+  `daemonkit.Installed`: the program is reposync's `PATH` link, such as
+  `/opt/homebrew/bin/reposync`, and the build is this binary's version. synckitd
+  no longer writes the service's LaunchAgent, and its reconcile tick drains a
+  service serving another build, so launchd relaunches it on the upgraded one.
+- `reposync --version` prints the same `version.Running` build the service
+  publishes, so a dev build compares equal to itself.
 - Any process running as the same user can now connect to the resident sync
   service. reposync builds against the daemonkit release that drops peer
   verification, and it names its build by version instead of hashing the
   executable.
-- Builds against daemonkit 0.35.1 and synckit 0.47.0 with Go 1.26.10.
+- Builds against daemonkit 0.36.0 and synckit 0.50.0 with Go 1.26.10.
 - Each repo's synckit watch now declares only its trunk's remote-tracking
   ref and reflog, `.git/refs/remotes/origin/<trunk>` and
   `.git/logs/refs/remotes/origin/<trunk>`, instead of both origin
