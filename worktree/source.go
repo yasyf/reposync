@@ -237,7 +237,7 @@ func (s source) readBlobs(ctx context.Context, oids []string, each func(oid stri
 	if err != nil {
 		cancel()
 		_ = pr.CloseWithError(err)
-		<-done
+		<-done //nolint:errcheck // the batch already failed, so the canceled run's error adds nothing
 		return err
 	}
 	return <-done

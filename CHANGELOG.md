@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Any process running as the same user can now connect to the resident sync
+  service. reposync builds against the daemonkit release that drops peer
+  verification, and it names its build by version instead of hashing the
+  executable.
+- Builds against daemonkit 0.35.1 and synckit 0.47.0 with Go 1.26.10.
 - Each repo's synckit watch now declares only its trunk's remote-tracking
   ref and reflog, `.git/refs/remotes/origin/<trunk>` and
   `.git/logs/refs/remotes/origin/<trunk>`, instead of both origin
