@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-10-28
+
+### Changed
+- **The resident sync service reloads on the next reposync command.** Every
+  command except `install`, `uninstall`, `rpc-serve-v1`, help, and completion
+  first runs daemonkit's `Ensure` with `daemonkit.Installed(<reposync on
+  PATH>, version)`, as cookiesync does. A service an upgrade left on the old
+  build is replaced before the command runs, not only on the next
+  `reposync install`.
+
 ## [0.31.1] - 2026-10-28
 
 ### Changed
@@ -381,7 +391,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.1...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.2...HEAD
+[0.31.2]: https://github.com/yasyf/reposync/compare/v0.31.1...v0.31.2
 [0.31.1]: https://github.com/yasyf/reposync/compare/v0.31.0...v0.31.1
 [0.31.0]: https://github.com/yasyf/reposync/compare/v0.30.3...v0.31.0
 [0.30.1]: https://github.com/yasyf/reposync/compare/v0.30.0...v0.30.1
