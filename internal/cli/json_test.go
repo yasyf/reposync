@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yasyf/daemonkit"
 	"github.com/yasyf/synckit/cregistry"
 	"github.com/yasyf/synckit/hostregistry"
 	"github.com/yasyf/synckit/rpc"
@@ -44,6 +45,9 @@ func seedRegistry(t *testing.T, self string, hosts ...string) {
 // separately so the --json contract (JSON only on stdout) can be asserted.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	previous := ensureHelper
+	ensureHelper = func(context.Context, string) (daemonkit.Ensured, error) { return daemonkit.Ensured{}, nil }
+	t.Cleanup(func() { ensureHelper = previous })
 	var out, errBuf bytes.Buffer
 	root := newRoot("test")
 	root.SetArgs(args)

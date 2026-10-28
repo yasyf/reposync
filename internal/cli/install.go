@@ -122,7 +122,9 @@ func newUninstallCmd() *cobra.Command {
 	return cmd
 }
 
-func ensureHelper(ctx context.Context, build string) (daemonkit.Ensured, error) {
+var ensureHelper = ensureResidentHelper
+
+func ensureResidentHelper(ctx context.Context, build string) (daemonkit.Ensured, error) {
 	alias, err := exec.LookPath(state.ToolName)
 	if err != nil {
 		return daemonkit.Ensured{}, fmt.Errorf("resolve %s on PATH: %w", state.ToolName, err)
