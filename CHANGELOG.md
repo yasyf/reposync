@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.3] - 2026-10-28
+
+### Fixed
+- The Homebrew cask strips `com.apple.quarantine` from the installed binary,
+  as cci's and cookiesync's casks do. A quarantined binary that launchd starts
+  as the resident sync service was held in `_dyld_start` waiting on a Gatekeeper
+  assessment, so it never bound its socket and every reposync command timed out
+  ensuring it after a `brew upgrade` to 0.31.2.
+
 ## [0.31.2] - 2026-10-28
 
 ### Changed
@@ -391,7 +400,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.2...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.3...HEAD
+[0.31.3]: https://github.com/yasyf/reposync/compare/v0.31.2...v0.31.3
 [0.31.2]: https://github.com/yasyf/reposync/compare/v0.31.1...v0.31.2
 [0.31.1]: https://github.com/yasyf/reposync/compare/v0.31.0...v0.31.1
 [0.31.0]: https://github.com/yasyf/reposync/compare/v0.30.3...v0.31.0

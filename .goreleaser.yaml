@@ -51,7 +51,11 @@ changelog:
       - "^chore:"
 
 homebrew_casks:
-  - repository:
+  - hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/reposync"]
+    repository:
       owner: yasyf
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
