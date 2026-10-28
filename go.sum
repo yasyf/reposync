@@ -82,8 +82,8 @@ github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavM
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
 github.com/yasyf/daemonkit v0.36.0 h1:2SOhdDB/bxNbJDPsYEWRhQ9fqtxFSNgUatngrM0BPkY=
 github.com/yasyf/daemonkit v0.36.0/go.mod h1:hEUZvGh+jCBOJmltSQa3QZR0kqV6G/ApJoViU1aAMps=
-github.com/yasyf/synckit v0.50.0 h1:sXm4vOEb7AtEDei2rcZV6JXHz8U75nksyMNP+oxpX6k=
-github.com/yasyf/synckit v0.50.0/go.mod h1:uJApRIVZZ0WeXPZ1Bir2rPx5cJeW7AoUr12fcMo7W2M=
+github.com/yasyf/synckit v0.51.0 h1:wRDYA+atoue/rrft+Xn9fyl8NvrT4b2GPxiZYp12flg=
+github.com/yasyf/synckit v0.51.0/go.mod h1:uJApRIVZZ0WeXPZ1Bir2rPx5cJeW7AoUr12fcMo7W2M=
 go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d h1:jtJma62tbqLibJ5sFQz8bKtEM8rJBtfilJ2qTU199MI=
 golang.org/x/exp v0.0.0-20231006140011-7918f672742d/go.mod h1:ldy0pHrwJyGW56pPQzzkH36rKxoZW1tw7ZJpeKx+hdo=

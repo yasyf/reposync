@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-10-28
+
+### Changed
+- After a `brew upgrade`, the resident sync service keeps its old build until
+  the next `reposync install` Ensures it against the new version. synckitd's
+  reconcile tick no longer drains it, as 0.31.0's notes said it did
+  (yasyf/synckit#25).
+- Builds against synckit 0.51.0.
+
 ## [0.31.0] - 2026-10-28
 
 ### Changed
@@ -372,7 +381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.1...HEAD
+[0.31.1]: https://github.com/yasyf/reposync/compare/v0.31.0...v0.31.1
 [0.31.0]: https://github.com/yasyf/reposync/compare/v0.30.3...v0.31.0
 [0.30.1]: https://github.com/yasyf/reposync/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/yasyf/reposync/compare/v0.29.0...v0.30.0
