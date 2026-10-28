@@ -237,7 +237,7 @@ func (s source) readBlobs(ctx context.Context, oids []string, each func(oid stri
 	if err != nil {
 		cancel()
 		_ = pr.CloseWithError(err)
-		<-done
+		_ = <-done
 		return err
 	}
 	return <-done
