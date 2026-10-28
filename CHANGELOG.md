@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-28
+
 ### Changed
 - **`reposync install` ensures the resident sync service through daemonkit.**
   After registering the manifest, install runs `Ensure` with
@@ -370,7 +372,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   launchd. `host ls --json` shims to `synckitd host ls`; the peer mesh is read from the
   shared `~/.config/synckit`.
 
-[Unreleased]: https://github.com/yasyf/reposync/compare/v0.30.1...HEAD
+[Unreleased]: https://github.com/yasyf/reposync/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/yasyf/reposync/compare/v0.30.3...v0.31.0
 [0.30.1]: https://github.com/yasyf/reposync/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/yasyf/reposync/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/yasyf/reposync/compare/v0.28.0...v0.29.0

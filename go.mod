@@ -10,7 +10,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/yasyf/daemonkit v0.36.0
-	github.com/yasyf/synckit v0.47.0
+	github.com/yasyf/synckit v0.50.0
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.39.0
 )
