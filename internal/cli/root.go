@@ -37,15 +37,6 @@ func newRoot(version string) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.NoArgs,
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			if !ensuresHelper(cmd) {
-				return nil
-			}
-			if _, err := ensureHelper(cmd.Context(), version); err != nil {
-				return fmt.Errorf("ensure the resident helper: %w", err)
-			}
-			return nil
-		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !isInteractive() {
 				return cmd.Help()
@@ -64,16 +55,4 @@ func newRoot(version string) *cobra.Command {
 		newTUICmd(version),
 	)
 	return root
-}
-
-func ensuresHelper(cmd *cobra.Command) bool {
-	for cmd.HasParent() && cmd.Parent().HasParent() {
-		cmd = cmd.Parent()
-	}
-	switch cmd.Name() {
-	case rpcServeCommand, "install", "uninstall", "help", "completion",
-		cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
-		return false
-	}
-	return true
 }
