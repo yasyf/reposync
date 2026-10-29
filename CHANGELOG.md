@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Ordinary commands no longer touch the resident sync service.** 0.31.2's
+  ensure before every command is reverted: no command other than
+  `reposync install` installs, starts, reloads, or re-enables the service, so
+  an operator's `launchctl disable` stays in force. Run `reposync install` on
+  first setup and after an upgrade to load the new build.
+
 ## [0.31.3] - 2026-10-28
 
 ### Fixed
