@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 # PRs only: cancelling in-progress runs on main leaves landed commits with no
 # CI verdict.
