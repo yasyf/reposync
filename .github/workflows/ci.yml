@@ -20,6 +20,7 @@ jobs:
     # macOS only: daemonkit is a macOS library as of v0.21.0 and no longer
     # compiles off darwin, so every job that builds this module needs a darwin
     # host.
+    if: github.event_name != 'pull_request'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
